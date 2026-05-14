@@ -38,6 +38,33 @@ func TestBuildHello(t *testing.T) {
 	}
 }
 
+func TestBuildReturnsResolvedRelativeOutputPath(t *testing.T) {
+	repoRoot := resolveRepoRoot(".")
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "hello.efi")
+	relOut, err := filepath.Rel(repoRoot, out)
+	if err != nil {
+		t.Fatalf("relative output path: %v", err)
+	}
+
+	result, err := Build(BuildOptions{
+		Mode:       ModeDev,
+		RootPath:   "examples/hello/main.wrela",
+		OutputPath: relOut,
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("Build hello: %v", err)
+	}
+	want := filepath.Clean(filepath.Join(repoRoot, relOut))
+	if result.OutputPath != want {
+		t.Fatalf("OutputPath = %q, want %q", result.OutputPath, want)
+	}
+	if _, err := os.Stat(result.OutputPath); err != nil {
+		t.Fatalf("stat returned output path: %v", err)
+	}
+}
+
 func TestBuildHelloImageContainsRuntimeSignals(t *testing.T) {
 	tmp := t.TempDir()
 	out := filepath.Join(tmp, "hello.efi")

@@ -5,6 +5,7 @@ type Reg struct {
 	Width   int
 	Low3    int
 	High    bool
+	REX     bool
 	Control bool
 	Segment bool
 }
@@ -12,12 +13,13 @@ type Reg struct {
 var regs = map[string]Reg{}
 
 func init() {
-	add := func(name string, width, low3 int, high, control bool) {
+	add := func(name string, width, low3 int, high, rex, control bool) {
 		regs[name] = Reg{
 			Name:    name,
 			Width:   width,
 			Low3:    low3,
 			High:    high,
+			REX:     rex,
 			Control: control,
 		}
 	}
@@ -25,61 +27,61 @@ func init() {
 		regs[name] = Reg{Name: name, Width: 16, Low3: low3, Segment: true}
 	}
 
-	add("rax", 64, 0, false, false)
-	add("eax", 32, 0, false, false)
-	add("ax", 16, 0, false, false)
-	add("al", 8, 0, false, false)
-	add("ah", 8, 4, false, false)
+	add("rax", 64, 0, false, false, false)
+	add("eax", 32, 0, false, false, false)
+	add("ax", 16, 0, false, false, false)
+	add("al", 8, 0, false, false, false)
+	add("ah", 8, 4, false, false, false)
 
-	add("rcx", 64, 1, false, false)
-	add("ecx", 32, 1, false, false)
-	add("cx", 16, 1, false, false)
-	add("cl", 8, 1, false, false)
-	add("ch", 8, 5, false, false)
+	add("rcx", 64, 1, false, false, false)
+	add("ecx", 32, 1, false, false, false)
+	add("cx", 16, 1, false, false, false)
+	add("cl", 8, 1, false, false, false)
+	add("ch", 8, 5, false, false, false)
 
-	add("rdx", 64, 2, false, false)
-	add("edx", 32, 2, false, false)
-	add("dx", 16, 2, false, false)
-	add("dl", 8, 2, false, false)
-	add("dh", 8, 6, false, false)
+	add("rdx", 64, 2, false, false, false)
+	add("edx", 32, 2, false, false, false)
+	add("dx", 16, 2, false, false, false)
+	add("dl", 8, 2, false, false, false)
+	add("dh", 8, 6, false, false, false)
 
-	add("rbx", 64, 3, false, false)
-	add("ebx", 32, 3, false, false)
-	add("bx", 16, 3, false, false)
-	add("bl", 8, 3, false, false)
+	add("rbx", 64, 3, false, false, false)
+	add("ebx", 32, 3, false, false, false)
+	add("bx", 16, 3, false, false, false)
+	add("bl", 8, 3, false, false, false)
 
-	add("rsp", 64, 4, false, false)
-	add("esp", 32, 4, false, false)
-	add("sp", 16, 4, false, false)
-	add("spl", 8, 4, true, false)
+	add("rsp", 64, 4, false, false, false)
+	add("esp", 32, 4, false, false, false)
+	add("sp", 16, 4, false, false, false)
+	add("spl", 8, 4, false, true, false)
 
-	add("rbp", 64, 5, false, false)
-	add("ebp", 32, 5, false, false)
-	add("bp", 16, 5, false, false)
-	add("bpl", 8, 5, true, false)
+	add("rbp", 64, 5, false, false, false)
+	add("ebp", 32, 5, false, false, false)
+	add("bp", 16, 5, false, false, false)
+	add("bpl", 8, 5, false, true, false)
 
-	add("rsi", 64, 6, false, false)
-	add("esi", 32, 6, false, false)
-	add("si", 16, 6, false, false)
-	add("sil", 8, 6, true, false)
+	add("rsi", 64, 6, false, false, false)
+	add("esi", 32, 6, false, false, false)
+	add("si", 16, 6, false, false, false)
+	add("sil", 8, 6, false, true, false)
 
-	add("rdi", 64, 7, false, false)
-	add("edi", 32, 7, false, false)
-	add("di", 16, 7, false, false)
-	add("dil", 8, 7, true, false)
+	add("rdi", 64, 7, false, false, false)
+	add("edi", 32, 7, false, false, false)
+	add("di", 16, 7, false, false, false)
+	add("dil", 8, 7, false, true, false)
 
 	for _, w := range []int{64, 32, 16, 8} {
-		add("r8"+suffixFromWidth(w), w, 0, true, false)
-		add("r9"+suffixFromWidth(w), w, 1, true, false)
-		add("r10"+suffixFromWidth(w), w, 2, true, false)
-		add("r11"+suffixFromWidth(w), w, 3, true, false)
-		add("r12"+suffixFromWidth(w), w, 4, true, false)
-		add("r13"+suffixFromWidth(w), w, 5, true, false)
-		add("r14"+suffixFromWidth(w), w, 6, true, false)
-		add("r15"+suffixFromWidth(w), w, 7, true, false)
+		add("r8"+suffixFromWidth(w), w, 0, true, false, false)
+		add("r9"+suffixFromWidth(w), w, 1, true, false, false)
+		add("r10"+suffixFromWidth(w), w, 2, true, false, false)
+		add("r11"+suffixFromWidth(w), w, 3, true, false, false)
+		add("r12"+suffixFromWidth(w), w, 4, true, false, false)
+		add("r13"+suffixFromWidth(w), w, 5, true, false, false)
+		add("r14"+suffixFromWidth(w), w, 6, true, false, false)
+		add("r15"+suffixFromWidth(w), w, 7, true, false, false)
 	}
 
-	add("cr3", 64, 3, false, true)
+	add("cr3", 64, 3, false, false, true)
 	addSegment("es", 0)
 	addSegment("ss", 2)
 	addSegment("ds", 3)

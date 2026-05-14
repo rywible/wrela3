@@ -194,7 +194,7 @@ func parseOperand(raw string, params map[string]struct{}, branchTarget bool) (Op
 	}
 
 	if strings.HasPrefix(lower, "[") && strings.HasSuffix(lower, "]") {
-		inside := strings.TrimSpace(lower[1 : len(lower)-1])
+		inside := strings.TrimSpace(raw[1 : len(raw)-1])
 		mem, ok := parseMemOperand(inside)
 		if !ok {
 			return nil, false
@@ -221,16 +221,16 @@ func parseOperand(raw string, params map[string]struct{}, branchTarget bool) (Op
 	return nil, false
 }
 
-func parseMemOperand(text string) (MemOperand, bool) {
+func parseMemOperand(text string) (Operand, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return MemOperand{}, false
+		return nil, false
 	}
 
 	if !strings.ContainsAny(text, "+-") {
-		r, ok := Lookup(text)
+		r, ok := Lookup(strings.ToLower(text))
 		if !ok {
-			return MemOperand{}, false
+			return nil, false
 		}
 		return MemOperand{Base: r}, true
 	}
@@ -245,21 +245,53 @@ func parseMemOperand(text string) (MemOperand, bool) {
 		}
 	}
 	if baseText == "" {
-		return MemOperand{}, false
+		return nil, false
 	}
-	base, ok := Lookup(strings.TrimSpace(baseText))
+	base, ok := Lookup(strings.ToLower(strings.TrimSpace(baseText)))
 	if !ok {
-		return MemOperand{}, false
+		return nil, false
 	}
 	delta, err := strconv.ParseInt(strings.TrimSpace(dispText), 0, 64)
 	if err != nil {
 		compact := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(dispText), " ", ""), "\t", "")
 		delta, err = strconv.ParseInt(compact, 0, 64)
+		if err != nil {
+			if fieldRef, ok := parseFieldOffsetReference(compact); ok {
+				fieldRef.Base = base
+				return fieldRef, true
+			}
+		}
 	}
 	if err != nil {
-		return MemOperand{}, false
+		return nil, false
 	}
 	return MemOperand{Base: base, Disp: delta}, true
+}
+
+func parseFieldOffsetReference(text string) (FieldOffsetMemOperand, bool) {
+	if strings.HasPrefix(text, "+") {
+		text = text[1:]
+	}
+	dot := strings.LastIndex(text, ".")
+	if dot <= 0 || dot == len(text)-1 {
+		return FieldOffsetMemOperand{}, false
+	}
+	typeName := text[:dot]
+	fieldName := text[dot+1:]
+	if !isDottedIdentifier(typeName) || !isIdentifier(fieldName) {
+		return FieldOffsetMemOperand{}, false
+	}
+	return FieldOffsetMemOperand{Type: typeName, Field: fieldName}, true
+}
+
+func isDottedIdentifier(s string) bool {
+	parts := strings.Split(s, ".")
+	for _, part := range parts {
+		if !isIdentifier(part) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseIntLiteral(raw string) (int64, error) {

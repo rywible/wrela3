@@ -361,12 +361,10 @@ func (p *Parser) parsePhaseDecl() (*ast.PhaseDecl, []diag.Diagnostic) {
 	if !p.match(lex.Arrow) {
 		return nil, p.err(p.peek(), diag.PAR0001, "expected '->' in phase declaration")
 	}
-	retTok := p.peek()
-	if retTok.Kind != lex.Identifier && retTok.Kind != lex.KeywordNever {
-		return nil, p.err(p.peek(), diag.PAR0001, "expected phase return type")
+	ret, ds := p.parseTypeName()
+	if len(ds) != 0 {
+		return nil, ds
 	}
-	ret := retTok.Text
-	p.next()
 
 	body, ds := p.parseBlockStmts()
 	if len(ds) != 0 {
@@ -398,7 +396,7 @@ func (p *Parser) parseCompositeMembers() ([]ast.Field, []ast.MethodDecl, source.
 		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
 			break
 		}
-		if prevEnd >= 0 && !prevHasSeparator && !sawSep && p.lineOf(prevEnd) == p.lineOf(p.peek().Start) {
+		if prevEnd >= 0 && !prevHasSeparator && !sawSep && p.previous().Kind != lex.RBrace && p.lineOf(prevEnd) == p.lineOf(p.peek().Start) {
 			return nil, nil, source.Span{}, []diag.Diagnostic{{
 				Phase:    "parse",
 				Code:     diag.PAR0002,
@@ -528,12 +526,11 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 
 	ret := ""
 	if p.match(lex.Arrow) {
-		retType := p.peek()
-		if retType.Kind != lex.Identifier && retType.Kind != lex.KeywordNever {
-			return ast.MethodDecl{}, p.err(retType, diag.PAR0001, "expected return type")
+		retType, ds := p.parseTypeName()
+		if len(ds) != 0 {
+			return ast.MethodDecl{}, ds
 		}
-		p.next()
-		ret = retType.Text
+		ret = retType
 	}
 
 	if isAsm {
@@ -791,6 +788,13 @@ func (p *Parser) parseDottedName() (string, []diag.Diagnostic) {
 		parts = append(parts, part.Text)
 	}
 	return strings.Join(parts, "."), nil
+}
+
+func (p *Parser) parseTypeName() (string, []diag.Diagnostic) {
+	if p.peek().Kind == lex.KeywordNever {
+		return p.next().Text, nil
+	}
+	return p.parseDottedName()
 }
 
 func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {

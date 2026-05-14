@@ -200,6 +200,18 @@ executor HelloWorld {
 	}
 }
 
+func TestAdjacentMethodsMayShareLineWhenBraceSeparates(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `module m
+class C { fn a() {} fn b() {} }`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	cl := mod.Decls[0].(*ast.ClassDecl)
+	if got, want := len(cl.Methods), 2; got != want {
+		t.Fatalf("methods = %d, want %d", got, want)
+	}
+}
+
 func TestParseGraphSortsDiagnostics(t *testing.T) {
 	f1 := source.NewFile(1, "z.wrela", "module z\nunique executor Exe {}")
 	f2 := source.NewFile(2, "a.wrela", "module a\nfn bad() {}")

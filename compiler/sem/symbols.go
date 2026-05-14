@@ -400,7 +400,7 @@ func buildMethods(idx *Index, moduleName string, methods []ast.MethodDecl) []Met
 	for _, m := range methods {
 		out = append(out, Method{
 			Name:    m.Name,
-			Params:  buildFields(idx, moduleName, convertParams(moduleName, m.Params)),
+			Params:  buildFields(idx, moduleName, convertParams(m.Params)),
 			Return:  idx.lookupType(moduleName, m.Return),
 			IsAsm:   m.IsAsm,
 			IsStart: m.IsStart,
@@ -412,8 +412,7 @@ func buildMethods(idx *Index, moduleName string, methods []ast.MethodDecl) []Met
 	return out
 }
 
-func convertParams(moduleName string, params []ast.Param) []ast.Field {
-	_ = moduleName
+func convertParams(params []ast.Param) []ast.Field {
 	out := make([]ast.Field, 0, len(params))
 	for _, p := range params {
 		out = append(out, ast.Field{Name: p.Name, Type: p.Type, Span: p.Span})

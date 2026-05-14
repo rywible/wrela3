@@ -59,14 +59,19 @@ func All(src string) ([]Token, []diag.Diagnostic) {
 			continue
 		}
 
-		if unicode.IsDigit(rune(ch)) {
+		r, width := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && width == 0 {
+			break
+		}
+
+		if isDigitRune(r) {
 			tok, next := lexInt(src, i)
 			toks = append(toks, tok)
 			i = next
 			continue
 		}
 
-		if isIdentStart(ch) {
+		if isIdentStartRune(r) {
 			tok, next := lexIdent(src, i)
 			if kind, ok := keywordKinds[tok.Text]; ok {
 				tok.Kind = kind
@@ -81,10 +86,10 @@ func All(src string) ([]Token, []diag.Diagnostic) {
 			Code:     BadStringDiagnosticCode,
 			FilePath: "",
 			Start:    i,
-			End:      i + 1,
+			End:      i + width,
 			Message:  "invalid character",
 		})
-		i++
+		i += width
 	}
 
 	toks = append(toks, Token{Kind: EOF, Text: "", Start: len(src), End: len(src)})
@@ -112,8 +117,15 @@ func twoCharOperatorAt(s string) (Kind, bool) {
 
 func lexIdent(src string, i int) (Token, int) {
 	start := i
-	for i < len(src) && isIdentContinue(src[i]) {
-		i++
+	for i < len(src) {
+		r, width := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && width == 0 {
+			break
+		}
+		if !isIdentContinueRune(r) {
+			break
+		}
+		i += width
 	}
 	return Token{Kind: Identifier, Text: src[start:i], Start: start, End: i}, i
 }
@@ -126,6 +138,18 @@ func isIdentContinue(ch byte) bool {
 	return isIdentStart(ch) || unicode.IsDigit(rune(ch))
 }
 
+func isIdentStartRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r)
+}
+
+func isIdentContinueRune(r rune) bool {
+	return isIdentStartRune(r) || unicode.IsDigit(r)
+}
+
+func isDigitRune(r rune) bool {
+	return unicode.IsDigit(r)
+}
+
 func lexInt(src string, i int) (Token, int) {
 	start := i
 	if strings.HasPrefix(src[i:], "0x") || strings.HasPrefix(src[i:], "0X") {
@@ -135,8 +159,15 @@ func lexInt(src string, i int) (Token, int) {
 		}
 		return Token{Kind: Integer, Text: src[start:i], Start: start, End: i}, i
 	}
-	for i < len(src) && unicode.IsDigit(rune(src[i])) {
-		i++
+	for i < len(src) {
+		r, width := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && width == 0 {
+			break
+		}
+		if !isDigitRune(r) {
+			break
+		}
+		i += width
 	}
 	return Token{Kind: Integer, Text: src[start:i], Start: start, End: i}, i
 }

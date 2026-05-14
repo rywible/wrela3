@@ -48,3 +48,12 @@ type MemOperand struct {
 }
 
 func (MemOperand) isOperand() {}
+
+type FieldOffsetMemOperand struct {
+	Base  Reg
+	Type  string
+	Field string
+	Width int
+}
+
+func (FieldOffsetMemOperand) isOperand() {}

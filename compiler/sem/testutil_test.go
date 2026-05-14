@@ -2,6 +2,7 @@ package sem
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -13,6 +14,15 @@ import (
 func hasCode(ds []diag.Diagnostic, code string) bool {
 	for _, d := range ds {
 		if d.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMessage(ds []diag.Diagnostic, code, message string) bool {
+	for _, d := range ds {
+		if d.Code == code && strings.Contains(d.Message, message) {
 			return true
 		}
 	}

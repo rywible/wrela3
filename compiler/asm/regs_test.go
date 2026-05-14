@@ -8,12 +8,14 @@ func TestLookupRegister(t *testing.T) {
 		width   int
 		low3    int
 		high    bool
+		rex     bool
 		control bool
 	}{
 		{name: "rax", width: 64, low3: 0, high: false, control: false},
 		{name: "al", width: 8, low3: 0, high: false, control: false},
 		{name: "r8", width: 64, low3: 0, high: true, control: false},
 		{name: "r15b", width: 8, low3: 7, high: true, control: false},
+		{name: "sil", width: 8, low3: 6, high: false, rex: true, control: false},
 		{name: "cr3", width: 64, low3: 3, high: false, control: true},
 	}
 
@@ -30,6 +32,9 @@ func TestLookupRegister(t *testing.T) {
 		}
 		if r.High != c.high {
 			t.Fatalf("%s high = %t, want %t", c.name, r.High, c.high)
+		}
+		if r.REX != c.rex {
+			t.Fatalf("%s rex = %t, want %t", c.name, r.REX, c.rex)
 		}
 		if r.Control != c.control {
 			t.Fatalf("%s control = %t, want %t", c.name, r.Control, c.control)

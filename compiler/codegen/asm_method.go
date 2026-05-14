@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -133,6 +134,17 @@ func lowerBoundOperand(method ir.AsmMethod, op asm.Operand, paramLoc map[string]
 			width = 8
 		}
 		return asm.MemOperand{Base: asm.MustLookup("rdi"), Disp: int64(offset), Width: width}, nil
+	case asm.FieldOffsetMemOperand:
+		offsets := method.TypeFieldOffsets[strings.ToLower(o.Type)]
+		offset, ok := offsets[strings.ToLower(o.Field)]
+		if !ok {
+			return nil, &diag.Diagnostic{
+				Phase:   "asm",
+				Code:    diag.ASM0002,
+				Message: fmt.Sprintf("unknown field offset %s.%s in asm method %s", o.Type, o.Field, method.Symbol),
+			}
+		}
+		return asm.MemOperand{Base: o.Base, Disp: int64(offset), Width: o.Width}, nil
 	case asm.LabelRef, asm.RegOperand, asm.MemOperand, asm.ImmOperand:
 		return o, nil
 	default:

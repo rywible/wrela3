@@ -11,7 +11,6 @@ import (
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/ir"
-	"github.com/ryanwible/wrela3/compiler/layout"
 	"github.com/ryanwible/wrela3/compiler/parse"
 	"github.com/ryanwible/wrela3/compiler/sem"
 	"github.com/ryanwible/wrela3/compiler/source"
@@ -56,6 +55,32 @@ func TestUEFIAmd64BootServiceAsmMethodCodegen(t *testing.T) {
 	}
 	if !bytes.Contains(exitUnit.Bytes, []byte{0x49, 0x89, 0x03}) {
 		t.Fatalf("exit_boot_services must store firmware status into hidden UefiStatus return slot: %x", exitUnit.Bytes)
+	}
+}
+
+func TestUEFISourceDeclaredFirmwareTableOffsets(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	program, ds := ir.Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("Lower() diagnostics: %#v", ds)
+	}
+
+	system := program.Types["UefiSystemTable"]
+	if system.Fields["boot_services"].Offset != 96 ||
+		system.Fields["number_of_table_entries"].Offset != 104 ||
+		system.Fields["configuration_tables"].Offset != 112 {
+		t.Fatalf("UefiSystemTable layout = %#v, want BootServices at +96", system)
+	}
+	boot := program.Types["UefiBootServices"]
+	if boot.Fields["get_memory_map"].Offset != 56 ||
+		boot.Fields["exit_boot_services"].Offset != 232 {
+		t.Fatalf("UefiBootServices layout = %#v, want GetMemoryMap +56 and ExitBootServices +232", boot)
+	}
+	result := program.Types["UefiMemoryMapResult"]
+	if result.StorageSize < 80 ||
+		result.Fields["status"].StorageOffset != 24 ||
+		result.Fields["memory_map"].StorageOffset != 32 {
+		t.Fatalf("UefiMemoryMapResult storage layout = %#v, want nested backing through +79", result)
 	}
 }
 
@@ -143,6 +168,9 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 	}
 	for _, want := range []string{
 		"descriptor_loop",
+		"pdpt_slot_loop",
+		"zero_new_pd_loop",
+		"pdpt_slot_after_alloc_loop",
 		"map_descriptor_pages",
 		"advance_descriptor",
 	} {
@@ -249,67 +277,18 @@ func parseCheckedUEFIModules(t *testing.T) *sem.CheckedProgram {
 
 func asmMethodFromSem(t *testing.T, checked *sem.CheckedProgram, moduleName, typeName, methodName string) ir.AsmMethod {
 	t.Helper()
-	module, ok := checked.Index.Lookup(moduleName, typeName)
-	if !ok {
-		t.Fatalf("missing %s.%s", moduleName, typeName)
+	program, ds := ir.Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("Lower() diagnostics: %#v", ds)
 	}
-	var target *sem.Method
-	for i := range module.Methods {
-		if module.Methods[i].Name == methodName {
-			target = &module.Methods[i]
-			break
+	symbol := asmMethodSymbol(moduleName, typeName, methodName)
+	for _, method := range program.AsmMethods {
+		if method.Symbol == symbol {
+			return method
 		}
 	}
-	if target == nil {
-		t.Fatalf("missing method %s in %s.%s", methodName, moduleName, typeName)
-	}
-	if !target.IsAsm || target.AsmBody == nil {
-		t.Fatalf("%s.%s.%s must be asm", moduleName, typeName, methodName)
-	}
-	offsets, widths := asmReceiverLayout(module)
-	params := make([]ir.Value, 0, len(target.Params))
-	for _, p := range target.Params {
-		if p.Name == "self" {
-			continue
-		}
-		returnType := "void"
-		if p.Type != nil {
-			returnType = p.Type.Name
-		}
-		params = append(params, &ir.Param{Symbol: p.Name, Type: ir.Type{Name: returnType}})
-	}
-	returnName := "void"
-	if target.Return != nil {
-		returnName = target.Return.Name
-	}
-	return ir.AsmMethod{
-		Symbol:               asmMethodSymbol(moduleName, typeName, methodName),
-		ReceiverType:         typeName,
-		Params:               params,
-		Return:               ir.Type{Name: returnName},
-		Body:                 target.AsmBody.Source,
-		ReceiverFieldOffsets: offsets,
-		ReceiverFieldWidths:  widths,
-	}
-}
-
-func asmReceiverLayout(typ *sem.Type) (map[string]int, map[string]int) {
-	offsets := map[string]int{}
-	widths := map[string]int{}
-	fields := make([]layout.Field, 0, len(typ.Fields))
-	for _, field := range typ.Fields {
-		fields = append(fields, layout.Field{Name: field.Name, Type: field.Type.Name})
-	}
-	record, err := layout.Compute(fields)
-	if err != nil {
-		return offsets, widths
-	}
-	for _, field := range typ.Fields {
-		layoutField := record.Fields[field.Name]
-		offsets[field.Name] = layoutField.Offset
-		widths[field.Name] = layoutField.Size * 8
-	}
-	return offsets, widths
+	t.Fatalf("missing lowered asm method %s", symbol)
+	return ir.AsmMethod{}
 }
 
 func asmMethodSymbol(moduleName, typeName, methodName string) string {

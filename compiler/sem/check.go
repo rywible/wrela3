@@ -18,12 +18,14 @@ const (
 )
 
 type Scope struct {
-	parent *Scope
-	types  map[string]*Type
+	parent           *Scope
+	types            map[string]*Type
+	driverPathKeys   map[string]string
+	driverPathFields map[string]map[string]string
 }
 
 func NewScope(parent *Scope) *Scope {
-	return &Scope{parent: parent, types: map[string]*Type{}}
+	return &Scope{parent: parent, types: map[string]*Type{}, driverPathKeys: map[string]string{}, driverPathFields: map[string]map[string]string{}}
 }
 
 func (s *Scope) Define(name string, typ *Type) {
@@ -46,6 +48,69 @@ func (s *Scope) Lookup(name string) (*Type, bool) {
 	return nil, false
 }
 
+func (s *Scope) DefineDriverPath(name, key string) {
+	if s == nil || key == "" {
+		return
+	}
+	s.driverPathKeys[name] = key
+}
+
+func (s *Scope) LookupDriverPath(name string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	if key := s.driverPathKeys[name]; key != "" {
+		return key, true
+	}
+	if s.parent != nil {
+		return s.parent.LookupDriverPath(name)
+	}
+	return "", false
+}
+
+func (s *Scope) DefineDriverPathFields(name string, fields map[string]string) {
+	if s == nil || len(fields) == 0 {
+		return
+	}
+	copied := map[string]string{}
+	for field, key := range fields {
+		if key != "" {
+			copied[field] = key
+		}
+	}
+	if len(copied) != 0 {
+		s.driverPathFields[name] = copied
+	}
+}
+
+func (s *Scope) LookupDriverPathField(name, field string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	if fields := s.driverPathFields[name]; fields != nil {
+		if key := fields[field]; key != "" {
+			return key, true
+		}
+	}
+	if s.parent != nil {
+		return s.parent.LookupDriverPathField(name, field)
+	}
+	return "", false
+}
+
+func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if fields := s.driverPathFields[name]; fields != nil {
+		return fields, true
+	}
+	if s.parent != nil {
+		return s.parent.LookupDriverPathFields(name)
+	}
+	return nil, false
+}
+
 type checker struct {
 	index        *Index
 	modules      []*ast.Module
@@ -54,6 +119,11 @@ type checker struct {
 	diags        []diag.Diagnostic
 	ownedRoot    *Type
 	graph        ImageGraph
+}
+
+type driverPathOwner struct {
+	executor string
+	span     source.Span
 }
 
 func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnostic) {
@@ -75,6 +145,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	}
 
 	c.checkImageSignatures()
+	c.checkUnresolvedTypes()
 	c.checkDeclBodiesAndConstructors()
 	c.checkDelegatedOnlyCrossing()
 	c.checkUniqueConstructors()
@@ -104,6 +175,10 @@ func (c *checker) checkImageSignatures() {
 			imageModule = image.Name
 		}
 
+		if len(image.Transitions) != 1 {
+			c.error(image.SpanV, diag.SEM0005, "image must define exactly one transition")
+			continue
+		}
 		foundTransition := false
 		for _, transition := range image.Transitions {
 			if transition.From == "delegated_hardware" && transition.To == "owned_hardware" {
@@ -138,8 +213,11 @@ func (c *checker) checkImageSignatures() {
 			c.error(owned.SpanV, diag.SEM0005, "owned_hardware phase must have one parameter")
 			continue
 		}
-		if delegated.Params[0].Type != "DelegatedHardware" {
+		signatureValid := true
+		delegatedParamType := c.resolveType(imageModule, delegated.Params[0].Type)
+		if delegatedParamType != c.resolveType(imageModule, "DelegatedHardware") {
 			c.error(delegated.Params[0].Span, diag.SEM0005, "delegated_hardware phase must accept DelegatedHardware")
+			signatureValid = false
 		}
 
 		ownedParam := c.mustType(imageModule, delegated.Return)
@@ -147,13 +225,73 @@ func (c *checker) checkImageSignatures() {
 			c.error(delegated.SpanV, diag.SEM0005, "unknown delegated_hardware return type")
 			continue
 		}
-		c.ownedRoot = ownedParam
 
 		if ownedParam != c.resolveType(imageModule, owned.Params[0].Type) {
 			c.error(owned.Params[0].Span, diag.SEM0005, "owned_hardware phase must receive the same type returned by delegated_hardware")
+			continue
 		}
-		if owned.Return != "never" {
+		if c.resolveType(imageModule, owned.Return) != c.resolveType(imageModule, "never") {
 			c.error(owned.SpanV, diag.SEM0005, "owned_hardware phase must return never")
+			continue
+		}
+		if !signatureValid {
+			continue
+		}
+		c.ownedRoot = ownedParam
+	}
+}
+
+func (c *checker) checkUnresolvedTypes() {
+	for _, mod := range c.modules {
+		for _, decl := range mod.Decls {
+			switch d := decl.(type) {
+			case *ast.DataDecl:
+				c.checkFieldsResolved(mod.Name, d.Fields)
+			case *ast.ClassDecl:
+				c.checkFieldsResolved(mod.Name, d.Fields)
+				c.checkMethodTypesResolved(mod.Name, d.Methods)
+			case *ast.DriverDecl:
+				c.checkFieldsResolved(mod.Name, d.Fields)
+				c.checkMethodTypesResolved(mod.Name, d.Methods)
+			case *ast.DriverPathDecl:
+				c.checkFieldsResolved(mod.Name, d.Fields)
+				c.checkMethodTypesResolved(mod.Name, d.Methods)
+			case *ast.ExecutorDecl:
+				c.checkFieldsResolved(mod.Name, d.Fields)
+				c.checkMethodTypesResolved(mod.Name, d.Methods)
+			case *ast.ImageDecl:
+				for _, phase := range d.Phases {
+					c.checkParamsResolved(mod.Name, phase.Params)
+					if c.resolveType(mod.Name, phase.Return) == nil {
+						c.error(phase.SpanV, diag.SEM0002, "unknown type "+phase.Return)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (c *checker) checkFieldsResolved(moduleName string, fields []ast.Field) {
+	for _, field := range fields {
+		if c.resolveType(moduleName, field.Type) == nil {
+			c.error(field.Span, diag.SEM0002, "unknown type "+field.Type)
+		}
+	}
+}
+
+func (c *checker) checkParamsResolved(moduleName string, params []ast.Param) {
+	for _, param := range params {
+		if param.Type != "" && c.resolveType(moduleName, param.Type) == nil {
+			c.error(param.Span, diag.SEM0002, "unknown type "+param.Type)
+		}
+	}
+}
+
+func (c *checker) checkMethodTypesResolved(moduleName string, methods []ast.MethodDecl) {
+	for _, method := range methods {
+		c.checkParamsResolved(moduleName, method.Params)
+		if method.Return != "" && c.resolveType(moduleName, method.Return) == nil {
+			c.error(method.SpanV, diag.SEM0002, "unknown type "+method.Return)
 		}
 	}
 }
@@ -197,8 +335,11 @@ func (c *checker) checkImageDecl(moduleName string, image *ast.ImageDecl) {
 		}
 		prevPhase := c.currentPhase
 		c.currentPhase = phase.Name
-		c.checkStmtList(moduleName, phase.Body, scope, retType, ContextImagePhaseDirect)
+		terminates := c.checkStmtList(moduleName, phase.Body, scope, retType, ContextImagePhaseDirect)
 		c.currentPhase = prevPhase
+		if retType != nil && !terminates {
+			c.error(phase.SpanV, diag.CG0001, "missing return")
+		}
 	}
 }
 
@@ -206,7 +347,7 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 	c.currentType = typ
 	for _, method := range methods {
 		c.currentType = typ
-		if len(method.Params) > 5 {
+		if explicitParamCount(method.Params) > 5 {
 			c.error(method.SpanV, diag.SEM0013, "too many explicit parameters")
 		}
 		if method.IsAsm && !c.isAsmAllowedHere(typ) {
@@ -234,10 +375,24 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		}
 		prevPhase := c.currentPhase
 		c.currentPhase = method.Name
-		c.checkStmtList(moduleName, method.Body, scope, returnType, marker)
+		terminates := c.checkStmtList(moduleName, method.Body, scope, returnType, marker)
 		c.currentPhase = prevPhase
+		if returnType != nil && !terminates {
+			c.error(method.SpanV, diag.CG0001, "missing return")
+		}
 	}
 	c.currentType = nil
+}
+
+func explicitParamCount(params []ast.Param) int {
+	count := 0
+	for _, param := range params {
+		if param.Name == "self" {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func (c *checker) isAsmAllowedHere(typ *Type) bool {
@@ -264,34 +419,48 @@ func (c *checker) isAsmAllowedHere(typ *Type) bool {
 	}
 }
 
-func (c *checker) checkStmtList(moduleName string, stmts []ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) {
+func (c *checker) checkStmtList(moduleName string, stmts []ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {
+	terminates := false
 	for _, stmt := range stmts {
-		c.checkStmt(moduleName, stmt, scope, expectedReturn, ctx)
+		if c.checkStmt(moduleName, stmt, scope, expectedReturn, ctx) {
+			terminates = true
+		}
 	}
+	return terminates
 }
 
-func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) {
+func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
 		scope.Define(s.Name, valueType)
+		if ctx == ContextImagePhaseDirect && valueType != nil && valueType.Kind == KindDriverPath {
+			c.bindDriverPath(s.Name, s.Expr, scope)
+		}
+		if ctx == ContextImagePhaseDirect {
+			scope.DefineDriverPathFields(s.Name, c.driverPathFieldKeysForExpr(moduleName, s.Expr, scope))
+		}
 		c.checkOwnedDelegatedCrossing(s.Expr.Span(), valueType)
+		return isNeverType(valueType)
 	case *ast.AssignStmt:
 		targetType := c.typeExpr(moduleName, s.Target, scope, ctx)
 		valueType := c.typeExpr(moduleName, s.Value, scope, ctx)
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), valueType)
+		return isNeverType(valueType)
 	case *ast.IfStmt:
 		cond := c.typeExpr(moduleName, s.Cond, scope, ctx)
 		c.requireType(cond, c.mustType(moduleName, "Bool"), s.Cond.Span())
-		c.checkStmtList(moduleName, s.Then, NewScope(scope), expectedReturn, ctx)
+		thenTerminates := c.checkStmtList(moduleName, s.Then, NewScope(scope), expectedReturn, ctx)
 		if s.Else != nil {
-			c.checkStmtList(moduleName, s.Else, NewScope(scope), expectedReturn, ctx)
+			elseTerminates := c.checkStmtList(moduleName, s.Else, NewScope(scope), expectedReturn, ctx)
+			return thenTerminates && elseTerminates
 		}
 	case *ast.WhileStmt:
 		cond := c.typeExpr(moduleName, s.Cond, scope, ctx)
 		c.requireType(cond, c.mustType(moduleName, "Bool"), s.Cond.Span())
 		c.checkStmtList(moduleName, s.Body, NewScope(scope), expectedReturn, ctx)
+		return isTrueLiteral(s.Cond)
 	case *ast.ForStmt:
 		inType := c.typeExpr(moduleName, s.InExpr, scope, ctx)
 		c.requireBytesIterable(inType, s.InExpr.Span())
@@ -302,28 +471,32 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		if expectedReturn == nil {
 			if s.Value != nil {
 				c.error(s.SpanV, diag.CG0001, "cannot return value from void function")
-				return
+				return true
 			}
-			return
+			return true
 		}
 		if expectedReturn == c.mustType(moduleName, "never") {
 			if s.Value != nil {
 				c.error(s.Value.Span(), diag.CG0001, "never function cannot return a value")
+				return true
 			}
-			return
+			c.error(s.SpanV, diag.CG0001, "never function cannot return")
+			return true
 		}
 		if s.Value == nil {
 			c.error(s.SpanV, diag.CG0001, "missing return value")
-			return
+			return true
 		}
 		got := c.typeExpr(moduleName, s.Value, scope, ctx)
 		c.requireType(got, expectedReturn, s.Value.Span())
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
+		return true
 	case *ast.ExprStmt:
-		c.typeExpr(moduleName, s.Expr, scope, ctx)
+		return isNeverType(c.typeExpr(moduleName, s.Expr, scope, ctx))
 	default:
 		c.error(s.Span(), diag.CG0001, "unsupported statement")
 	}
+	return false
 }
 
 func (c *checker) checkDelegatedOnlyCrossing() {
@@ -365,31 +538,225 @@ func (c *checker) checkUniqueConstructors() {
 }
 
 func (c *checker) checkExecutorWiring() {
-	pathOwners := map[string]string{}
+	constructedPaths := map[string]DriverPathNode{}
+	for _, path := range c.graph.DriverPaths {
+		constructedPaths[c.driverPathNodeKey(path)] = path
+	}
+
+	pathOwners := map[string]map[string]driverPathOwner{}
+	addOwner := func(key string, owner driverPathOwner) bool {
+		if key == "" {
+			return false
+		}
+		if pathOwners[key] == nil {
+			pathOwners[key] = map[string]driverPathOwner{}
+		}
+		ownerKey := fmt.Sprintf("%s:%d:%d", owner.executor, owner.span.Start, owner.span.End)
+		if _, ok := pathOwners[key][ownerKey]; ok {
+			return false
+		}
+		pathOwners[key][ownerKey] = owner
+		return true
+	}
+
 	for _, exec := range c.graph.Executors {
 		for _, field := range exec.Type.Fields {
-			boundTo := ""
-			if exec.FieldBindings != nil {
-				boundTo = exec.FieldBindings[field.Name]
-			}
 			if field.Type == nil {
 				continue
 			}
 			switch field.Type.Kind {
 			case KindDriver:
-				c.error(exec.Span, diag.SEM0010, "root driver "+field.Type.Name+" cannot be passed into executor "+exec.Type.Name)
+				span := exec.FieldSpans[field.Name]
+				if span.End == 0 {
+					span = exec.Span
+				}
+				c.error(span, diag.SEM0010, "root driver "+field.Type.Name+" cannot be passed into executor "+exec.Type.Name)
 			case KindDriverPath:
-				if boundTo == "" {
+				use, ok := exec.PathUses[field.Name]
+				if !ok || use.Key == "" {
 					continue
 				}
-				if _, ok := pathOwners[boundTo]; ok {
-					c.error(exec.Span, diag.SEM0011, "driver path "+boundTo+" is assigned to more than one executor")
-					continue
-				}
-				pathOwners[boundTo] = exec.Type.Name
+				addOwner(use.Key, driverPathOwner{executor: exec.Type.Name, span: use.spanOr(exec.Span)})
 			}
 		}
 	}
+
+	changed := true
+	for changed {
+		changed = false
+		for parentKey, path := range constructedPaths {
+			parentOwners := pathOwners[parentKey]
+			if len(parentOwners) == 0 {
+				continue
+			}
+			for _, use := range path.FieldUses {
+				for _, owner := range parentOwners {
+					if addOwner(use.Key, owner) {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	for key, path := range constructedPaths {
+		owners := pathOwners[key]
+		if len(owners) == 1 {
+			continue
+		}
+		name := path.Binding
+		if name == "" {
+			name = path.Type.Name
+		}
+		if len(owners) == 0 {
+			c.error(path.Span, diag.SEM0011, "driver path "+name+" is not assigned to an executor")
+			continue
+		}
+		c.error(secondDriverPathOwnerSpan(owners, path.Span), diag.SEM0011, "driver path "+name+" is assigned to more than one executor")
+	}
+	for key, owners := range pathOwners {
+		if _, ok := constructedPaths[key]; ok {
+			continue
+		}
+		for _, owner := range owners {
+			c.error(owner.span, diag.SEM0011, "driver path assigned to executor "+owner.executor+" was not constructed in the image phase")
+			break
+		}
+	}
+}
+
+func secondDriverPathOwnerSpan(owners map[string]driverPathOwner, fallback source.Span) source.Span {
+	out := fallback
+	for _, owner := range owners {
+		if owner.span.Start >= out.Start {
+			out = owner.span
+		}
+	}
+	return out
+}
+
+func driverPathSpanKey(span source.Span) string {
+	return fmt.Sprintf("span:%d:%d", span.Start, span.End)
+}
+
+func (c *checker) driverPathExprKey(expr ast.Expr, scope *Scope) string {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if key, ok := scope.LookupDriverPath(e.Name); ok {
+			return key
+		}
+		return ""
+	case *ast.FieldExpr:
+		return c.driverPathFieldExprKey(e, scope)
+	}
+	return driverPathSpanKey(expr.Span())
+}
+
+func (c *checker) driverPathFieldExprKey(expr *ast.FieldExpr, scope *Scope) string {
+	if named, ok := expr.Base.(*ast.NameExpr); ok {
+		if key, ok := scope.LookupDriverPathField(named.Name, expr.Field); ok {
+			return key
+		}
+	}
+	return ""
+}
+
+func (c *checker) driverPathNodeKey(path DriverPathNode) string {
+	return driverPathSpanKey(path.Span)
+}
+
+func (c *checker) bindDriverPath(name string, expr ast.Expr, scope *Scope) {
+	key := c.driverPathExprKey(expr, scope)
+	scope.DefineDriverPath(name, key)
+	if _, ok := expr.(*ast.NameExpr); ok {
+		return
+	}
+
+	for i := range c.graph.DriverPaths {
+		if driverPathSpanKey(c.graph.DriverPaths[i].Span) == key {
+			c.graph.DriverPaths[i].Binding = name
+			return
+		}
+	}
+}
+
+func (c *checker) driverPathFieldKeysForExpr(moduleName string, expr ast.Expr, scope *Scope) map[string]string {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if fields, ok := scope.LookupDriverPathFields(e.Name); ok {
+			return copyDriverPathFields(fields)
+		}
+	case *ast.ConstructorExpr:
+		return c.driverPathFieldKeysForConstructor(moduleName, e, scope)
+	case *ast.CallExpr:
+		if c.callReturnsReceiverType(moduleName, e, scope) {
+			return c.driverPathFieldKeysForExpr(moduleName, e.Receiver, scope)
+		}
+	}
+	return nil
+}
+
+func copyDriverPathFields(fields map[string]string) map[string]string {
+	copied := map[string]string{}
+	for field, key := range fields {
+		copied[field] = key
+	}
+	return copied
+}
+
+func (c *checker) driverPathFieldKeysForConstructor(moduleName string, expr *ast.ConstructorExpr, scope *Scope) map[string]string {
+	constructed := c.resolveType(moduleName, expr.Type)
+	if constructed == nil {
+		return nil
+	}
+	fields := map[string]string{}
+	for _, arg := range expr.Args {
+		field, _, _ := c.lookupFieldForArg(constructed, arg.Name)
+		if field == nil || field.Type == nil || field.Type.Kind != KindDriverPath {
+			continue
+		}
+		if key := c.driverPathExprKey(arg.Value, scope); key != "" {
+			fields[arg.Name] = key
+		}
+	}
+	return fields
+}
+
+func (c *checker) callReturnsReceiverType(moduleName string, expr *ast.CallExpr, scope *Scope) bool {
+	receiverType := c.exprStaticType(moduleName, expr.Receiver, scope)
+	method, _ := c.lookupMethod(receiverType, expr.Method, expr.SpanV)
+	return receiverType != nil && method != nil && method.Return == receiverType
+}
+
+func (c *checker) exprStaticType(moduleName string, expr ast.Expr, scope *Scope) *Type {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if scope != nil {
+			if typ, ok := scope.Lookup(e.Name); ok {
+				return typ
+			}
+		}
+		return c.resolveType(moduleName, e.Name)
+	case *ast.ConstructorExpr:
+		return c.resolveType(moduleName, e.Type)
+	case *ast.FieldExpr:
+		baseType := c.exprStaticType(moduleName, e.Base, scope)
+		if baseType == nil {
+			return nil
+		}
+		for _, field := range baseType.Fields {
+			if field.Name == e.Field {
+				return field.Type
+			}
+		}
+	case *ast.CallExpr:
+		receiverType := c.exprStaticType(moduleName, e.Receiver, scope)
+		method, _ := c.lookupMethod(receiverType, e.Method, e.SpanV)
+		if method != nil {
+			return method.Return
+		}
+	}
+	return nil
 }
 
 func (c *checker) checkTypeAssign(span source.Span, targetType, valueType *Type) {
@@ -467,35 +834,45 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 	}
 
 	c.checkConstructorPermissions(moduleName, expr, constructed, scope, ctx)
-	if c.currentPhase == "owned_hardware" && c.hasDelegatedField(moduleName, constructed) {
+	if c.currentPhase == "owned_hardware" && c.hasDelegatedField(constructed) {
 		c.error(expr.SpanV, diag.SEM0009, "delegated-only value cannot be constructed in owned_hardware phase")
 	}
 
 	fieldBindings := map[string]string{}
+	fieldSpans := map[string]source.Span{}
 	boundTypes := map[string]*Type{}
+	pathUses := map[string]DriverPathUse{}
+	seenFields := map[string]source.Span{}
 	for _, arg := range expr.Args {
 		field, _, _ := c.lookupFieldForArg(constructed, arg.Name)
 		if field == nil {
 			c.error(expr.SpanV, diag.CG0001, "unknown constructor field "+arg.Name)
 			continue
 		}
+		if _, ok := seenFields[arg.Name]; ok {
+			c.error(arg.SpanV, diag.CG0001, "duplicate constructor field "+arg.Name)
+		} else {
+			seenFields[arg.Name] = arg.SpanV
+		}
 		argType := c.typeExpr(moduleName, arg.Value, scope, ctx)
+		fieldSpans[arg.Name] = arg.SpanV
 		c.checkTypeAssign(arg.SpanV, field.Type, argType)
 		if named, ok := arg.Value.(*ast.NameExpr); ok {
 			fieldBindings[arg.Name] = named.Name
 			boundTypes[arg.Name] = argType
 		}
+		if field.Type != nil && field.Type.Kind == KindDriverPath && argType != nil && argType.Kind == KindDriverPath {
+			if key := c.driverPathExprKey(arg.Value, scope); key != "" {
+				pathUses[arg.Name] = DriverPathUse{Key: key, Span: arg.SpanV}
+			}
+		}
 	}
 
-	if len(expr.Args) != len(constructed.Fields) {
+	if len(seenFields) != len(constructed.Fields) {
 		c.error(expr.SpanV, diag.CG0001, "constructor field completeness check failed")
 	}
-	seen := map[string]bool{}
-	for _, arg := range expr.Args {
-		seen[arg.Name] = true
-	}
 	for _, field := range constructed.Fields {
-		if !seen[field.Name] {
+		if _, ok := seenFields[field.Name]; !ok {
 			c.error(expr.SpanV, diag.CG0001, "missing constructor field "+field.Name)
 		}
 	}
@@ -506,7 +883,9 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			Type:          constructed,
 			Span:          expr.SpanV,
 			FieldBindings: fieldBindings,
+			FieldSpans:    fieldSpans,
 			BoundTypes:    boundTypes,
+			PathUses:      pathUses,
 		})
 	case KindData:
 		break
@@ -522,6 +901,9 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 
 	if ctx == ContextImagePhaseDirect {
 		c.graph.Constructed = append(c.graph.Constructed, ConstructedNode{Type: constructed, Span: expr.SpanV})
+		if constructed.Kind == KindDriverPath {
+			c.graph.DriverPaths = append(c.graph.DriverPaths, DriverPathNode{Type: constructed, Span: expr.SpanV, FieldUses: pathUses})
+		}
 	}
 	return constructed
 }
@@ -572,16 +954,19 @@ func (c *checker) typeAndVerifyCallArgs(moduleName string, method *Method, args 
 		params = params[1:]
 	}
 	used := map[string]bool{}
-	for i, arg := range args {
-		if i >= len(params) {
-			c.error(arg.SpanV, diag.CG0001, "too many call arguments")
-			return
-		}
+	pos := 0
+	seenNamed := false
+	for _, arg := range args {
 		if arg.Name != "" {
+			seenNamed = true
 			found := false
 			for _, p := range params {
 				if p.Name == arg.Name {
 					found = true
+					if used[p.Name] {
+						c.error(arg.SpanV, diag.CG0001, "duplicate call argument "+arg.Name)
+						break
+					}
 					used[p.Name] = true
 					c.checkTypeAssign(arg.SpanV, p.Type, c.typeExpr(moduleName, arg.Value, scope, ctx))
 					break
@@ -592,31 +977,32 @@ func (c *checker) typeAndVerifyCallArgs(moduleName string, method *Method, args 
 			}
 			continue
 		}
-		p := params[i]
+		if seenNamed {
+			c.error(arg.SpanV, diag.CG0001, "positional call argument cannot follow named arguments")
+			continue
+		}
+		if pos >= len(params) {
+			c.error(arg.SpanV, diag.CG0001, "too many call arguments")
+			return
+		}
+		p := params[pos]
+		pos++
 		if p.Name != "" {
 			used[p.Name] = true
 			c.checkTypeAssign(arg.SpanV, p.Type, c.typeExpr(moduleName, arg.Value, scope, ctx))
 		}
 	}
 	for _, p := range params {
-		if p.Name == "self" {
-			continue
-		}
 		if p.Name == "" {
-			continue
-		}
-		if p.Name == "self" {
 			continue
 		}
 		if _, ok := used[p.Name]; !ok && !strings.HasPrefix(p.Name, "_") {
 			c.error(method.Span, diag.CG0001, "missing call argument "+p.Name)
 		}
 	}
-	_ = ctx
 }
 
-func (c *checker) hasDelegatedField(moduleName string, typ *Type) bool {
-	_ = moduleName
+func (c *checker) hasDelegatedField(typ *Type) bool {
 	return c.index.IsDelegatedOnly(typ, map[string]bool{})
 }
 
@@ -724,7 +1110,7 @@ func (c *checker) requireSame(left, right *Type, span source.Span) {
 
 func typesCompatible(target, value *Type) bool {
 	if target == nil || value == nil {
-		return true
+		return false
 	}
 	if target == value {
 		return true
@@ -736,6 +1122,15 @@ func typesCompatible(target, value *Type) bool {
 		return true
 	}
 	return false
+}
+
+func isTrueLiteral(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BoolLiteral)
+	return ok && lit.Value
+}
+
+func isNeverType(t *Type) bool {
+	return t != nil && t.Name == "never"
 }
 
 func isIntegerType(t *Type) bool {
@@ -764,11 +1159,6 @@ func (c *checker) requireBytesIterable(typ *Type, span source.Span) {
 	if typ.Name != "Bytes" && typ.Name != "MutableBytes" {
 		c.error(span, diag.CG0001, "for loop expects Bytes")
 	}
-}
-
-func (c *checker) checkOwnedDelegatedCrossingInExpr(expr ast.Expr, typ *Type) {
-	_ = expr
-	c.checkOwnedDelegatedCrossing(expr.Span(), typ)
 }
 
 func isComparisonOp(op string) bool {

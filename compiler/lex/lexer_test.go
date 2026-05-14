@@ -75,3 +75,35 @@ func TestLexStringEscapesNewline(t *testing.T) {
 		t.Fatalf("string text = %q, want %q", got, want)
 	}
 }
+
+func TestLexUnicodeIdentifierAdvancesByRune(t *testing.T) {
+	toks, ds := All("café_β 1")
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if got, want := toks[0].Text, "café_β"; got != want {
+		t.Fatalf("identifier text = %q, want %q", got, want)
+	}
+	if got, want := toks[0].End, len("café_β"); got != want {
+		t.Fatalf("identifier end = %d, want %d", got, want)
+	}
+	if got, want := toks[1].Kind, Integer; got != want {
+		t.Fatalf("next token kind = %v, want %v", got, want)
+	}
+}
+
+func TestLexInvalidUnicodeCharacterAdvancesByRune(t *testing.T) {
+	toks, ds := All("→")
+	if len(ds) != 1 {
+		t.Fatalf("diagnostics = %#v, want 1 diagnostic", ds)
+	}
+	if got, want := ds[0].Start, 0; got != want {
+		t.Fatalf("diagnostic start = %d, want %d", got, want)
+	}
+	if got, want := ds[0].End, len("→"); got != want {
+		t.Fatalf("diagnostic end = %d, want %d", got, want)
+	}
+	if got, want := toks[0].Start, len("→"); got != want {
+		t.Fatalf("EOF start = %d, want %d", got, want)
+	}
+}

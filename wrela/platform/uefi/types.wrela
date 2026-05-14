@@ -9,12 +9,59 @@ data UefiStatus {
 }
 
 class UefiSystemTable {
+    header_signature: U64
+    header_revision: U32
+    header_size: U32
+    header_crc32: U32
+    header_reserved: U32
+    firmware_vendor: VirtualAddress
+    firmware_revision: U32
+    firmware_revision_padding: U32
+    console_in_handle: UefiHandle
+    con_in: VirtualAddress
+    console_out_handle: UefiHandle
+    con_out: VirtualAddress
+    standard_error_handle: UefiHandle
+    std_err: VirtualAddress
+    runtime_services: VirtualAddress
     boot_services: UefiBootServices
+    number_of_table_entries: U64
     configuration_tables: UefiConfigurationTables
 }
 
 class UefiBootServices {
-    table_address: VirtualAddress
+    header_signature: U64
+    header_revision: U32
+    header_size: U32
+    header_crc32: U32
+    header_reserved: U32
+    raise_tpl: VirtualAddress
+    restore_tpl: VirtualAddress
+    allocate_pages: VirtualAddress
+    free_pages: VirtualAddress
+    get_memory_map: VirtualAddress
+    allocate_pool: VirtualAddress
+    free_pool: VirtualAddress
+    create_event: VirtualAddress
+    set_timer: VirtualAddress
+    wait_for_event: VirtualAddress
+    signal_event: VirtualAddress
+    close_event: VirtualAddress
+    check_event: VirtualAddress
+    install_protocol_interface: VirtualAddress
+    reinstall_protocol_interface: VirtualAddress
+    uninstall_protocol_interface: VirtualAddress
+    handle_protocol: VirtualAddress
+    reserved: VirtualAddress
+    register_protocol_notify: VirtualAddress
+    locate_handle: VirtualAddress
+    locate_device_path: VirtualAddress
+    install_configuration_table: VirtualAddress
+    load_image: VirtualAddress
+    start_image: VirtualAddress
+    exit: VirtualAddress
+    unload_image: VirtualAddress
+    exit_boot_services: VirtualAddress
 }
 
 class UefiConfigurationTables {
@@ -82,31 +129,24 @@ class DelegatedMemory {
         and r10, rax
         mov r11, self.arena_base
         add r11, r10
+        mov rbx, r11
         mov r12, r11
         add r12, 4096
-        mov r13, r11
-        add r13, 8192
         mov r14, r10
         add r14, 4096
         add r14, 4096
-        add r14, 4096
-        mov self.next_offset, r14
-        mov rbx, r11
 
-        mov rcx, 1536
-        mov r14, 0
+        mov rcx, 1024
+        mov rax, 0
     zero_loop:
-        mov [r11], r14
+        mov [r11], rax
         add r11, 8
         sub rcx, 1
         jne zero_loop
 
-        mov r14, r12
-        add r14, 3
-        mov [r11 - 12288], r14
-        mov r14, r13
-        add r14, 3
-        mov [r11 - 8192], r14
+        mov rax, r12
+        add rax, 3
+        mov [rbx], rax
 
         // memory_map is the UefiMemoryMap handle in rsi; descriptor_size advances descriptors.
         mov r8, [rsi]
@@ -124,52 +164,96 @@ class DelegatedMemory {
         cmp rcx, 0
         jle advance_descriptor
 
+        mov r15, rax
+        mov rdx, 0xffffffffffe00000
+        and r15, rdx
         mov rdx, rax
         shr rdx, 12
-        mov r15, rdx
-    reduce_pd_index:
-        cmp r15, 512
-        jl pd_index_ready
-        sub r15, 512
-        jmp reduce_pd_index
+    reduce_descriptor_start_pages:
+        cmp rdx, 512
+        jl descriptor_start_pages_ready
+        sub rdx, 512
+        jmp reduce_descriptor_start_pages
 
-    pd_index_ready:
-        add rcx, r15
-        mov r14, rax
-        shr r14, 21
-        cmp r14, 512
-        jge advance_descriptor
-
-        mov r11, r13
-        mov rdx, r14
-    pd_slot_loop:
-        cmp rdx, 0
-        jle pd_slot_ready
-        add r11, 8
-        sub rdx, 1
-        jmp pd_slot_loop
-
-    pd_slot_ready:
-        mov r12, 0
-        mov rdx, r14
-    pde_base_loop:
-        cmp rdx, 0
-        jle map_descriptor_pages
-        add r12, 0x200000
-        sub rdx, 1
-        jmp pde_base_loop
+    descriptor_start_pages_ready:
+        add rcx, rdx
 
     map_descriptor_pages:
         cmp rcx, 0
         jle advance_descriptor
-        cmp r14, 512
+
+        mov r11, r15
+        shr r11, 30
+        cmp r11, 512
         jge advance_descriptor
+
         mov rdx, r12
-        add rdx, 0x83
-        mov [r11], rdx
+    pdpt_slot_loop:
+        cmp r11, 0
+        jle pdpt_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp pdpt_slot_loop
+
+    pdpt_slot_ready:
+        mov r13, [rdx]
+        cmp r13, 0
+        jne pd_ready
+
+        mov r13, self.arena_base
+        add r13, r14
+        add r14, 4096
+        mov r11, r13
+        mov rax, 0
+        mov rdx, 512
+    zero_new_pd_loop:
+        mov [r11], rax
         add r11, 8
-        add r12, 0x200000
-        add r14, 1
+        sub rdx, 1
+        jne zero_new_pd_loop
+
+        mov r11, r15
+        shr r11, 30
+        mov rdx, r12
+    pdpt_slot_after_alloc_loop:
+        cmp r11, 0
+        jle pdpt_slot_after_alloc_ready
+        add rdx, 8
+        sub r11, 1
+        jmp pdpt_slot_after_alloc_loop
+
+    pdpt_slot_after_alloc_ready:
+        mov rax, r13
+        add rax, 3
+        mov [rdx], rax
+        jmp pd_ready
+
+    pd_ready:
+        mov rax, 0xfffffffffffff000
+        and r13, rax
+        mov r11, r15
+        shr r11, 21
+
+    reduce_pd_index:
+        cmp r11, 512
+        jl pd_index_ready
+        sub r11, 512
+        jmp reduce_pd_index
+
+    pd_index_ready:
+        mov rdx, r13
+    pd_slot_loop:
+        cmp r11, 0
+        jle pd_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp pd_slot_loop
+
+    pd_slot_ready:
+        mov rax, r15
+        add rax, 0x83
+        mov [rdx], rax
+        add r15, 0x200000
         sub rcx, 512
         jmp map_descriptor_pages
 
@@ -179,6 +263,7 @@ class DelegatedMemory {
 
     descriptors_done:
 
+        mov self.next_offset, r14
         mov rax, rbx
         pop r15
         pop r14

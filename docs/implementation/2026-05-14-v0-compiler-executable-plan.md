@@ -3046,7 +3046,7 @@ Command:
 ```bash
 qemu-system-x86_64 \
   -machine q35 \
-  -cpu x86-64-v3 \
+  -cpu Haswell-v3 \
   -m 256M \
   -drive if=pflash,format=raw,readonly=on,file="$WRELA_OVMF_CODE" \
   -drive if=pflash,format=raw,file="$WRELA_OVMF_VARS" \
@@ -3062,7 +3062,7 @@ Go command builder shape:
 func Args(opts Options) []string {
     return []string{
         "-machine", "q35",
-        "-cpu", "x86-64-v3",
+        "-cpu", "Haswell-v3",
         "-m", "256M",
         "-drive", "if=pflash,format=raw,readonly=on,file=" + opts.OVMFCode,
         "-drive", "if=pflash,format=raw,file=" + opts.OVMFVars,
@@ -3074,7 +3074,9 @@ func Args(opts Options) []string {
 }
 ```
 
-The e2e test must skip when `qemu-system-x86_64` is not in `PATH` or either OVMF environment variable is unset. On failure, it must print captured serial output.
+The compiler target remains `x86_64-v3-uefi`; `Haswell-v3` is the default QEMU CPU model because it is widely exposed by QEMU builds while providing a concrete v3-class development model. Tests may override the CPU model when a host QEMU uses a different v3-capable spelling.
+
+The e2e test assumes `qemu-system-x86_64` is installed. It should prefer `WRELA_OVMF_CODE` and `WRELA_OVMF_VARS` when they are set, otherwise discover x86_64 EDK2/OVMF firmware from QEMU metadata or common system install paths. It must copy the writable vars image into the test temp directory before boot. On failure, it must print captured serial output.
 
 ### Appendix H: Wrela Internal ABI
 

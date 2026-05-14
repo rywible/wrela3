@@ -38,7 +38,6 @@ class UefiBootServicesCalls {
         mov [rax + 72], r10
 
         mov rax, self.boot_services
-        mov rax, [rax]
         mov rdx, [rsi]
         mov r8, [rbp - 8]
         add r8, 56
@@ -48,7 +47,7 @@ class UefiBootServicesCalls {
         add r11, 48
         mov [rsp + 32], r11
 
-        mov rax, [rax + 56]
+        mov rax, [rax + UefiBootServices.get_memory_map]
         call rax
 
         mov r11, rax
@@ -73,8 +72,7 @@ class UefiBootServicesCalls {
         mov [rbp - 8], r10
         mov rcx, [rsi]
         mov rax, self.boot_services
-        mov rax, [rax]
-        mov rax, [rax + 232]
+        mov rax, [rax + UefiBootServices.exit_boot_services]
         call rax
 
         mov r11, [rbp - 8]

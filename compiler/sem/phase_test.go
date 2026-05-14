@@ -69,9 +69,12 @@ image Bad {
 		if len(ds) != 0 {
 			t.Fatalf("build index diagnostics: %#v", ds)
 		}
-		_, diags := Check(index, modules)
+		checked, diags := Check(index, modules)
 		if !hasCode(diags, diag.SEM0005) {
 			t.Fatalf("expected SEM0005, got %#v", diags)
+		}
+		if checked.OwnedRoot != nil {
+			t.Fatalf("OwnedRoot should not be set from invalid phase signatures: %#v", checked.OwnedRoot)
 		}
 	})
 
@@ -186,6 +189,63 @@ image Good {
 		}
 		if len(index.Images) != 1 {
 			t.Fatalf("images = %d, want 1", len(index.Images))
+		}
+	})
+
+	t.Run("multiple transitions are rejected", func(t *testing.T) {
+		modules := parseModulesForTest(t, `
+module index.phase_multiple_transitions
+`+phasePrelude+`
+
+image Bad {
+    transitions {
+        delegated_hardware -> owned_hardware
+        delegated_hardware -> owned_hardware
+    }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
+`)
+		index, ds := BuildIndex(modules)
+		if len(ds) != 0 {
+			t.Fatalf("build index diagnostics: %#v", ds)
+		}
+		_, diags := Check(index, modules)
+		if !hasCode(diags, diag.SEM0005) {
+			t.Fatalf("expected SEM0005, got %#v", diags)
+		}
+	})
+
+	t.Run("qualified owned param matches delegated return", func(t *testing.T) {
+		modules := parseModulesForTest(t, `
+module index.phase_qualified_owned
+`+phasePrelude+`
+
+image Good {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> index.phase_qualified_owned.OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
+`)
+		index, ds := BuildIndex(modules)
+		if len(ds) != 0 {
+			t.Fatalf("build index diagnostics: %#v", ds)
+		}
+		_, diags := Check(index, modules)
+		if len(diags) != 0 {
+			t.Fatalf("expected no diagnostics, got %#v", diags)
 		}
 	})
 }

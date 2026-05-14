@@ -1,6 +1,10 @@
 package ast
 
-import "github.com/ryanwible/wrela3/compiler/source"
+import (
+	"strings"
+
+	"github.com/ryanwible/wrela3/compiler/source"
+)
 
 type Module struct {
 	Name    string
@@ -285,16 +289,5 @@ func debugNamedArgs(args []NamedArg) string {
 	for _, arg := range args {
 		out = append(out, arg.Name+": "+DebugExpr(arg.Value))
 	}
-	return stringsJoin(out, " ")
-}
-
-func stringsJoin(vals []string, sep string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	acc := vals[0]
-	for i := 1; i < len(vals); i++ {
-		acc += sep + vals[i]
-	}
-	return acc
+	return strings.Join(out, " ")
 }

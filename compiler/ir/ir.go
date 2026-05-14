@@ -310,6 +310,7 @@ type AsmMethod struct {
 	ReceiverFieldOffsets map[string]int
 	// ReceiverFieldWidths is optional byte widths for lower-bound field loads.
 	ReceiverFieldWidths map[string]int
+	TypeFieldOffsets    map[string]map[string]int
 }
 
 type Program struct {

@@ -7,7 +7,6 @@ import (
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/ir"
-	"github.com/ryanwible/wrela3/compiler/layout"
 )
 
 func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
@@ -21,6 +20,7 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	}}}
 	program := &ir.Program{
 		Functions: []ir.Function{delegated, owned},
+		Types:     entryAdapterTestTypes(104),
 		Entry: ir.EntryAdapter{
 			Symbol:               "_wrela_efi_entry",
 			DelegatedPhaseSymbol: "image_delegated",
@@ -33,7 +33,10 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		t.Fatalf("Compile() diagnostics = %#v", ds)
 	}
 	entry := image.Sections[0].Data[int(image.Symbols["_wrela_efi_entry"]-0x1000):]
-	adapterLayout := buildEntryAdapterLayout()
+	adapterLayout, ok := buildEntryAdapterLayout(compileContext{types: program.Types})
+	if !ok {
+		t.Fatal("buildEntryAdapterLayout() failed")
+	}
 
 	if adapterLayout.FrameSize != 128 {
 		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 128)
@@ -70,19 +73,25 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 
 	assertContainsInstruction(t, entry, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.RegOperand{Reg: asm.MustLookup("rax")},
-		asm.MemOperand{Base: asm.MustLookup("rdx"), Disp: 96, Width: 64},
+		asm.MemOperand{Base: asm.MustLookup("rdx"), Disp: 104, Width: 64},
 	}})
 	assertContainsInstruction(t, entry, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(adapterLayout.UefiBootServicesOffset), Width: 64},
 		asm.RegOperand{Reg: asm.MustLookup("rax")},
 	}})
 
-	bootCallsRecord := buildEntryRecordLayout("UefiBootServicesCalls", entryRecordFields["UefiBootServicesCalls"], map[string]layout.Record{})
+	bootCallsRecord, ok := recordLayoutFromTypeInfo(program.Types["UefiBootServicesCalls"])
+	if !ok {
+		t.Fatal("UefiBootServicesCalls TypeInfo did not produce a record layout")
+	}
 	if bootCallsRecord.Size != 8 || bootCallsRecord.Fields["boot_services"].Size != 8 {
 		t.Fatalf("UefiBootServicesCalls layout = %#v, want handle field", bootCallsRecord)
 	}
 
-	delegatedMemoryRecord := buildEntryRecordLayout("DelegatedMemory", entryRecordFields["DelegatedMemory"], map[string]layout.Record{})
+	delegatedMemoryRecord, ok := recordLayoutFromTypeInfo(program.Types["DelegatedMemory"])
+	if !ok {
+		t.Fatal("DelegatedMemory TypeInfo did not produce a record layout")
+	}
 	if delegatedMemoryRecord.Size != 32 || delegatedMemoryRecord.Fields["last_memory_map"].Offset != 24 || delegatedMemoryRecord.Fields["last_memory_map"].Size != 8 {
 		t.Fatalf("DelegatedMemory layout = %#v, want last_memory_map handle at +24", delegatedMemoryRecord)
 	}
@@ -90,11 +99,17 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	assertStoresImmediateSlot(t, entry, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
 	assertStoresImmediateSlot(t, entry, 0, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["next_offset"].Offset)
 
-	memoryMapRecord := buildEntryRecordLayout("UefiMemoryMap", entryRecordFields["UefiMemoryMap"], map[string]layout.Record{})
+	memoryMapRecord, ok := recordLayoutFromTypeInfo(program.Types["UefiMemoryMap"])
+	if !ok {
+		t.Fatal("UefiMemoryMap TypeInfo did not produce a record layout")
+	}
 	if memoryMapRecord.Size != 32 || memoryMapRecord.Fields["descriptors"].Size != 8 || memoryMapRecord.Fields["key"].Offset != 24 {
 		t.Fatalf("UefiMemoryMap layout = %#v, want descriptors handle and key at +24", memoryMapRecord)
 	}
-	hardwareRecord := buildEntryRecordLayout("DelegatedHardware", entryRecordFields["DelegatedHardware"], map[string]layout.Record{})
+	hardwareRecord, ok := recordLayoutFromTypeInfo(program.Types["DelegatedHardware"])
+	if !ok {
+		t.Fatal("DelegatedHardware TypeInfo did not produce a record layout")
+	}
 	if hardwareRecord.Size != 24 ||
 		hardwareRecord.Fields["image_handle"].Offset != 0 ||
 		hardwareRecord.Fields["boot_services"].Offset != 8 ||
@@ -102,12 +117,56 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		t.Fatalf("DelegatedHardware layout = %#v, want three handle fields", hardwareRecord)
 	}
 
-	assertStoresSlotAddress(t, entry, adapterLayout.UefiBootServicesCallsOffset, adapterLayout.UefiBootServicesOffset)
+	assertStoresSlotValue(t, entry, adapterLayout.UefiBootServicesCallsOffset, adapterLayout.UefiBootServicesOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.UefiMemoryMapDescriptorsOffset, adapterLayout.DelegatedBytesOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedMemoryMapOffset, adapterLayout.UefiMemoryMapOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
+}
+
+func TestCompileEntryAdapterUsesTypeInfoForMaterializedRecordOffsets(t *testing.T) {
+	delegated := ir.Function{Symbol: "image_delegated", Blocks: []ir.Block{{
+		Label: "entry",
+		Ops:   []ir.Operation{&ir.Return{}},
+	}}}
+	owned := ir.Function{Symbol: "image_owned", Params: []ir.Value{&ir.Param{Symbol: "owned", Type: ir.Type{Name: "OwnedHardware"}}}, Blocks: []ir.Block{{
+		Label: "entry",
+		Ops:   []ir.Operation{&ir.Return{}},
+	}}}
+	types := entryAdapterTestTypes(96)
+	types["UefiMemoryMap"] = ir.TypeInfo{
+		Name:  "UefiMemoryMap",
+		Kind:  ir.TypeKindData,
+		Size:  48,
+		Align: 8,
+		Fields: map[string]ir.FieldInfo{
+			"descriptors":        {Name: "descriptors", Offset: 16, Size: 8, Align: 8},
+			"descriptor_size":    {Name: "descriptor_size", Offset: 24, Size: 8, Align: 8},
+			"descriptor_version": {Name: "descriptor_version", Offset: 32, Size: 4, Align: 4},
+			"key":                {Name: "key", Offset: 40, Size: 8, Align: 8},
+		},
+	}
+	program := &ir.Program{Functions: []ir.Function{delegated, owned}, Types: types, Entry: ir.EntryAdapter{
+		Symbol:               "_wrela_efi_entry",
+		DelegatedPhaseSymbol: "image_delegated",
+		OwnedPhaseSymbol:     "image_owned",
+	}}
+
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", ds)
+	}
+
+	entry := image.Sections[0].Data[int(image.Symbols["_wrela_efi_entry"]-0x1000):]
+	adapterLayout, ok := buildEntryAdapterLayout(compileContext{types: types})
+	if !ok {
+		t.Fatal("buildEntryAdapterLayout() failed")
+	}
+	if got := adapterLayout.UefiMemoryMapDescriptorsOffset - adapterLayout.UefiMemoryMapOffset; got != 16 {
+		t.Fatalf("descriptors offset = %d, want TypeInfo offset 16", got)
+	}
+	assertStoresSlotAddress(t, entry, adapterLayout.UefiMemoryMapDescriptorsOffset, adapterLayout.DelegatedBytesOffset)
 }
 
 func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
@@ -124,7 +183,7 @@ func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
 		Label: "entry",
 		Ops:   []ir.Operation{&ir.Return{}},
 	}}}
-	program := &ir.Program{Functions: []ir.Function{delegated, owned}, Entry: ir.EntryAdapter{
+	program := &ir.Program{Functions: []ir.Function{delegated, owned}, Types: entryAdapterTestTypes(96), Entry: ir.EntryAdapter{
 		Symbol:               "_wrela_efi_entry",
 		DelegatedPhaseSymbol: "image_delegated",
 		OwnedPhaseSymbol:     "image_owned",
@@ -135,9 +194,13 @@ func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
 	}
 
 	entry := image.Sections[0].Data[int(image.Symbols["_wrela_efi_entry"]-0x1000):]
+	adapterLayout, ok := buildEntryAdapterLayout(compileContext{types: program.Types})
+	if !ok {
+		t.Fatal("buildEntryAdapterLayout() failed")
+	}
 	rig := mustEncode(t, asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
 		asm.RegOperand{Reg: asm.MustLookup("rdi")},
-		asm.ImmOperand{Value: int64(buildEntryAdapterLayout().DelegatedHardwareOffset)},
+		asm.ImmOperand{Value: int64(adapterLayout.DelegatedHardwareOffset)},
 	}})
 	setupEnd := bytes.Index(entry, rig)
 	if setupEnd < 0 {
@@ -192,7 +255,13 @@ func TestCompileCallPassesRecordReturnSlotInR10(t *testing.T) {
 		Return: ir.Type{Name: mapResult},
 		Body:   "mov rax, 0x10\nret",
 	}
-	program := &ir.Program{Functions: []ir.Function{caller}, AsmMethods: []ir.AsmMethod{asmMethod}}
+	program := &ir.Program{
+		Functions:  []ir.Function{caller},
+		AsmMethods: []ir.AsmMethod{asmMethod},
+		Types: map[string]ir.TypeInfo{
+			mapResult: {Name: mapResult, Kind: ir.TypeKindData},
+		},
+	}
 
 	image, ds := Compile(program)
 	if len(ds) != 0 {
@@ -284,4 +353,78 @@ func assertStoresSlotAddress(t *testing.T, code []byte, dstSlot, srcSlot int) {
 	if !bytes.Contains(code, sequence) {
 		t.Fatalf("missing address store of stack slot %d to stack slot %d", srcSlot, dstSlot)
 	}
+}
+
+func assertStoresSlotValue(t *testing.T, code []byte, dstSlot, srcSlot int) {
+	t.Helper()
+	sequence := append(
+		mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+			asm.RegOperand{Reg: asm.MustLookup("rax")},
+			asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(srcSlot), Width: 64},
+		}}),
+		mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+			asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(dstSlot), Width: 64},
+			asm.RegOperand{Reg: asm.MustLookup("rax")},
+		}})...,
+	)
+	if !bytes.Contains(code, sequence) {
+		t.Fatalf("missing store of slot value from %d into %d", srcSlot, dstSlot)
+	}
+}
+
+func entryAdapterTestTypes(bootServicesOffset int) map[string]ir.TypeInfo {
+	return map[string]ir.TypeInfo{
+		"UefiHandle": entryAdapterTypeInfo("UefiHandle", 8, 8,
+			entryAdapterField("address", 0, 8, 8),
+		),
+		"UefiBootServicesCalls": entryAdapterTypeInfo("UefiBootServicesCalls", 8, 8,
+			entryAdapterField("boot_services", 0, 8, 8),
+		),
+		"DelegatedBytes": entryAdapterTypeInfo("DelegatedBytes", 16, 8,
+			entryAdapterField("address", 0, 8, 8),
+			entryAdapterField("length", 8, 8, 8),
+		),
+		"UefiMemoryMap": entryAdapterTypeInfo("UefiMemoryMap", 32, 8,
+			entryAdapterField("descriptors", 0, 8, 8),
+			entryAdapterField("descriptor_size", 8, 8, 8),
+			entryAdapterField("descriptor_version", 16, 4, 4),
+			entryAdapterField("key", 24, 8, 8),
+		),
+		"DelegatedMemory": entryAdapterTypeInfo("DelegatedMemory", 32, 8,
+			entryAdapterField("arena_base", 0, 8, 8),
+			entryAdapterField("arena_length", 8, 8, 8),
+			entryAdapterField("next_offset", 16, 8, 8),
+			entryAdapterField("last_memory_map", 24, 8, 8),
+		),
+		"DelegatedHardware": entryAdapterTypeInfo("DelegatedHardware", 24, 8,
+			entryAdapterField("image_handle", 0, 8, 8),
+			entryAdapterField("boot_services", 8, 8, 8),
+			entryAdapterField("delegated_memory", 16, 8, 8),
+		),
+		"UefiSystemTable": {
+			Name: "UefiSystemTable",
+			Kind: ir.TypeKindClass,
+			Fields: map[string]ir.FieldInfo{
+				"boot_services": {Name: "boot_services", Offset: bootServicesOffset, Size: 8, Align: 8},
+			},
+		},
+	}
+}
+
+func entryAdapterTypeInfo(name string, size, align int, fields ...ir.FieldInfo) ir.TypeInfo {
+	info := ir.TypeInfo{
+		Name:   name,
+		Kind:   ir.TypeKindData,
+		Size:   size,
+		Align:  align,
+		Fields: map[string]ir.FieldInfo{},
+	}
+	for _, field := range fields {
+		info.Fields[field.Name] = field
+	}
+	return info
+}
+
+func entryAdapterField(name string, offset, size, align int) ir.FieldInfo {
+	return ir.FieldInfo{Name: name, Offset: offset, Size: size, Align: align}
 }

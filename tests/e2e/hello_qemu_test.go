@@ -14,15 +14,16 @@ import (
 func TestHelloQEMU(t *testing.T) {
 	qemuBin, err := exec.LookPath("qemu-system-x86_64")
 	if err != nil {
-		t.Skip("qemu-system-x86_64 not found in PATH")
+		t.Fatalf("qemu-system-x86_64 not found in PATH: %v", err)
 	}
-	code := os.Getenv("WRELA_OVMF_CODE")
-	vars := os.Getenv("WRELA_OVMF_VARS")
-	if code == "" || vars == "" {
-		t.Skip("WRELA_OVMF_CODE and WRELA_OVMF_VARS must be set")
+	firmware, err := qemu.ResolveFirmware(qemuBin)
+	if err != nil {
+		t.Fatalf("resolve QEMU firmware: %v", err)
 	}
 
 	tmp := t.TempDir()
+	vars := filepath.Join(tmp, "OVMF_VARS.fd")
+	copyFile(t, firmware.Vars, vars)
 	image := filepath.Join(tmp, "hello.efi")
 	_, err = compiler.Build(compiler.BuildOptions{
 		Mode:       compiler.ModeDev,
@@ -36,7 +37,7 @@ func TestHelloQEMU(t *testing.T) {
 
 	out, err := qemu.Run(qemu.Options{
 		QEMUBinary:  qemuBin,
-		OVMFCode:    code,
+		OVMFCode:    firmware.Code,
 		OVMFVars:    vars,
 		ESPDir:      filepath.Join(tmp, "esp"),
 		ImagePath:   image,
@@ -47,5 +48,16 @@ func TestHelloQEMU(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello from wrela") {
 		t.Fatalf("serial output missing hello line:\n%s", out)
+	}
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", dst, err)
 	}
 }

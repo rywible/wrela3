@@ -10,6 +10,8 @@ var precedence = map[lex.Kind]int{
 	lex.Dot:          90,
 	lex.LParen:       90,
 	lex.Star:         80,
+	lex.Slash:        80,
+	lex.Percent:      80,
 	lex.Plus:         70,
 	lex.Minus:        70,
 	lex.ShiftLeft:    60,
@@ -32,6 +34,9 @@ func (p *Parser) parseExpr(minPrec int) (ast.Expr, []diag.Diagnostic) {
 	}
 
 	for {
+		if p.peek().Kind == lex.Newline && p.peekN(1).Kind == lex.Dot {
+			p.next()
+		}
 		tok := p.peek()
 		prec, ok := precedence[tok.Kind]
 		if !ok || prec < minPrec {

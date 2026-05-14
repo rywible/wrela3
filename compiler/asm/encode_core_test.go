@@ -113,6 +113,38 @@ func TestEncodeExactInstructions(t *testing.T) {
 			want: []byte{0x4D, 0x8B, 0xD9},
 		},
 		{
+			name: "mov low byte register requiring rex",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{must(Lookup("al"))},
+				RegOperand{must(Lookup("sil"))},
+			}}},
+			want: []byte{0x40, 0x8A, 0xC6},
+		},
+		{
+			name: "mov low byte register to al requiring rex",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{must(Lookup("spl"))},
+				RegOperand{must(Lookup("al"))},
+			}}},
+			want: []byte{0x40, 0x8A, 0xE0},
+		},
+		{
+			name: "mov r8w imm16",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{must(Lookup("r8w"))},
+				ImmOperand{Value: 0x1234},
+			}}},
+			want: []byte{0x66, 0x41, 0xB8, 0x34, 0x12},
+		},
+		{
+			name: "mov r8d imm32",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{must(Lookup("r8d"))},
+				ImmOperand{Value: 0x12345678},
+			}}},
+			want: []byte{0x41, 0xB8, 0x78, 0x56, 0x34, 0x12},
+		},
+		{
 			name: "call rax",
 			code: []Instruction{{Mnemonic: "call", Operands: []Operand{RegOperand{must(Lookup("rax"))}}}},
 			want: []byte{0xFF, 0xD0},
@@ -124,6 +156,14 @@ func TestEncodeExactInstructions(t *testing.T) {
 				ImmOperand{Value: 32},
 			}}},
 			want: []byte{0x48, 0x83, 0xEC, 0x20},
+		},
+		{
+			name: "sub ax imm16",
+			code: []Instruction{{Mnemonic: "sub", Operands: []Operand{
+				RegOperand{must(Lookup("ax"))},
+				ImmOperand{Value: 0x1234},
+			}}},
+			want: []byte{0x66, 0x81, 0xE8, 0x34, 0x12},
 		},
 		{
 			name: "cmp rax, r10",

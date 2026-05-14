@@ -114,6 +114,132 @@ func TestLowerKeepsAsmMethodsThatUseUEFIBridgeInstructions(t *testing.T) {
 	}
 }
 
+func TestLowerStoresModuleQualifiedTypeInfoForSameNameTypes(t *testing.T) {
+	dataResult := &sem.Type{Module: "data.mod", Name: "Result", Kind: sem.KindData}
+	classResult := &sem.Type{Module: "class.mod", Name: "Result", Kind: sem.KindClass}
+	checked := &sem.CheckedProgram{
+		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
+			"data.mod":  {"Result": dataResult},
+			"class.mod": {"Result": classResult},
+		}},
+	}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("diags = %#v", diags)
+	}
+	if got := program.Types["data.mod.Result"].Kind; got != TypeKindData {
+		t.Fatalf("data.mod.Result kind = %s, want %s", got, TypeKindData)
+	}
+	if got := program.Types["class.mod.Result"].Kind; got != TypeKindClass {
+		t.Fatalf("class.mod.Result kind = %s, want %s", got, TypeKindClass)
+	}
+}
+
+func TestLowerAsmMethodsAreDeterministicByModuleTypeMethod(t *testing.T) {
+	types := map[string]map[string]*sem.Type{
+		"z.module": {
+			"ZType": asmTestType("z.module", "ZType", "beta", "alpha"),
+		},
+		"a.module": {
+			"BType": asmTestType("a.module", "BType", "beta", "alpha"),
+			"AType": asmTestType("a.module", "AType", "beta", "alpha"),
+		},
+	}
+	checked := &sem.CheckedProgram{Index: &sem.Index{ByModule: types}}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("diags = %#v", diags)
+	}
+
+	var got []string
+	for _, method := range program.AsmMethods {
+		got = append(got, method.Symbol)
+	}
+	want := []string{
+		"_wrela_method_a_module_AType_alpha",
+		"_wrela_method_a_module_AType_beta",
+		"_wrela_method_a_module_BType_alpha",
+		"_wrela_method_a_module_BType_beta",
+		"_wrela_method_z_module_ZType_alpha",
+		"_wrela_method_z_module_ZType_beta",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("asm method order = %#v, want %#v", got, want)
+	}
+}
+
+func TestLowerFieldAssignmentEvaluatesTargetObjectBeforeValue(t *testing.T) {
+	u64 := &sem.Type{Name: "U64", Kind: sem.KindPrimitive}
+	holder := &sem.Type{
+		Module: "test.assign",
+		Name:   "Holder",
+		Kind:   sem.KindClass,
+		Fields: []sem.Field{{Name: "field", Type: u64}},
+	}
+	tester := &sem.Type{
+		Module: "test.assign",
+		Name:   "Tester",
+		Kind:   sem.KindClass,
+		Methods: []sem.Method{
+			{Name: "value_marker", Return: u64},
+			{Name: "target_marker", Return: holder},
+			{Name: "run", Return: &sem.Type{Name: "void", Kind: sem.KindPrimitive}},
+		},
+	}
+	checked := &sem.CheckedProgram{
+		Modules: []*ast.Module{{
+			Name: "test.assign",
+			Decls: []ast.Decl{&ast.ClassDecl{
+				Name: "Tester",
+				Methods: []ast.MethodDecl{{
+					Name:   "run",
+					Return: "void",
+					Body: []ast.Stmt{&ast.AssignStmt{
+						Target: &ast.FieldExpr{
+							Base:  &ast.CallExpr{Receiver: &ast.NameExpr{Name: "self"}, Method: "target_marker"},
+							Field: "field",
+						},
+						Value: &ast.CallExpr{Receiver: &ast.NameExpr{Name: "self"}, Method: "value_marker"},
+					}},
+				}},
+			}},
+		}},
+		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
+			"test.assign": {
+				"Holder": holder,
+				"Tester": tester,
+			},
+		}},
+	}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("diags = %#v", diags)
+	}
+	fn := findFunction(program, "_wrela_method_test_assign_Tester_run")
+	if fn == nil {
+		t.Fatal("missing lowered run method")
+	}
+	assertFunctionCallOrder(t, *fn,
+		"_wrela_method_test_assign_Tester_target_marker",
+		"_wrela_method_test_assign_Tester_value_marker",
+	)
+}
+
+func asmTestType(module, name string, methods ...string) *sem.Type {
+	typ := &sem.Type{Module: module, Name: name, Kind: sem.KindClass}
+	for _, method := range methods {
+		typ.Methods = append(typ.Methods, sem.Method{
+			Name:    method,
+			IsAsm:   true,
+			AsmBody: &ast.AsmBody{Source: "ret"},
+		})
+	}
+	return typ
+}
+
 func findFunction(program *Program, symbol string) *Function {
 	for i := range program.Functions {
 		if program.Functions[i].Symbol == symbol {

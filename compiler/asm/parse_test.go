@@ -84,3 +84,20 @@ func TestParseBodySpacedDisplacementAndHighBitImmediate(t *testing.T) {
 		t.Fatalf("immediate = %#x, want high-bit UEFI status", uint64(imm.Value))
 	}
 }
+
+func TestParseBodyFieldOffsetMemoryOperand(t *testing.T) {
+	instructions, diags := ParseBody("mov rax, [rax + UefiBootServices.get_memory_map]", nil)
+	if len(diags) != 0 {
+		t.Fatalf("expected no diagnostics, got %v", diags)
+	}
+	if len(instructions) != 1 {
+		t.Fatalf("len(instructions) = %d, want 1", len(instructions))
+	}
+	mem, ok := instructions[0].Operands[1].(FieldOffsetMemOperand)
+	if !ok {
+		t.Fatalf("operand = %#v, want field-offset memory operand", instructions[0].Operands[1])
+	}
+	if mem.Base.Name != "rax" || mem.Type != "UefiBootServices" || mem.Field != "get_memory_map" {
+		t.Fatalf("field-offset memory operand = %#v", mem)
+	}
+}

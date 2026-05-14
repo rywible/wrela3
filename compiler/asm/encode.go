@@ -240,7 +240,6 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Message: "unknown instruction: " + ins.Mnemonic,
 			})
 		}
-		_ = start
 	}
 
 	for _, fix := range fixups {
@@ -391,12 +390,15 @@ func encodeMovRegImm(dst Reg, value int64) ([]byte, bool) {
 	width := dst.Width
 	switch width {
 	case 8:
-		return append([]byte{0xB0 + byte(dst.Low3)}, byte(value)), true
+		p := rexForOperand(false, Reg{}, dst)
+		return append(p, 0xB0+byte(dst.Low3), byte(value)), true
 	case 16:
-		return []byte{0x66, 0xB8 + byte(dst.Low3), byte(value), byte(value >> 8)}, true
+		p := rexForOperand(false, Reg{}, dst)
+		return append(append([]byte{0x66}, p...), 0xB8+byte(dst.Low3), byte(value), byte(value>>8)), true
 	case 32:
-		return []byte{0xB8 + byte(dst.Low3),
-			byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24)}, true
+		p := rexForOperand(false, Reg{}, dst)
+		return append(p, 0xB8+byte(dst.Low3),
+			byte(value), byte(value>>8), byte(value>>16), byte(value>>24)), true
 	case 64:
 		p := rexForOperand(true, Reg{}, dst)
 		return append(p, 0xB8+byte(dst.Low3), byte(value), byte(value>>8), byte(value>>16), byte(value>>24),
@@ -479,6 +481,8 @@ func encodeBinaryImm(ins Instruction, ext, op8, op32 byte) ([]byte, bool) {
 	if imm.Value >= -128 && imm.Value <= 127 {
 		opcode = op8
 		emit = []byte{byte(imm.Value)}
+	} else if width == 16 {
+		emit = []byte{byte(imm.Value), byte(imm.Value >> 8)}
 	} else {
 		emit = []byte{byte(imm.Value), byte(imm.Value >> 8), byte(imm.Value >> 16), byte(imm.Value >> 24)}
 	}
@@ -696,7 +700,7 @@ func sib(scale, index, base int) byte {
 }
 
 func rexForOperand(w bool, reg, rm Reg) []byte {
-	if !w && !reg.High && !rm.High {
+	if !w && !reg.High && !rm.High && !reg.REX && !rm.REX {
 		return nil
 	}
 	p := byte(0x40)

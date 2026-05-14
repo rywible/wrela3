@@ -51,6 +51,47 @@ func TestCompileWhileLoops(t *testing.T) {
 	}
 }
 
+func TestCompileIfUsesMaterializedComparisonCondition(t *testing.T) {
+	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
+	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}
+	cond := &ir.Binary{
+		Op:    "lt",
+		Left:  left,
+		Right: right,
+		Type:  ir.Type{Name: "Bool"},
+	}
+	done := &ir.ConstInt{Symbol: "done", Value: 0, Type: ir.Type{Name: "U64"}}
+	fn := ir.Function{
+		Symbol: "if_materialized_cond",
+		Params: []ir.Value{left, right},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops: []ir.Operation{
+				&ir.If{
+					ConditionOps: []ir.Operation{cond},
+					Condition:    cond,
+					Then:         []ir.Operation{},
+				},
+				done,
+				&ir.Return{Value: done},
+			},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := image.Sections[0].Data
+	if bytes.Contains(code, []byte{0x0F, 0x8D}) {
+		t.Fatalf("if condition should branch on stored bool instead of recomputing lt comparison: %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x0F, 0x84}) {
+		t.Fatalf("expected false branch to test materialized bool with jz: %#x", code)
+	}
+}
+
 func TestCompileForBytes(t *testing.T) {
 	input := &ir.Param{Symbol: "input", Type: ir.Type{Name: "Bytes"}}
 	done := &ir.ConstInt{
@@ -380,6 +421,26 @@ func TestBuildFrameUsesDeclaredReturnForNestedDataReturn(t *testing.T) {
 	frame := buildFrame(fn, compileContext{types: wideRecordTypes()})
 	if !frame.HasRecordReturn || frame.RecordReturnSlot == 0 {
 		t.Fatalf("frame = %#v, want hidden record-return slot from declared return type", frame)
+	}
+}
+
+func TestRecordReturnRequiresTypeInfoKindData(t *testing.T) {
+	ctx := compileContext{types: map[string]ir.TypeInfo{
+		"data.mod.Result":  {Module: "data.mod", Name: "Result", Kind: ir.TypeKindData},
+		"class.mod.Result": {Module: "class.mod", Name: "Result", Kind: ir.TypeKindClass},
+		"NamedResult":      {Name: "NamedResult", Kind: ir.TypeKindClass},
+	}}
+	if !ctx.shouldPassRecordReturn(ir.Type{Module: "data.mod", Name: "Result"}) {
+		t.Fatal("module-qualified data type should use hidden record return")
+	}
+	if ctx.shouldPassRecordReturn(ir.Type{Module: "class.mod", Name: "Result"}) {
+		t.Fatal("module-qualified non-data type with same name must not use hidden record return")
+	}
+	if ctx.shouldPassRecordReturn(ir.Type{Name: "NamedResult"}) {
+		t.Fatal("non-data TypeInfo kind must not use hidden record return based on name")
+	}
+	if ctx.shouldPassRecordReturn(ir.Type{Name: "MissingResult"}) {
+		t.Fatal("missing TypeInfo must not use hidden record return based on Result suffix")
 	}
 }
 

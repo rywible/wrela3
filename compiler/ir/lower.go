@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -170,8 +171,20 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 	if typ == nil {
 		return TypeInfo{Name: "U64", Kind: TypeKindPrimitive, Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
 	}
-	if info, ok := ctx.program.Types[typ.Name]; ok && (info.Size != 0 || info.Align != 0 || len(info.Fields) != 0 || typ.Name == "never" || typ.Name == "void") {
-		return info
+	if typ.Kind == sem.KindPrimitive {
+		if info, ok := ctx.program.Types[typ.Name]; ok {
+			return info
+		}
+	}
+	infoKey := typeInfoKey(typ.Module, typ.Name)
+	if typ.Module != "" {
+		if info, ok := ctx.program.Types[infoKey]; ok && typeInfoReady(info, typ.Name) {
+			return info
+		}
+	} else {
+		if info, ok := ctx.program.Types[typ.Name]; ok && typeInfoReady(info, typ.Name) {
+			return info
+		}
 	}
 	key := typeKey(typ.Module, typ.Name)
 	if visiting[key] {
@@ -247,9 +260,16 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 	if info.StorageSize == 0 {
 		info.StorageSize = info.Size
 	}
+	if typ.Module != "" {
+		ctx.program.Types[infoKey] = info
+	}
 	ctx.program.Types[typ.Name] = info
 	delete(visiting, key)
 	return info
+}
+
+func typeInfoReady(info TypeInfo, name string) bool {
+	return info.Size != 0 || info.Align != 0 || len(info.Fields) != 0 || name == "never" || name == "void"
 }
 
 func (ctx *lowerContext) findImage() (string, *ast.ImageDecl, string) {
@@ -784,14 +804,44 @@ func (ctx *lowerContext) lowerAsmMethods() []AsmMethod {
 	if ctx == nil || ctx.checked == nil || ctx.checked.Index == nil {
 		return out
 	}
-	for moduleName, byName := range ctx.checked.Index.ByModule {
-		for _, typ := range byName {
+	var modules []string
+	for moduleName := range ctx.checked.Index.ByModule {
+		modules = append(modules, moduleName)
+	}
+	sort.Strings(modules)
+	for _, moduleName := range modules {
+		byName := ctx.checked.Index.ByModule[moduleName]
+		var typeNames []string
+		for typeName := range byName {
+			typeNames = append(typeNames, typeName)
+		}
+		sort.Strings(typeNames)
+		for _, name := range typeNames {
+			if typ := byName[name]; typ != nil {
+				ctx.ensureTypeInfo(typ, map[string]bool{})
+			}
+		}
+	}
+	typeFieldOffsets := ctx.typeFieldOffsets()
+	for _, moduleName := range modules {
+		byName := ctx.checked.Index.ByModule[moduleName]
+		var typeNames []string
+		for typeName := range byName {
+			typeNames = append(typeNames, typeName)
+		}
+		sort.Strings(typeNames)
+		for _, name := range typeNames {
+			typ := byName[name]
 			if typ == nil {
 				continue
 			}
 			typeInfo := ctx.ensureTypeInfo(typ, map[string]bool{})
 			offsets, widths := receiverLayout(typeInfo)
-			for _, method := range typ.Methods {
+			methods := append([]sem.Method(nil), typ.Methods...)
+			sort.Slice(methods, func(i, j int) bool {
+				return methods[i].Name < methods[j].Name
+			})
+			for _, method := range methods {
 				if !method.IsAsm || method.AsmBody == nil {
 					continue
 				}
@@ -803,8 +853,28 @@ func (ctx *lowerContext) lowerAsmMethods() []AsmMethod {
 					Body:                 method.AsmBody.Source,
 					ReceiverFieldOffsets: offsets,
 					ReceiverFieldWidths:  widths,
+					TypeFieldOffsets:     typeFieldOffsets,
 				})
 			}
+		}
+	}
+	return out
+}
+
+func (ctx *lowerContext) typeFieldOffsets() map[string]map[string]int {
+	out := map[string]map[string]int{}
+	for _, info := range ctx.program.Types {
+		fields := map[string]int{}
+		for _, fieldName := range info.FieldOrder {
+			field := info.Fields[fieldName]
+			fields[strings.ToLower(fieldName)] = field.Offset
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		out[strings.ToLower(info.Name)] = fields
+		if info.Module != "" {
+			out[strings.ToLower(info.Module+"."+info.Name)] = fields
 		}
 	}
 	return out
@@ -881,5 +951,12 @@ func receiverHasMethodReturning(receiver *sem.Type, ret *sem.Type) bool {
 }
 
 func typeKey(moduleName, name string) string {
+	return moduleName + "." + name
+}
+
+func typeInfoKey(moduleName, name string) string {
+	if moduleName == "" {
+		return name
+	}
 	return moduleName + "." + name
 }

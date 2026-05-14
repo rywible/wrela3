@@ -55,6 +55,7 @@ func Build(opts BuildOptions) (BuildResult, error) {
 	if !filepath.IsAbs(outputPath) {
 		outputPath = filepath.Join(repoRoot, outputPath)
 	}
+	outputPath = filepath.Clean(outputPath)
 	graph, err := source.LoadGraph(source.Options{
 		RootPath: rootPath,
 		ImportRoots: []string{
@@ -95,7 +96,7 @@ func Build(opts BuildOptions) (BuildResult, error) {
 	if err := os.WriteFile(outputPath, bytes, 0o644); err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{OutputPath: opts.OutputPath}, nil
+	return BuildResult{OutputPath: outputPath}, nil
 }
 
 func resolveRepoRoot(raw string) string {

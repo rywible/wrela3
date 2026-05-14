@@ -29,7 +29,7 @@ func Args(opts Options) []string {
 	}
 	cpu := opts.CPU
 	if cpu == "" {
-		cpu = "x86-64-v3"
+		cpu = "Haswell-v3"
 	}
 	return []string{
 		"-machine", "q35",
@@ -59,23 +59,6 @@ func Run(opts Options) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, Args(opts)...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	err := cmd.Run()
-	out := output.String()
-	if opts.SuccessText != "" && strings.Contains(out, opts.SuccessText) {
-		return out, nil
-	}
-	if err != nil && opts.CPU == "" && strings.Contains(out, "unable to find CPU model 'x86-64-v3'") {
-		opts.CPU = "Haswell-v3"
-		return runStaged(ctx, bin, opts)
-	}
-	return out, err
-}
-
-func runStaged(ctx context.Context, bin string, opts Options) (string, error) {
 	cmd := exec.CommandContext(ctx, bin, Args(opts)...)
 	var output bytes.Buffer
 	cmd.Stdout = &output

@@ -3,7 +3,6 @@ package codegen
 import (
 	"encoding/binary"
 	"fmt"
-	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -93,7 +92,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		units = append(units, unit)
 	}
 	if program.Entry.Symbol != "" {
-		unit, ds := compileEntryAdapterUnit(program.Entry)
+		unit, ds := compileEntryAdapterUnit(program.Entry, ctx)
 		if len(ds) != 0 {
 			return nil, ds
 		}
@@ -244,9 +243,9 @@ func compileAsmMethodUnit(method ir.AsmMethod) (compiledUnit, []diag.Diagnostic)
 	return compiledUnit{Symbol: method.Symbol, Bytes: code}, nil
 }
 
-func compileEntryAdapterUnit(entry ir.EntryAdapter) (compiledUnit, []diag.Diagnostic) {
+func compileEntryAdapterUnit(entry ir.EntryAdapter, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
 	e := &Emitter{Labels: map[string]int{}}
-	emitEntryAdapter(e, entry)
+	emitEntryAdapter(e, entry, ctx)
 	e.resolveJumps()
 	if len(e.Diags) != 0 {
 		return compiledUnit{}, e.Diags
@@ -266,7 +265,7 @@ func buildFrame(fn ir.Function, ctx compileContext) Frame {
 		offset += 8
 		continuationSlot = -offset
 	}
-	if ctx.shouldPassRecordReturn(returnType.Name) {
+	if ctx.shouldPassRecordReturn(returnType) {
 		offset += 8
 		recordReturnSlot = -offset
 		hasRecordReturn = true
@@ -306,7 +305,7 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 	case *ir.Construct, *ir.StringLiteral:
 		return true
 	case *ir.Call:
-		return ctx.shouldPassRecordReturn(v.Type.Name)
+		return ctx.shouldPassRecordReturn(v.Type)
 	default:
 		return false
 	}
@@ -344,7 +343,7 @@ func firstReturnTypeInOps(ops []ir.Operation) (ir.Type, bool) {
 		switch v := op.(type) {
 		case *ir.Return:
 			if v.Value != nil {
-				return ir.Type{Name: valueTypeName(v.Value)}, true
+				return valueType(v.Value), true
 			}
 		case *ir.If:
 			if typ, ok := firstReturnTypeInOps(v.Then); ok {
@@ -457,14 +456,24 @@ func isHandleTypeKind(kind ir.TypeKind) bool {
 	}
 }
 
-func (ctx compileContext) shouldPassRecordReturn(typeName string) bool {
-	if typeName == "" || typeName == "never" {
+func (ctx compileContext) shouldPassRecordReturn(typ ir.Type) bool {
+	if typ.Name == "" || typ.Name == "never" {
 		return false
 	}
-	if info, ok := ctx.types[typeName]; ok {
+	if info, ok := ctx.typeInfo(typ); ok {
 		return info.Kind == ir.TypeKindData
 	}
-	return shouldPassRecordReturn(typeName)
+	return false
+}
+
+func (ctx compileContext) typeInfo(typ ir.Type) (ir.TypeInfo, bool) {
+	if typ.Module != "" {
+		if info, ok := ctx.types[typ.Module+"."+typ.Name]; ok {
+			return info, true
+		}
+	}
+	info, ok := ctx.types[typ.Name]
+	return info, ok
 }
 
 func valueWidthBits(ctx compileContext, value ir.Value) int {
@@ -653,7 +662,7 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 		})
 		return
 	}
-	if e.ctx.shouldPassRecordReturn(call.Type.Name) {
+	if e.ctx.shouldPassRecordReturn(call.Type) {
 		slot, ok := frame.ObjectSlots[call]
 		if !ok {
 			e.Diags = append(e.Diags, diag.Diagnostic{
@@ -678,25 +687,6 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 	if slot, ok := frame.Slots[call]; ok && call.Type.Name != "void" && call.Type.Name != "never" {
 		emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(e.ctx, call))
 	}
-}
-
-func shouldPassRecordReturn(typeName string) bool {
-	if typeName == "" || typeName == "never" {
-		return false
-	}
-	if isRegisterReturnedType(typeName) {
-		return false
-	}
-	if strings.HasSuffix(typeName, "Result") {
-		return true
-	}
-	switch typeName {
-	case "Bytes", "MutableBytes", "DelegatedBytes", "DelegatedMutableBytes",
-		"UefiHandle", "UefiStatus", "UefiMemoryMap", "Com1IoPortClaim",
-		"ExecutorPlacement", "MemoryPlan", "VirtualMemoryPlan", "CpuPlan":
-		return true
-	}
-	return false
 }
 
 func isRegisterReturnedType(typeName string) bool {
@@ -750,7 +740,7 @@ func emitIf(e *Emitter, cond *ir.If, frame Frame) {
 	done := e.newLabel("if_done")
 	elseLabel := e.newLabel("if_else")
 	emitOperations(e, cond.ConditionOps, frame)
-	emitConditionJump(e, cond.Condition, elseLabel, frame)
+	emitMaterializedConditionJump(e, cond.Condition, elseLabel, frame)
 	emitOperations(e, cond.Then, frame)
 	e.emitJmp(done)
 	e.bindLabel(elseLabel)
@@ -763,7 +753,7 @@ func emitWhile(e *Emitter, wh *ir.While, frame Frame) {
 	done := e.newLabel("while_done")
 	e.bindLabel(start)
 	emitOperations(e, wh.ConditionOps, frame)
-	emitConditionJump(e, wh.Condition, done, frame)
+	emitMaterializedConditionJump(e, wh.Condition, done, frame)
 	emitOperations(e, wh.Body, frame)
 	e.emitJmp(start)
 	e.bindLabel(done)
@@ -855,29 +845,38 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 }
 
 func emitConditionJump(e *Emitter, cond ir.Value, falseTarget string, frame Frame) {
+	emitConditionJumpMode(e, cond, falseTarget, frame, false)
+}
+
+func emitMaterializedConditionJump(e *Emitter, cond ir.Value, falseTarget string, frame Frame) {
+	emitConditionJumpMode(e, cond, falseTarget, frame, true)
+}
+
+func emitConditionJumpMode(e *Emitter, cond ir.Value, falseTarget string, frame Frame, materialized bool) {
 	switch c := cond.(type) {
 	case *ir.ConstInt:
 		if c.Value == 0 {
 			e.emitJmp(falseTarget)
 		}
 	case *ir.Binary:
-		if isComparisonOp(c.Op) {
+		if isComparisonOp(c.Op) && !materialized {
 			emitLoadValue(e, frame, c.Left, scratchRegs[0])
 			emitLoadValue(e, frame, c.Right, scratchRegs[1])
 			emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
 			e.emitJcc(negateConditionOpcode(c.Op), falseTarget)
 			return
 		}
-		emitLoadValue(e, frame, cond, scratchRegs[0])
-		emitMovImmToReg(e, scratchRegs[1], 0)
-		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
-		e.emitJcc(0x84, falseTarget)
+		emitStoredConditionJump(e, cond, falseTarget, frame)
 	default:
-		emitLoadValue(e, frame, cond, scratchRegs[0])
-		emitMovImmToReg(e, scratchRegs[1], 0)
-		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
-		e.emitJcc(0x84, falseTarget)
+		emitStoredConditionJump(e, cond, falseTarget, frame)
 	}
+}
+
+func emitStoredConditionJump(e *Emitter, cond ir.Value, falseTarget string, frame Frame) {
+	emitLoadValue(e, frame, cond, scratchRegs[0])
+	emitMovImmToReg(e, scratchRegs[1], 0)
+	emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
+	e.emitJcc(0x84, falseTarget)
 }
 
 func emitStringLiteral(e *Emitter, op *ir.StringLiteral, frame Frame) {
@@ -1142,25 +1141,29 @@ func copyWidth(remainingBytes int) int {
 }
 
 func valueTypeName(value ir.Value) string {
+	return valueType(value).Name
+}
+
+func valueType(value ir.Value) ir.Type {
 	switch v := value.(type) {
 	case *ir.Param:
-		return v.Type.Name
+		return v.Type
 	case *ir.Local:
-		return v.Type.Name
+		return v.Type
 	case *ir.ConstInt:
-		return v.Type.Name
+		return v.Type
 	case *ir.Binary:
-		return v.Type.Name
+		return v.Type
 	case *ir.Call:
-		return v.Type.Name
+		return v.Type
 	case *ir.FieldLoad:
-		return v.Type.Name
+		return v.Type
 	case *ir.Construct:
-		return v.Type.Name
+		return v.Type
 	case *ir.StringLiteral:
-		return v.Type.Name
+		return v.Type
 	default:
-		return ""
+		return ir.Type{}
 	}
 }
 

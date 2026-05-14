@@ -47,8 +47,7 @@ func TestUEFIPlatformBootServicesAndTransitionAsmShapes(t *testing.T) {
 		"add r9, 40",
 		"add r11, 48",
 		"mov [rsp + 32], r11",
-		"mov rax, [rax]",
-		"mov rax, [rax + 56]",
+		"mov rax, [rax + UefiBootServices.get_memory_map]",
 		"call rax",
 		"mov r10, [rax]",
 		"mov [r10], r11",
@@ -60,18 +59,18 @@ func TestUEFIPlatformBootServicesAndTransitionAsmShapes(t *testing.T) {
 			t.Fatalf("get_memory_map body missing %q in:\n%s", want, getMap.AsmBody.Source)
 		}
 	}
-	if !strings.Contains(getMap.AsmBody.Source, "mov rax, [rax]\n        mov rdx") {
-		t.Fatalf("get_memory_map should dereference the UefiBootServices handle before table lookup: %s", getMap.AsmBody.Source)
+	if strings.Contains(getMap.AsmBody.Source, "mov rax, [rax]\n        mov rdx") {
+		t.Fatalf("get_memory_map should use the firmware BootServices table handle directly: %s", getMap.AsmBody.Source)
 	}
 
 	if !strings.Contains(exitBS.AsmBody.Source, "sub rsp, 48") {
 		t.Fatalf("exit_boot_services body missing aligned shadow/spill frame: %s", exitBS.AsmBody.Source)
 	}
-	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + 232]") {
-		t.Fatalf("exit_boot_services body missing UEFI table offset 232: %s", exitBS.AsmBody.Source)
+	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + UefiBootServices.exit_boot_services]") {
+		t.Fatalf("exit_boot_services body missing source-declared UEFI table offset: %s", exitBS.AsmBody.Source)
 	}
-	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax]\n        mov rax, [rax + 232]") {
-		t.Fatalf("exit_boot_services should dereference the UefiBootServices handle before table lookup: %s", exitBS.AsmBody.Source)
+	if strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax]\n        mov rax, [rax + 232]") {
+		t.Fatalf("exit_boot_services should use the firmware BootServices table handle directly: %s", exitBS.AsmBody.Source)
 	}
 	if !strings.Contains(exitBS.AsmBody.Source, "mov rcx, [rsi]") {
 		t.Fatalf("exit_boot_services body missing image arg move: %s", exitBS.AsmBody.Source)
@@ -169,7 +168,12 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		"mov r9, [r9 + 8]",
 		"mov rax, [r8 + 8]",
 		"mov rcx, [r8 + 24]",
-		"mov [r11 - 12288]",
+		"mov [rbx], rax",
+		"pdpt_slot_loop",
+		"zero_new_pd_loop",
+		"pdpt_slot_after_alloc_loop",
+		"reduce_pd_index",
+		"mov self.next_offset, r14",
 		"jne zero_loop",
 		"pop r15",
 		"pop r14",
@@ -180,6 +184,9 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		if !strings.Contains(identity.AsmBody.Source, want) {
 			t.Fatalf("build_identity_paging asm body missing %q in:\n%s", want, identity.AsmBody.Source)
 		}
+	}
+	if strings.Contains(identity.AsmBody.Source, "cmp r14, 512\n        jge advance_descriptor") {
+		t.Fatalf("build_identity_paging must not skip all mappings above first 1GiB:\n%s", identity.AsmBody.Source)
 	}
 	for _, want := range []string{
 		"self.next_offset",
@@ -332,22 +339,4 @@ func methodByName(t *testing.T, typ *Type, name string) *Method {
 	}
 	t.Fatalf("missing %s.%s method", typ.Name, name)
 	return nil
-}
-
-func findRepoRoot(t *testing.T) string {
-	t.Helper()
-	workdir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	return filepath.Clean(filepath.Join(workdir, "..", ".."))
-}
-
-func readFileText(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(raw)
 }

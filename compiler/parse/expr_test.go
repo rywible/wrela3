@@ -19,6 +19,19 @@ func TestBinaryPrecedence(t *testing.T) {
 	}
 }
 
+func TestSlashAndPercentUseMultiplyPrecedence(t *testing.T) {
+	p := newParser("test", "a + b / c % d")
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	got := ast.DebugExpr(expr)
+	want := "(+ a (% (/ b c) d))"
+	if got != want {
+		t.Fatalf("expr = %q, want %q", got, want)
+	}
+}
+
 func TestConstructorAndMethodExprParsing(t *testing.T) {
 	p := newParser("test", "Device(x: 1)")
 	expr, ds := p.parseExpr(0)
@@ -53,5 +66,20 @@ func TestConstructorAndMethodExprParsing(t *testing.T) {
 	}
 	if _, ok := expr.(*ast.FieldExpr); !ok {
 		t.Fatalf("expr = %#v, want *ast.FieldExpr", expr)
+	}
+}
+
+func TestMethodChainMayContinueAfterNewline(t *testing.T) {
+	p := newParser("test", "self\n.write()")
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("expr = %#v, want *ast.CallExpr", expr)
+	}
+	if call.Method != "write" {
+		t.Fatalf("method = %q, want write", call.Method)
 	}
 }
