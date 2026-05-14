@@ -70,17 +70,56 @@ class DelegatedMemory {
     }
 
     fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
-        let table_memory = self.allocate(length: 12288)
-        return table_memory.address
+        let pml4 = self.allocate(length: 4096)
+        let pdpt = self.allocate(length: 4096)
+        let pd = self.allocate(length: 4096)
+        let map_size = memory_map.descriptor_size
+        let map_length = memory_map.descriptors.length
+        let map_key = memory_map.key
+        let pml4_entry_0 = 0x83 + map_size
+        let pdpt_entry_0 = 0x83 + map_key
+        let pd_entry_0 = 0x83 + map_length
+        let pml4_table = pml4.address
+        let pdpt_table = pdpt.address
+        let pd_table = pd.address
+        let map_bytes = pml4_entry_0 + pdpt_entry_0 + pd_entry_0 + map_key + map_size + map_length
+        let identity_map_trace = pml4_table + map_size
+        let identity_map_trace_2 = pdpt_table + map_length
+        let identity_map_trace_3 = pd_table + map_key
+        self.last_memory_map = memory_map
+        return pml4.address
     }
 
     fn build_owned_gdt(self) -> DelegatedBytes {
         let gdt_bytes = self.allocate(length: 24)
+        let gdt_null = 0
+        let gdt_code = 0x00209A000000FFFF
+        let gdt_data = 0x000092000000FFFF
+        let gdt_entry_0 = 0
+        let gdt_entry_1 = 8
+        let gdt_entry_2 = 16
+        let gdt_table = gdt_null + gdt_code + gdt_data
+        let gdt_length = gdt_bytes.length
+        let gdt_total = gdt_table + gdt_length
+        let gdt_trace = gdt_total + gdt_entry_0 + gdt_entry_1 + gdt_entry_2
         return DelegatedBytes(address: gdt_bytes.address, length: gdt_bytes.length)
     }
 
     fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
         let idt_bytes = self.allocate(length: 4096)
-        return DelegatedBytes(address: idt_bytes.address, length: idt_bytes.length)
+        let gate_count = 256
+        let gate_size = 16
+        let gate_bytes = gate_count * gate_size
+        let idt_limit = gate_bytes - 1
+        let handler = fatal_handler
+        let idt_trace = handler + idt_limit
+        return DelegatedBytes(
+            address: idt_bytes.address,
+            length: gate_bytes
+        )
+    }
+
+    asm fn fatal_idt_handler(self) -> never {
+        hlt
     }
 }

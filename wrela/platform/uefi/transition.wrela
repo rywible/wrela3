@@ -78,6 +78,7 @@ unique class DelegatedHardware {
         mov cr3, cr3_value
         mov r11, gdt_base
         lgdt [r11]
+        call reload_cs
         mov r11, idt_base
         lidt [r11]
         mov ax, 0x10
@@ -86,7 +87,12 @@ unique class DelegatedHardware {
         mov ss, ax
         mov fs, ax
         mov gs, ax
-        retfq
         ret
+
+    reload_cs:
+        pop rax
+        push 0x08
+        push rax
+        retfq
     }
 }
