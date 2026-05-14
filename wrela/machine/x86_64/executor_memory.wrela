@@ -1,0 +1,33 @@
+module machine.x86_64.executor_memory
+
+data Bytes {
+    address: VirtualAddress
+    length: U64
+}
+
+data MutableBytes {
+    address: VirtualAddress
+    length: U64
+}
+
+class ExecutorMemory {
+    arena_base: VirtualAddress
+    arena_length: U64
+    next_offset: U64
+
+    fn static_bytes(self, value: StringLiteral) -> Bytes {
+        return Bytes(address: value.address, length: value.length)
+    }
+
+    fn allocate_bytes(self, length: U64) -> MutableBytes {
+        let address = self.arena_base + self.next_offset
+        self.next_offset = self.next_offset + length
+        return MutableBytes(address: address, length: length)
+    }
+
+    asm fn halt_forever(self) -> never {
+    loop:
+        hlt
+        jmp loop
+    }
+}

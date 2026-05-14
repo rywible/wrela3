@@ -1,0 +1,16 @@
+module arch.x86_64.io
+
+class PortIo {
+    asm fn out8(self, port: U16, value: U8) {
+        mov dx, port
+        mov al, value
+        out dx, al
+        ret
+    }
+
+    asm fn in8(self, port: U16) -> U8 {
+        mov dx, port
+        in al, dx
+        ret
+    }
+}

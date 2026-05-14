@@ -1,0 +1,20 @@
+module arch.x86_64.cpu
+
+class CpuControl {
+    asm fn pause(self) {
+        pause
+        ret
+    }
+
+    asm fn halt_forever(self) -> never {
+    loop:
+        hlt
+        jmp loop
+    }
+
+    asm fn load_cr3(self, pml4: PhysicalAddress) {
+        mov rax, pml4
+        mov cr3, rax
+        ret
+    }
+}

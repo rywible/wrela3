@@ -1,0 +1,14 @@
+module examples.hello.program
+
+use { ExecutorMemory } from machine.x86_64.executor_memory
+use { SerialWritePath } from machine.x86_64.serial
+
+executor HelloWorld {
+    memory: ExecutorMemory
+    serial_path: SerialWritePath
+
+    start fn run(self) -> never {
+        self.serial_path.write(self.memory.static_bytes("hello from wrela\n"))
+        self.memory.halt_forever()
+    }
+}

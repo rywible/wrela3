@@ -1,0 +1,23 @@
+module platform.uefi.boot_services
+
+use {
+    DelegatedMutableBytes,
+    UefiBootServices,
+    UefiHandle,
+    UefiMemoryMapResult,
+    UefiStatus
+} from platform.uefi.types
+
+class UefiBootServicesCalls {
+    boot_services: UefiBootServices
+
+    asm fn get_memory_map(self, buffer: DelegatedMutableBytes) -> UefiMemoryMapResult {
+        mov rax, self.boot_services
+        ret
+    }
+
+    asm fn exit_boot_services(self, image: UefiHandle, map_key: U64) -> UefiStatus {
+        mov rax, self.boot_services
+        ret
+    }
+}

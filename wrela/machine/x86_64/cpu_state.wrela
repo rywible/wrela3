@@ -1,0 +1,74 @@
+module machine.x86_64.cpu_state
+
+use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+
+data ExecutorPlacement {
+    id: U64
+    memory: ExecutorMemory
+}
+
+data MemoryPlan {
+    owned_memory: OwnedMemory
+    executor_arena: MutableBytes
+    io_ports: IoPortAuthority
+}
+
+data VirtualMemoryPlan {
+    pml4: PhysicalAddress
+}
+
+data CpuPlan {
+    vcpu0: ExecutorPlacement
+    owned_stack_top: VirtualAddress
+    gdt_descriptor: Bytes
+    idt_descriptor: Bytes
+    cr3: PhysicalAddress
+}
+
+class PhysicalMemoryPlanner {
+    memory_plan: MemoryPlan
+
+    fn plan(self) -> MemoryPlan {
+        return self.memory_plan
+    }
+}
+
+class VirtualMemoryPlanner {
+    virtual_memory_plan: VirtualMemoryPlan
+
+    fn identity_map(self) -> VirtualMemoryPlan {
+        return self.virtual_memory_plan
+    }
+}
+
+class CpuPlanner {
+    cpu_plan: CpuPlan
+
+    fn plan(self) -> CpuPlan {
+        return self.cpu_plan
+    }
+}
+
+class OwnedMemory {
+    arena: MutableBytes
+}
+
+class DriverMemory {
+    region: MutableBytes
+}
+
+data Com1IoPortClaim {
+    port_base: U16
+}
+
+class IoPortAuthority {
+    fn claim_com1(self) -> Com1IoPortClaim {
+        return Com1IoPortClaim(port_base: 0x03f8)
+    }
+}
+
+unique class OwnedHardware {
+    memory: OwnedMemory
+    io_ports: IoPortAuthority
+    vcpu0: ExecutorPlacement
+}

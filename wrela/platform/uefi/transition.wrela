@@ -1,0 +1,29 @@
+module platform.uefi.transition
+
+use { DelegatedMemory, UefiHandle } from platform.uefi.types
+use { UefiBootServicesCalls } from platform.uefi.boot_services
+use { CpuPlan, OwnedHardware, MemoryPlan, VirtualMemoryPlan } from machine.x86_64.cpu_state
+
+unique class DelegatedHardware {
+    image_handle: UefiHandle
+    boot_services: UefiBootServicesCalls
+    delegated_memory: DelegatedMemory
+
+    fn exit_to_owned_hardware(
+        self,
+        memory_plan: MemoryPlan,
+        virtual_memory_plan: VirtualMemoryPlan,
+        cpu_plan: CpuPlan
+    ) -> OwnedHardware {
+        let final_map = self.delegated_memory.final_memory_map()
+        self.boot_services.exit_boot_services(
+            image: self.image_handle,
+            map_key: final_map.key
+        )
+        return OwnedHardware(
+            memory: memory_plan.owned_memory,
+            io_ports: memory_plan.io_ports,
+            vcpu0: cpu_plan.vcpu0
+        )
+    }
+}

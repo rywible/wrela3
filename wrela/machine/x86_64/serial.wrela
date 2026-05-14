@@ -1,0 +1,62 @@
+module machine.x86_64.serial
+
+use { Bytes } from machine.x86_64.executor_memory
+use { DriverMemory, ExecutorPlacement } from machine.x86_64.cpu_state
+
+driver path SerialWriterRegisters {
+    port_base: U16
+
+    asm fn write8(self, offset: U16, value: U8) {
+        mov dx, self.port_base
+        add dx, offset
+        mov al, value
+        out dx, al
+        ret
+    }
+
+    asm fn read8(self, offset: U16) -> U8 {
+        mov dx, self.port_base
+        add dx, offset
+        in al, dx
+        ret
+    }
+}
+
+unique driver SerialDriver {
+    registers: SerialWriterRegisters
+    memory: DriverMemory
+
+    fn initialize(self) -> SerialDriver {
+        self.registers.write8(offset: 1, value: 0x00)
+        self.registers.write8(offset: 3, value: 0x80)
+        self.registers.write8(offset: 0, value: 0x03)
+        self.registers.write8(offset: 1, value: 0x00)
+        self.registers.write8(offset: 3, value: 0x03)
+        self.registers.write8(offset: 2, value: 0xC7)
+        self.registers.write8(offset: 4, value: 0x03)
+        return self
+    }
+}
+
+driver path SerialWritePath {
+    owner: ExecutorPlacement
+    registers: SerialWriterRegisters
+
+    fn write(self, bytes: Bytes) {
+        for byte in bytes {
+            self.wait_until_ready()
+            self.registers.write8(offset: 0, value: byte)
+        }
+    }
+
+    fn wait_until_ready(self) {
+        while (self.registers.read8(offset: 5) & 0x20) == 0 {
+            self.pause()
+        }
+    }
+
+    asm fn pause(self) {
+        pause
+        ret
+    }
+}

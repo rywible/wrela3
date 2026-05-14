@@ -1,0 +1,83 @@
+module platform.uefi.types
+
+data UefiHandle {
+    address: U64
+}
+
+data UefiStatus {
+    value: U64
+}
+
+class UefiSystemTable {
+    boot_services: UefiBootServices
+    configuration_tables: UefiConfigurationTables
+}
+
+class UefiBootServices {
+    table_address: VirtualAddress
+}
+
+class UefiConfigurationTables {
+    table_address: VirtualAddress
+    count: U64
+}
+
+data UefiMemoryDescriptor {
+    kind: U32
+    physical_start: PhysicalAddress
+    virtual_start: VirtualAddress
+    number_of_pages: U64
+    attributes: U64
+}
+
+data DelegatedBytes {
+    address: VirtualAddress
+    length: U64
+}
+
+data DelegatedMutableBytes {
+    address: VirtualAddress
+    length: U64
+}
+
+data UefiMemoryMap {
+    descriptors: DelegatedBytes
+    descriptor_size: U64
+    descriptor_version: U32
+    key: U64
+}
+
+data UefiMemoryMapResult {
+    status: UefiStatus
+    memory_map: UefiMemoryMap
+    required_size: U64
+}
+
+class DelegatedMemory {
+    arena_base: VirtualAddress
+    arena_length: U64
+    next_offset: U64
+    last_memory_map: UefiMemoryMap
+
+    fn allocate(self, length: U64) -> DelegatedMutableBytes {
+        let address = self.arena_base + self.next_offset
+        self.next_offset = self.next_offset + length
+        return DelegatedMutableBytes(address: address, length: length)
+    }
+
+    fn final_memory_map(self) -> UefiMemoryMap {
+        return self.last_memory_map
+    }
+
+    asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
+        ret
+    }
+
+    asm fn build_owned_gdt(self) -> DelegatedBytes {
+        ret
+    }
+
+    asm fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
+        ret
+    }
+}
