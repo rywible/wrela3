@@ -27,6 +27,26 @@ image HelloSerial {}`)
 	}
 }
 
+func TestExtractHeaderMultilineUse(t *testing.T) {
+	module, imports, err := source.ExtractHeader(`module examples.hello.main
+use {
+    CpuPlan,
+    OwnedHardware,
+    OwnedMemory
+} from machine.x86_64.cpu_state
+image HelloSerial {}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if module != "examples.hello.main" {
+		t.Fatalf("module = %s", module)
+	}
+	want := []string{"machine.x86_64.cpu_state"}
+	if !reflect.DeepEqual(imports, want) {
+		t.Fatalf("imports = %#v", imports)
+	}
+}
+
 func writeTempSource(t *testing.T, dir, path, sourceText string) {
 	t.Helper()
 	full := filepath.Join(dir, path)

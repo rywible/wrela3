@@ -3,6 +3,7 @@ package lex
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
 )
@@ -149,23 +150,44 @@ func isHexDigit(ch byte) bool {
 func lexString(src string, i int) (Token, int, string) {
 	start := i
 	i++
+	var text strings.Builder
 	for i < len(src) {
 		if src[i] == '\\' {
 			i++
 			if i >= len(src) {
-				return Token{Kind: String, Text: src[start:i], Start: start, End: i}, i, "unterminated string literal"
+				return Token{Kind: String, Text: text.String(), Start: start, End: i}, i, "unterminated string literal"
+			}
+			switch src[i] {
+			case 'n':
+				text.WriteByte('\n')
+			case 'r':
+				text.WriteByte('\r')
+			case 't':
+				text.WriteByte('\t')
+			case '\\':
+				text.WriteByte('\\')
+			case '"':
+				text.WriteByte('"')
+			default:
+				text.WriteByte(src[i])
 			}
 			i++
 			continue
 		}
 		if src[i] == '"' {
 			i++
-			return Token{Kind: String, Text: src[start+1 : i-1], Start: start, End: i}, i, ""
+			return Token{Kind: String, Text: text.String(), Start: start, End: i}, i, ""
 		}
 		if src[i] == '\n' {
-			return Token{Kind: String, Text: src[start+1 : i], Start: start, End: i}, i, "unterminated string literal"
+			return Token{Kind: String, Text: text.String(), Start: start, End: i}, i, "unterminated string literal"
 		}
-		i++
+		r, width := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && width == 0 {
+			return Token{Kind: String, Text: text.String(), Start: start, End: i}, i, "unterminated string literal"
+		}
+		text.WriteRune(r)
+		i += width
+		continue
 	}
-	return Token{Kind: String, Text: src[start+1:], Start: start, End: len(src)}, len(src), "unterminated string literal"
+	return Token{Kind: String, Text: text.String(), Start: start, End: len(src)}, len(src), "unterminated string literal"
 }

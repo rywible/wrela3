@@ -83,6 +83,10 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Message: "unsupported mov form",
 			})
 		case "add":
+			if b, ok := encodeBinaryRegReg(ins, 0x01); ok {
+				out = append(out, b...)
+				break
+			}
 			b, ok := encodeBinaryImm(ins, 0, 0x83, 0x81)
 			if ok {
 				out = append(out, b...)
@@ -258,6 +262,12 @@ func encodeMov(ins Instruction) ([]byte, bool) {
 	}
 	left, right := ins.Operands[0], ins.Operands[1]
 	if dst, ok := left.(RegOperand); ok {
+		if dst.Reg.Segment {
+			if src, ok := right.(RegOperand); ok {
+				return encodeMovSegmentReg(dst.Reg, src.Reg)
+			}
+			return nil, false
+		}
 		if dst.Reg.Control {
 			if src, ok := right.(RegOperand); ok {
 				return encodeMovControlReg(dst.Reg, src.Reg)
@@ -283,6 +293,13 @@ func encodeMov(ins Instruction) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+func encodeMovSegmentReg(dst, src Reg) ([]byte, bool) {
+	if !dst.Segment || strings.ToLower(src.Name) != "ax" {
+		return nil, false
+	}
+	return []byte{0x8E, modrm(3, dst.Low3, src.Low3)}, true
 }
 
 func encodeMovRegReg(dst, src Reg) ([]byte, bool) {
@@ -411,6 +428,30 @@ func encodeBinaryImm(ins Instruction, ext, op8, op32 byte) ([]byte, bool) {
 	op := []byte{opcode, modrm(3, int(ext), reg.Reg.Low3)}
 	op = append(op, emit...)
 	return append(p, op...), true
+}
+
+func encodeBinaryRegReg(ins Instruction, opcode byte) ([]byte, bool) {
+	if len(ins.Operands) != 2 {
+		return nil, false
+	}
+	dst, ok := ins.Operands[0].(RegOperand)
+	if !ok {
+		return nil, false
+	}
+	src, ok := ins.Operands[1].(RegOperand)
+	if !ok {
+		return nil, false
+	}
+	width := max(dst.Reg.Width, src.Reg.Width)
+	p := rexForOperand(width == 64, src.Reg, dst.Reg)
+	switch width {
+	case 16:
+		return append([]byte{0x66}, append(p, opcode, modrm(3, src.Reg.Low3, dst.Reg.Low3))...), true
+	case 32, 64:
+		return append(p, opcode, modrm(3, src.Reg.Low3, dst.Reg.Low3)), true
+	default:
+		return nil, false
+	}
 }
 
 func encodePushPop(ins Instruction, isPush bool) ([]byte, bool) {

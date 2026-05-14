@@ -392,7 +392,7 @@ func (c *checker) checkTypeAssign(span source.Span, targetType, valueType *Type)
 	if targetType == nil || valueType == nil {
 		return
 	}
-	if targetType != valueType {
+	if !typesCompatible(targetType, valueType) {
 		c.error(span, diag.CG0001, fmt.Sprintf("type mismatch: %s cannot assign %s", targetType.Name, valueType.Name))
 	}
 }
@@ -443,6 +443,9 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 		if isComparisonOp(e.Op) {
 			c.requireSame(left, right, e.SpanV)
 			return c.mustType(moduleName, "Bool")
+		}
+		if (e.Op == "+" || e.Op == "-") && isAddressType(left) && isIntegerType(right) {
+			return left
 		}
 		c.requireSame(left, right, e.SpanV)
 		return left
@@ -701,7 +704,7 @@ func (c *checker) requireType(got, want *Type, span source.Span) {
 	if got == nil || want == nil {
 		return
 	}
-	if got != want {
+	if !typesCompatible(want, got) {
 		c.error(span, diag.CG0001, fmt.Sprintf("type mismatch: got %s want %s", got.Name, want.Name))
 	}
 }
@@ -710,9 +713,44 @@ func (c *checker) requireSame(left, right *Type, span source.Span) {
 	if left == nil || right == nil {
 		return
 	}
-	if left != right {
+	if !typesCompatible(left, right) {
 		c.error(span, diag.CG0001, "incompatible types")
 	}
+}
+
+func typesCompatible(target, value *Type) bool {
+	if target == nil || value == nil {
+		return true
+	}
+	if target == value {
+		return true
+	}
+	if isIntegerType(target) && isIntegerType(value) {
+		return true
+	}
+	if isAddressType(target) && (isAddressType(value) || isIntegerType(value)) {
+		return true
+	}
+	return false
+}
+
+func isIntegerType(t *Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Name {
+	case "U8", "U16", "U32", "U64", "I64":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAddressType(t *Type) bool {
+	if t == nil {
+		return false
+	}
+	return t.Name == "PhysicalAddress" || t.Name == "VirtualAddress"
 }
 
 func (c *checker) requireBytesIterable(typ *Type, span source.Span) {

@@ -65,3 +65,13 @@ func TestLexBadString(t *testing.T) {
 		t.Fatalf("code = %s, want %s", ds[0].Code, diag.PAR0001)
 	}
 }
+
+func TestLexStringEscapesNewline(t *testing.T) {
+	toks, ds := All(`"hello\n"`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if got, want := toks[0].Text, "hello\n"; got != want {
+		t.Fatalf("string text = %q, want %q", got, want)
+	}
+}

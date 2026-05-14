@@ -180,6 +180,11 @@ func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
 func compileAsmMethodUnit(method ir.AsmMethod) (compiledUnit, []diag.Diagnostic) {
 	_, diags, code := lowerAndEncodeAsmMethod(method)
 	if len(diags) != 0 {
+		for i := range diags {
+			if method.Symbol != "" {
+				diags[i].Message = method.Symbol + ": " + diags[i].Message
+			}
+		}
 		return compiledUnit{}, diags
 	}
 	return compiledUnit{Symbol: method.Symbol, Bytes: code}, nil

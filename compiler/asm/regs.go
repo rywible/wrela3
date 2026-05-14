@@ -6,6 +6,7 @@ type Reg struct {
 	Low3    int
 	High    bool
 	Control bool
+	Segment bool
 }
 
 var regs = map[string]Reg{}
@@ -19,6 +20,9 @@ func init() {
 			High:    high,
 			Control: control,
 		}
+	}
+	addSegment := func(name string, low3 int) {
+		regs[name] = Reg{Name: name, Width: 16, Low3: low3, Segment: true}
 	}
 
 	add("rax", 64, 0, false, false)
@@ -76,6 +80,11 @@ func init() {
 	}
 
 	add("cr3", 64, 3, false, true)
+	addSegment("es", 0)
+	addSegment("ss", 2)
+	addSegment("ds", 3)
+	addSegment("fs", 4)
+	addSegment("gs", 5)
 }
 
 func suffixFromWidth(width int) string {

@@ -176,4 +176,43 @@ image Bad {
 			t.Fatalf("expected SEM0013, got %#v", diags)
 		}
 	})
+
+	t.Run("integer literals and identity mapped addresses are assignable in v0", func(t *testing.T) {
+		modules := parseModulesForTest(t, `
+module index.types_numeric
+`+typePrelude+`
+
+data Narrow {
+    a: U8
+    b: U16
+    c: PhysicalAddress
+    d: VirtualAddress
+}
+
+image Good {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let base = Narrow(a: 1, b: 2, c: 0x200000, d: 0x200000)
+        let next = base.d + 8
+        let alias = Narrow(a: 1, b: 2, c: next, d: base.c)
+        while true {}
+    }
+}
+`)
+		index, ds := BuildIndex(modules)
+		if len(ds) != 0 {
+			t.Fatalf("index diagnostics: %#v", ds)
+		}
+		_, diags := Check(index, modules)
+		for _, d := range diags {
+			if d.Code == diag.CG0001 {
+				t.Fatalf("unexpected CG0001 in v0 numeric/address compatibility: %#v", diags)
+			}
+		}
+	})
 }

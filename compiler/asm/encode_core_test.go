@@ -85,6 +85,17 @@ func TestEncodeExactInstructions(t *testing.T) {
 			code: []Instruction{{Mnemonic: "retfq"}},
 			want: []byte{0x48, 0xCB},
 		},
+		{
+			name: "mov segment registers",
+			code: []Instruction{
+				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("ds"))}, RegOperand{must(Lookup("ax"))}}},
+				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("es"))}, RegOperand{must(Lookup("ax"))}}},
+				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("ss"))}, RegOperand{must(Lookup("ax"))}}},
+				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("fs"))}, RegOperand{must(Lookup("ax"))}}},
+				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("gs"))}, RegOperand{must(Lookup("ax"))}}},
+			},
+			want: []byte{0x8E, 0xD8, 0x8E, 0xC0, 0x8E, 0xD0, 0x8E, 0xE0, 0x8E, 0xE8},
+		},
 	}
 
 	for _, tc := range tests {

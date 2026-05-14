@@ -54,7 +54,7 @@ unique class DelegatedHardware {
         let idt = self.delegated_memory.build_fatal_idt(fatal_handler: 0)
         self.activate_owned_hardware(
             owned_stack_top: cpu_plan.owned_stack_top,
-            cr3: pml4,
+            cr3_value: pml4,
             gdt_base: gdt.address,
             idt_base: idt.address
         )
@@ -80,7 +80,13 @@ unique class DelegatedHardware {
         lgdt [r11]
         mov r11, idt_base
         lidt [r11]
-        ret
+        mov ax, 0x10
+        mov ds, ax
+        mov es, ax
+        mov ss, ax
+        mov fs, ax
+        mov gs, ax
         retfq
+        ret
     }
 }

@@ -95,16 +95,20 @@ func (p *Parser) parseImport() (ast.Import, []diag.Diagnostic) {
 	}
 
 	var names []string
+	p.skipSeparators()
 	if p.peek().Kind != lex.RBrace {
 		for {
+			p.skipSeparators()
 			name, ds := p.expectIdentifier("expected imported name")
 			if len(ds) != 0 {
 				return ast.Import{}, ds
 			}
 			names = append(names, name.Text)
+			p.skipSeparators()
 			if !p.match(lex.Comma) {
 				break
 			}
+			p.skipSeparators()
 		}
 	}
 	if _, consumeDs := p.consume(lex.RBrace); len(consumeDs) != 0 {
@@ -564,20 +568,24 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 }
 
 func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
+	p.skipSeparators()
 	if p.peek().Kind == lex.RParen {
 		return nil, nil
 	}
 	var params []ast.Param
 	for {
+		p.skipSeparators()
 		name, ds := p.expectIdentifier("expected parameter name")
 		if len(ds) != 0 {
 			return nil, ds
 		}
 		if name.Text == "self" && len(params) == 0 && p.peek().Kind != lex.Colon {
 			params = append(params, ast.Param{Name: name.Text, Type: "", Span: p.span(name.Start, name.End)})
+			p.skipSeparators()
 			if !p.match(lex.Comma) {
 				return params, nil
 			}
+			p.skipSeparators()
 			if p.peek().Kind == lex.RParen {
 				return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
 			}
@@ -591,9 +599,11 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 			return nil, ds
 		}
 		params = append(params, ast.Param{Name: name.Text, Type: typ, Span: p.span(name.Start, p.previous().End)})
+		p.skipSeparators()
 		if !p.match(lex.Comma) {
 			return params, nil
 		}
+		p.skipSeparators()
 		if p.peek().Kind == lex.RParen {
 			return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
 		}
@@ -784,14 +794,16 @@ func (p *Parser) parseDottedName() (string, []diag.Diagnostic) {
 }
 
 func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {
+	p.skipSeparators()
 	if p.peek().Kind == lex.RParen {
 		return nil, nil
 	}
 	var args []ast.NamedArg
 	for {
+		p.skipSeparators()
 		name := ""
 		start := p.peek().Start
-		if p.peek().Kind == lex.Identifier && p.peekN(1).Kind == lex.Colon {
+		if isNameToken(p.peek()) && p.peekN(1).Kind == lex.Colon {
 			nameTok := p.next()
 			name = nameTok.Text
 			p.next()
@@ -802,9 +814,11 @@ func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {
 			return nil, ds
 		}
 		args = append(args, ast.NamedArg{Name: name, Value: value, SpanV: p.span(start, value.Span().End)})
+		p.skipSeparators()
 		if !p.match(lex.Comma) {
 			break
 		}
+		p.skipSeparators()
 		if p.peek().Kind == lex.RParen {
 			return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
 		}
@@ -876,7 +890,20 @@ func (p *Parser) consumeIdentifier(kind lex.Kind, msg string) (lex.Token, []diag
 }
 
 func (p *Parser) expectIdentifier(msg string) (lex.Token, []diag.Diagnostic) {
-	return p.consumeIdentifier(lex.Identifier, msg)
+	tok := p.peek()
+	if isNameToken(tok) {
+		return p.next(), nil
+	}
+	return tok, p.err(tok, diag.PAR0001, msg)
+}
+
+func isNameToken(tok lex.Token) bool {
+	switch tok.Kind {
+	case lex.Identifier, lex.KeywordImage, lex.KeywordPath:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Parser) err(tok lex.Token, code, msg string) []diag.Diagnostic {

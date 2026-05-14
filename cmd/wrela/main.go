@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -19,30 +18,23 @@ func run(args []string) int {
 		return 2
 	}
 
-	fs := flag.NewFlagSet("build", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	modeRaw := fs.String("mode", "", "compile mode: dev or release")
-	output := fs.String("o", "", "output .efi path")
-	repoRoot := fs.String("repo-root", ".", "repository root containing wrela/")
-	if err := fs.Parse(args[1:]); err != nil {
-		return 2
-	}
-	if fs.NArg() != 1 {
+	modeRaw, root, output, repoRoot, ok := parseBuildArgs(args[1:])
+	if !ok || root == "" {
 		fmt.Fprintln(os.Stderr, "usage: wrela build --mode dev <root.wrela> -o <out.efi>")
 		return 2
 	}
 
-	mode, err := compiler.ParseMode(*modeRaw)
+	mode, err := compiler.ParseMode(modeRaw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 
-	_, err = compiler.Build(compiler.BuildOptions{
+	result, err := compiler.Build(compiler.BuildOptions{
 		Mode:       mode,
-		RootPath:   fs.Arg(0),
-		OutputPath: *output,
-		RepoRoot:   *repoRoot,
+		RootPath:   root,
+		OutputPath: output,
+		RepoRoot:   repoRoot,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -54,5 +46,45 @@ func run(args []string) int {
 		}
 		return 1
 	}
+	fmt.Fprintln(os.Stdout, result.OutputPath)
 	return 0
+}
+
+func parseBuildArgs(args []string) (mode, root, output, repoRoot string, ok bool) {
+	repoRoot = "."
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--mode":
+			i++
+			if i >= len(args) {
+				return "", "", "", "", false
+			}
+			mode = args[i]
+		case strings.HasPrefix(arg, "--mode="):
+			mode = strings.TrimPrefix(arg, "--mode=")
+		case arg == "-o":
+			i++
+			if i >= len(args) {
+				return "", "", "", "", false
+			}
+			output = args[i]
+		case arg == "--repo-root":
+			i++
+			if i >= len(args) {
+				return "", "", "", "", false
+			}
+			repoRoot = args[i]
+		case strings.HasPrefix(arg, "--repo-root="):
+			repoRoot = strings.TrimPrefix(arg, "--repo-root=")
+		case strings.HasPrefix(arg, "-"):
+			return "", "", "", "", false
+		default:
+			if root != "" {
+				return "", "", "", "", false
+			}
+			root = arg
+		}
+	}
+	return mode, root, output, repoRoot, true
 }

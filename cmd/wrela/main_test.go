@@ -11,3 +11,10 @@ func TestRunUsageAndInvalidModeAreUsageErrors(t *testing.T) {
 		t.Fatalf("invalid mode exit = %d, want 2", code)
 	}
 }
+
+func TestRunAcceptsOutputFlagAfterRoot(t *testing.T) {
+	code := run([]string{"build", "--mode", "dev", "missing.wrela", "-o", "out.efi"})
+	if code == 2 {
+		t.Fatalf("documented flag order returned usage error")
+	}
+}
