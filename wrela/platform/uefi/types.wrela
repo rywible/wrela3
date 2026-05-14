@@ -43,8 +43,8 @@ data DelegatedMutableBytes {
 data UefiMemoryMap {
     descriptors: DelegatedBytes
     descriptor_size: U64
-    descriptor_version: U32
     key: U64
+    descriptor_version: U32
 }
 
 data UefiMemoryMapResult {
@@ -69,15 +69,18 @@ class DelegatedMemory {
         return self.last_memory_map
     }
 
-    asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
-        ret
+    fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
+        let table_memory = self.allocate(length: 12288)
+        return table_memory.address
     }
 
-    asm fn build_owned_gdt(self) -> DelegatedBytes {
-        ret
+    fn build_owned_gdt(self) -> DelegatedBytes {
+        let gdt_bytes = self.allocate(length: 24)
+        return DelegatedBytes(address: gdt_bytes.address, length: gdt_bytes.length)
     }
 
-    asm fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
-        ret
+    fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
+        let idt_bytes = self.allocate(length: 4096)
+        return DelegatedBytes(address: idt_bytes.address, length: idt_bytes.length)
     }
 }

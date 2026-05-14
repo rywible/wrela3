@@ -15,15 +15,72 @@ unique class DelegatedHardware {
         virtual_memory_plan: VirtualMemoryPlan,
         cpu_plan: CpuPlan
     ) -> OwnedHardware {
-        let final_map = self.delegated_memory.final_memory_map()
-        self.boot_services.exit_boot_services(
+        let map_buffer = self.delegated_memory.allocate(length: 16384)
+        let active_buffer = map_buffer
+        let map_result = self.boot_services.get_memory_map(buffer: active_buffer)
+
+        while map_result.status.value == 0x8000000000000005 {
+            active_buffer = self.delegated_memory.allocate(
+                length: map_result.required_size + 4096
+            )
+            map_result = self.boot_services.get_memory_map(buffer: active_buffer)
+        }
+
+        let final_map = map_result.memory_map
+        let exit_status = self.boot_services.exit_boot_services(
             image: self.image_handle,
             map_key: final_map.key
         )
+
+        while exit_status.value == 0x8000000000000002 {
+            map_result = self.boot_services.get_memory_map(buffer: active_buffer)
+
+            while map_result.status.value == 0x8000000000000005 {
+                active_buffer = self.delegated_memory.allocate(
+                    length: map_result.required_size + 4096
+                )
+                map_result = self.boot_services.get_memory_map(buffer: active_buffer)
+            }
+
+            final_map = map_result.memory_map
+            exit_status = self.boot_services.exit_boot_services(
+                image: self.image_handle,
+                map_key: final_map.key
+            )
+        }
+
+        let pml4 = self.delegated_memory.build_identity_paging(memory_map: final_map)
+        let gdt = self.delegated_memory.build_owned_gdt()
+        let idt = self.delegated_memory.build_fatal_idt(fatal_handler: 0)
+        self.activate_owned_hardware(
+            owned_stack_top: cpu_plan.owned_stack_top,
+            cr3: pml4,
+            gdt_base: gdt.address,
+            idt_base: idt.address
+        )
+
         return OwnedHardware(
             memory: memory_plan.owned_memory,
             io_ports: memory_plan.io_ports,
             vcpu0: cpu_plan.vcpu0
         )
+    }
+
+    asm fn activate_owned_hardware(
+        self,
+        owned_stack_top: VirtualAddress,
+        cr3_value: PhysicalAddress,
+        gdt_base: VirtualAddress,
+        idt_base: VirtualAddress
+    ) {
+        cli
+        mov rsp, owned_stack_top
+        mov cr3, cr3_value
+        mov r11, gdt_base
+        lgdt [r11]
+        mov r11, idt_base
+        lidt [r11]
+        ret
+        retfq
     }
 }
