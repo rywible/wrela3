@@ -48,9 +48,10 @@ type DriverDecl struct {
 func (d *DriverDecl) Span() source.Span { return d.SpanV }
 
 type DriverPathDecl struct {
-	Name   string
-	Fields []Field
-	SpanV  source.Span
+	Name    string
+	Fields  []Field
+	Methods []MethodDecl
+	SpanV   source.Span
 }
 
 func (d *DriverPathDecl) Span() source.Span { return d.SpanV }

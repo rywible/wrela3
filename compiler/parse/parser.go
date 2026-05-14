@@ -223,14 +223,15 @@ func (p *Parser) parseDriverPathDecl() (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, ds := p.parseFieldContainer()
+	fields, methods, _, ds := p.parseCompositeMembers()
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.DriverPathDecl{
-		Name:   name.Text,
-		Fields: fields,
-		SpanV:  p.span(start.Start, p.previous().End),
+		Name:    name.Text,
+		Fields:  fields,
+		Methods: methods,
+		SpanV:   p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -523,10 +524,11 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 
 	ret := ""
 	if p.match(lex.Arrow) {
-		retType, ds := p.expectIdentifier("expected return type")
-		if len(ds) != 0 {
-			return ast.MethodDecl{}, ds
+		retType := p.peek()
+		if retType.Kind != lex.Identifier && retType.Kind != lex.KeywordNever {
+			return ast.MethodDecl{}, p.err(retType, diag.PAR0001, "expected return type")
 		}
+		p.next()
 		ret = retType.Text
 	}
 
@@ -570,6 +572,16 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 		name, ds := p.expectIdentifier("expected parameter name")
 		if len(ds) != 0 {
 			return nil, ds
+		}
+		if name.Text == "self" && len(params) == 0 && p.peek().Kind != lex.Colon {
+			params = append(params, ast.Param{Name: name.Text, Type: "", Span: p.span(name.Start, name.End)})
+			if !p.match(lex.Comma) {
+				return params, nil
+			}
+			if p.peek().Kind == lex.RParen {
+				return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
+			}
+			continue
 		}
 		if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 			return nil, ds
@@ -777,18 +789,19 @@ func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {
 	}
 	var args []ast.NamedArg
 	for {
-		name, ds := p.expectIdentifier("expected argument name")
-		if len(ds) != 0 {
-			return nil, ds
-		}
-		if _, ds := p.consume(lex.Colon); len(ds) != 0 {
-			return nil, ds
+		name := ""
+		start := p.peek().Start
+		if p.peek().Kind == lex.Identifier && p.peekN(1).Kind == lex.Colon {
+			nameTok := p.next()
+			name = nameTok.Text
+			p.next()
+			start = nameTok.Start
 		}
 		value, ds := p.parseExpr(0)
 		if len(ds) != 0 {
 			return nil, ds
 		}
-		args = append(args, ast.NamedArg{Name: name.Text, Value: value, SpanV: p.span(name.Start, value.Span().End)})
+		args = append(args, ast.NamedArg{Name: name, Value: value, SpanV: p.span(start, value.Span().End)})
 		if !p.match(lex.Comma) {
 			break
 		}
@@ -882,6 +895,14 @@ func (p *Parser) peek() lex.Token {
 		return lex.Token{Kind: lex.EOF, Start: len(p.src), End: len(p.src)}
 	}
 	return p.toks[p.idx]
+}
+
+func (p *Parser) peekN(n int) lex.Token {
+	idx := p.idx + n
+	if idx >= len(p.toks) {
+		return lex.Token{Kind: lex.EOF, Start: len(p.src), End: len(p.src)}
+	}
+	return p.toks[idx]
 }
 
 func (p *Parser) previous() lex.Token {

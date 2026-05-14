@@ -96,6 +96,9 @@ func (s *moduleLoadState) loadModule(moduleName, path string) (*Graph, error) {
 		return nil, compiler.NewCodeError("SRC0004", fmt.Sprintf("import cycle at %q", moduleName))
 	}
 	if existing, ok := s.loaded[moduleName]; ok {
+		if filepath.Clean(existing.Path) == filepath.Clean(path) {
+			return s.graph, nil
+		}
 		return nil, compiler.NewCodeError("SRC0005", fmt.Sprintf("duplicate module %q", existing.Module))
 	}
 	s.inProgress[moduleName] = true
@@ -110,6 +113,10 @@ func (s *moduleLoadState) loadModule(moduleName, path string) (*Graph, error) {
 	if err != nil {
 		delete(s.inProgress, moduleName)
 		return nil, err
+	}
+	if existing, ok := s.loaded[actualModule]; ok && filepath.Clean(existing.Path) != filepath.Clean(path) {
+		delete(s.inProgress, moduleName)
+		return nil, compiler.NewCodeError("SRC0005", fmt.Sprintf("duplicate module %q", actualModule))
 	}
 	if actualModule != moduleName {
 		delete(s.inProgress, moduleName)

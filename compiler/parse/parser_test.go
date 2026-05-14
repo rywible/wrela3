@@ -154,6 +154,52 @@ class Writer {
 	}
 }
 
+func TestParseCanonicalMethodShapes(t *testing.T) {
+	src := `module parser.methods
+
+driver path SerialWritePath {
+    port_base: U16
+
+    asm fn write8(self, offset: U16, value: U8) {
+        out dx, al
+        ret
+    }
+
+    fn write(self, bytes: Bytes) {
+        self.registers.write8(offset: 0, value: byte)
+        self.pause()
+    }
+}
+
+executor HelloWorld {
+    start fn run(self) -> never {
+        self.serial_path.write(self.memory.static_bytes("hello"))
+    }
+}`
+	mod, ds := parseModuleForTest(t, src)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	if len(mod.Decls) != 2 {
+		t.Fatalf("decl count = %d, want 2", len(mod.Decls))
+	}
+	path, ok := mod.Decls[0].(*ast.DriverPathDecl)
+	if !ok {
+		t.Fatalf("decl 0 = %T, want DriverPathDecl", mod.Decls[0])
+	}
+	if len(path.Methods) != 2 {
+		t.Fatalf("driver path methods = %d, want 2", len(path.Methods))
+	}
+	exec := mod.Decls[1].(*ast.ExecutorDecl)
+	if got := exec.Methods[0].Return; got != "never" {
+		t.Fatalf("start fn return = %q, want never", got)
+	}
+	expr := exec.Methods[0].Body[0].(*ast.ExprStmt).Expr.(*ast.CallExpr)
+	if len(expr.Args) != 1 || expr.Args[0].Name != "" {
+		t.Fatalf("positional call args = %#v, want one unnamed arg", expr.Args)
+	}
+}
+
 func TestParseGraphSortsDiagnostics(t *testing.T) {
 	f1 := source.NewFile(1, "z.wrela", "module z\nunique executor Exe {}")
 	f2 := source.NewFile(2, "a.wrela", "module a\nfn bad() {}")

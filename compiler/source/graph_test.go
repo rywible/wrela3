@@ -57,7 +57,7 @@ func TestLoadGraphMissingModule(t *testing.T) {
 	}
 }
 
-func TestLoadGraphDuplicateModule(t *testing.T) {
+func TestLoadGraphAllowsSharedImports(t *testing.T) {
 	dir := t.TempDir()
 	writeTempSource(t, dir, "a/b/c.wrela", `module a.b.c`)
 	writeTempSource(t, dir, "a/b/d.wrela", `module a.b.d
@@ -65,8 +65,28 @@ use { } from a.b.c`)
 	writeTempSource(t, dir, "main.wrela", `module root.main
 use { C } from a.b.c
 use { C2 } from a.b.d`)
-	_, err := source.LoadGraph(source.Options{
+	graph, err := source.LoadGraph(source.Options{
 		RootPath:    filepath.Join(dir, "main.wrela"),
+		ImportRoots: []string{dir},
+	})
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	if len(graph.Files) != 3 {
+		t.Fatalf("files = %d, want 3", len(graph.Files))
+	}
+}
+
+func TestLoadGraphDuplicateModule(t *testing.T) {
+	dir := t.TempDir()
+	writeTempSource(t, dir, "dep/b.wrela", `module root.main`)
+	root := filepath.Join(dir, "main.wrela")
+	if err := os.WriteFile(root, []byte(`module root.main
+use { B } from dep.b`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := source.LoadGraph(source.Options{
+		RootPath:    root,
 		ImportRoots: []string{dir},
 	})
 	ce, ok := err.(compiler.CodeError)
