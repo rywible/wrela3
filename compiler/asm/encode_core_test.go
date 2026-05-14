@@ -134,6 +134,14 @@ func TestEncodeExactInstructions(t *testing.T) {
 			want: []byte{0x4C, 0x39, 0xD0},
 		},
 		{
+			name: "and r10, rax",
+			code: []Instruction{{Mnemonic: "and", Operands: []Operand{
+				RegOperand{must(Lookup("r10"))},
+				RegOperand{must(Lookup("rax"))},
+			}}},
+			want: []byte{0x49, 0x21, 0xC2},
+		},
+		{
 			name: "shr rax imm8",
 			code: []Instruction{{Mnemonic: "shr", Operands: []Operand{
 				RegOperand{must(Lookup("rax"))},

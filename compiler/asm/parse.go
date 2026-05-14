@@ -19,6 +19,7 @@ var validInstructions = map[string]struct{}{
 	"in":    {},
 	"mov":   {},
 	"add":   {},
+	"and":   {},
 	"sub":   {},
 	"cmp":   {},
 	"shr":   {},

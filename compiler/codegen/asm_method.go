@@ -28,7 +28,7 @@ func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Dia
 	for i, p := range method.Params {
 		if param, ok := p.(*ir.Param); ok {
 			if i < len(argRegs)-1 {
-				paramLoc[param.Symbol] = argRegs[i+1]
+				paramLoc[param.Symbol] = registerForType(argRegs[i+1], param.Type.Name)
 			}
 		}
 	}
@@ -60,6 +60,46 @@ func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Dia
 	return lower, nil, emitted
 }
 
+func registerForType(base asm.Reg, typeName string) asm.Reg {
+	width := 64
+	switch typeName {
+	case "Bool", "U8", "I8":
+		width = 8
+	case "U16", "I16":
+		width = 16
+	case "U32", "I32":
+		width = 32
+	}
+	if width == 64 {
+		return base
+	}
+	if reg, ok := asm.Lookup(registerAlias(base.Name, width)); ok {
+		return reg
+	}
+	return base
+}
+
+func registerAlias(name string, width int) string {
+	aliases := map[string]map[int]string{
+		"rax": {8: "al", 16: "ax", 32: "eax"},
+		"rcx": {8: "cl", 16: "cx", 32: "ecx"},
+		"rdx": {8: "dl", 16: "dx", 32: "edx"},
+		"rbx": {8: "bl", 16: "bx", 32: "ebx"},
+		"rsp": {8: "spl", 16: "sp", 32: "esp"},
+		"rbp": {8: "bpl", 16: "bp", 32: "ebp"},
+		"rsi": {8: "sil", 16: "si", 32: "esi"},
+		"rdi": {8: "dil", 16: "di", 32: "edi"},
+		"r8":  {8: "r8b", 16: "r8w", 32: "r8d"},
+		"r9":  {8: "r9b", 16: "r9w", 32: "r9d"},
+	}
+	if byWidth, ok := aliases[name]; ok {
+		if alias, ok := byWidth[width]; ok {
+			return alias
+		}
+	}
+	return name
+}
+
 func lowerBoundOperand(method ir.AsmMethod, op asm.Operand, paramLoc map[string]asm.Reg) (asm.Operand, *diag.Diagnostic) {
 	switch o := op.(type) {
 	case asm.ParamOperand:
@@ -80,7 +120,14 @@ func lowerBoundOperand(method ir.AsmMethod, op asm.Operand, paramLoc map[string]
 				Message: "unsupported field base in asm method: " + o.Base,
 			}
 		}
-		offset := method.ReceiverFieldOffsets[o.Field]
+		offset, ok := method.ReceiverFieldOffsets[o.Field]
+		if !ok {
+			return nil, &diag.Diagnostic{
+				Phase:   "asm",
+				Code:    diag.ASM0002,
+				Message: fmt.Sprintf("unknown receiver field %q in asm method %s", o.Field, method.Symbol),
+			}
+		}
 		width, ok := method.ReceiverFieldWidths[o.Field]
 		if !ok {
 			width = 8

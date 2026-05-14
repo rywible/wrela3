@@ -35,11 +35,12 @@ func TestHelloQEMU(t *testing.T) {
 	}
 
 	out, err := qemu.Run(qemu.Options{
-		QEMUBinary: qemuBin,
-		OVMFCode:   code,
-		OVMFVars:   vars,
-		ESPDir:     filepath.Join(tmp, "esp"),
-		ImagePath:  image,
+		QEMUBinary:  qemuBin,
+		OVMFCode:    code,
+		OVMFVars:    vars,
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		SuccessText: "hello from wrela",
 	})
 	if err != nil {
 		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)

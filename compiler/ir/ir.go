@@ -1,7 +1,9 @@
 package ir
 
 type Type struct {
-	Name string
+	Name   string
+	Module string
+	Kind   TypeKind
 }
 
 type Value interface {
@@ -14,9 +16,45 @@ type Block struct {
 }
 
 type Function struct {
-	Symbol string
-	Params []Value
-	Blocks []Block
+	Symbol              string
+	Return              Type
+	Params              []Value
+	Blocks              []Block
+	PreserveStackReturn bool
+}
+
+type TypeKind string
+
+const (
+	TypeKindUnknown    TypeKind = ""
+	TypeKindPrimitive  TypeKind = "primitive"
+	TypeKindData       TypeKind = "data"
+	TypeKindClass      TypeKind = "class"
+	TypeKindDriver     TypeKind = "driver"
+	TypeKindDriverPath TypeKind = "driver_path"
+	TypeKindExecutor   TypeKind = "executor"
+	TypeKindImage      TypeKind = "image"
+)
+
+type FieldInfo struct {
+	Name          string
+	Type          Type
+	Offset        int
+	Size          int
+	Align         int
+	StorageOffset int
+	StorageSize   int
+}
+
+type TypeInfo struct {
+	Name        string
+	Module      string
+	Kind        TypeKind
+	Size        int
+	Align       int
+	StorageSize int
+	Fields      map[string]FieldInfo
+	FieldOrder  []string
 }
 
 func (f Function) ValuesInDeterministicOrder() []Value {
@@ -52,17 +90,29 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *FieldLoad:
 		return []Value{v}
+	case *Local:
+		return []Value{v}
+	case *StringLiteral:
+		return []Value{v}
+	case *Construct:
+		return []Value{v}
+	case *Copy:
+		return valuesFromValue(v.Target)
 	case *ForBytes:
-		values := valuesFromValue(v.Index)
+		values := valuesFromOps(v.IterableOps)
+		values = append(values, valuesFromValue(v.Index)...)
 		values = append(values, valuesFromValue(v.Iterable)...)
 		values = append(values, valuesFromValue(v.ByteValue)...)
 		return append(values, valuesFromOps(v.Body)...)
 	case *If:
-		values := valuesFromOps(v.Then)
+		values := valuesFromOps(v.ConditionOps)
+		values = append(values, valuesFromOps(v.Then)...)
 		values = append(values, valuesFromOps(v.Else)...)
 		return values
 	case *While:
-		return valuesFromOps(v.Body)
+		values := valuesFromOps(v.ConditionOps)
+		values = append(values, valuesFromOps(v.Body)...)
+		return values
 	}
 	return nil
 }
@@ -104,6 +154,14 @@ type Param struct {
 
 func (Param) isValue()     {}
 func (Param) isOperation() {}
+
+type Local struct {
+	Symbol string
+	Type   Type
+}
+
+func (Local) isValue()     {}
+func (Local) isOperation() {}
 
 type ConstInt struct {
 	Symbol string
@@ -148,26 +206,61 @@ type Return struct {
 
 func (Return) isOperation() {}
 
+type Copy struct {
+	Target Value
+	Source Value
+	Type   Type
+}
+
+func (Copy) isOperation() {}
+
+type FieldValue struct {
+	Name  string
+	Value Value
+}
+
+type Construct struct {
+	Symbol string
+	Type   Type
+	Fields []FieldValue
+}
+
+func (Construct) isValue()     {}
+func (Construct) isOperation() {}
+
+type StringLiteral struct {
+	Symbol     string
+	Value      string
+	DataSymbol string
+	Type       Type
+}
+
+func (StringLiteral) isValue()     {}
+func (StringLiteral) isOperation() {}
+
 type ForBytes struct {
-	Iterable  Value
-	Index     *Param
-	ByteValue Value
-	Body      []Operation
+	IterableOps []Operation
+	Iterable    Value
+	Index       Value
+	ByteValue   Value
+	Body        []Operation
 }
 
 func (ForBytes) isOperation() {}
 
 type While struct {
-	Condition Value
-	Body      []Operation
+	ConditionOps []Operation
+	Condition    Value
+	Body         []Operation
 }
 
 func (While) isOperation() {}
 
 type If struct {
-	Condition Value
-	Then      []Operation
-	Else      []Operation
+	ConditionOps []Operation
+	Condition    Value
+	Then         []Operation
+	Else         []Operation
 }
 
 func (If) isOperation() {}
@@ -182,6 +275,17 @@ type FieldLoad struct {
 
 func (FieldLoad) isValue()     {}
 func (FieldLoad) isOperation() {}
+
+type FieldStore struct {
+	Object     Value
+	ObjectType string
+	Field      string
+	Value      Value
+	Type       Type
+	Offset     int
+}
+
+func (FieldStore) isOperation() {}
 
 type DataObject struct {
 	Symbol string
@@ -213,4 +317,5 @@ type Program struct {
 	AsmMethods []AsmMethod
 	Data       []DataObject
 	Entry      EntryAdapter
+	Types      map[string]TypeInfo
 }

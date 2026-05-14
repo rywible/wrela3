@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -9,6 +10,51 @@ import (
 	"github.com/ryanwible/wrela3/compiler/layout"
 	"github.com/ryanwible/wrela3/compiler/sem"
 )
+
+type lowerBinding struct {
+	value Value
+	typ   *sem.Type
+}
+
+type lowerScope struct {
+	parent *lowerScope
+	values map[string]lowerBinding
+}
+
+func newLowerScope(parent *lowerScope) *lowerScope {
+	return &lowerScope{parent: parent, values: map[string]lowerBinding{}}
+}
+
+func (s *lowerScope) define(name string, binding lowerBinding) {
+	if s != nil && name != "" {
+		s.values[name] = binding
+	}
+}
+
+func (s *lowerScope) lookup(name string) (lowerBinding, bool) {
+	if s == nil {
+		return lowerBinding{}, false
+	}
+	if binding, ok := s.values[name]; ok {
+		return binding, true
+	}
+	if s.parent == nil {
+		return lowerBinding{}, false
+	}
+	return s.parent.lookup(name)
+}
+
+type lowerContext struct {
+	checked *sem.CheckedProgram
+	program *Program
+
+	modules map[string]*ast.Module
+	types   map[string]*sem.Type
+	pseudo  map[string]*sem.Type
+
+	stringSeq int
+	diags     []diag.Diagnostic
+}
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	if checked == nil || checked.Index == nil {
@@ -19,38 +65,693 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 		}}
 	}
 
-	imageModule, imageName := firstImageType(checked)
+	ctx := newLowerContext(checked)
+	imageModule, imageDecl, imageName := ctx.findImage()
 	if imageName == "" {
 		imageName = "image"
 	}
 	delegatedSymbol := symbolName("phase", imageModule, imageName, "delegated_hardware")
 	ownedSymbol := symbolName("phase", imageModule, imageName, "owned_hardware")
 
-	program := &Program{
-		Entry: EntryAdapter{
-			Symbol:                "_wrela_efi_entry",
-			DelegatedPhaseSymbol:  delegatedSymbol,
-			OwnedPhaseSymbol:      ownedSymbol,
-			DelegatedHardwareType: "DelegatedHardware",
-			OwnedHardwareType:     typeName(checked.OwnedRoot),
-		},
+	ctx.program.Entry = EntryAdapter{
+		Symbol:                "_wrela_efi_entry",
+		DelegatedPhaseSymbol:  delegatedSymbol,
+		OwnedPhaseSymbol:      ownedSymbol,
+		DelegatedHardwareType: "DelegatedHardware",
+		OwnedHardwareType:     typeName(checked.OwnedRoot),
 	}
-	if program.Entry.OwnedHardwareType == "" {
-		program.Entry.OwnedHardwareType = "OwnedHardware"
+	if ctx.program.Entry.OwnedHardwareType == "" {
+		ctx.program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
 
-	executorSymbol, message := findExecutorStart(checked.Modules)
-	program.Functions = append(program.Functions,
-		delegatedPhaseFunction(delegatedSymbol, program.Entry.DelegatedHardwareType, program.Entry.OwnedHardwareType),
-		ownedPhaseFunction(ownedSymbol, program.Entry.OwnedHardwareType, executorSymbol),
-	)
-	program.AsmMethods = append(program.AsmMethods,
-		transitionTransferMethod(),
-		AsmMethod{Symbol: executorSymbol, Return: Type{Name: "never"}, Body: serialExecutorBody(message)},
-	)
-	program.AsmMethods = append(program.AsmMethods, lowerAsmMethods(checked)...)
-	program.Data = lowerStringData(checked.Modules)
-	return program, nil
+	if imageDecl != nil {
+		for i := range imageDecl.Phases {
+			phase := &imageDecl.Phases[i]
+			switch phase.Name {
+			case "delegated_hardware":
+				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(imageModule, imageName, delegatedSymbol, phase))
+			case "owned_hardware":
+				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(imageModule, imageName, ownedSymbol, phase))
+			}
+		}
+	}
+
+	ctx.lowerSourceMethods()
+	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
+	if len(ctx.diags) != 0 {
+		return nil, ctx.diags
+	}
+	return ctx.program, nil
+}
+
+func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
+	ctx := &lowerContext{
+		checked: checked,
+		program: &Program{Types: map[string]TypeInfo{}},
+		modules: map[string]*ast.Module{},
+		types:   map[string]*sem.Type{},
+		pseudo:  map[string]*sem.Type{},
+	}
+	for _, mod := range checked.Modules {
+		ctx.modules[mod.Name] = mod
+	}
+	ctx.addPrimitiveTypes()
+	if checked.Index != nil {
+		for moduleName, byName := range checked.Index.ByModule {
+			for name, typ := range byName {
+				if typ == nil {
+					continue
+				}
+				ctx.types[typeKey(moduleName, name)] = typ
+				ctx.types[name] = typ
+			}
+		}
+	}
+	for _, typ := range ctx.types {
+		ctx.ensureTypeInfo(typ, map[string]bool{})
+	}
+	return ctx
+}
+
+func (ctx *lowerContext) addPrimitiveTypes() {
+	for _, primitive := range []struct {
+		name  string
+		size  int
+		align int
+	}{
+		{"Bool", 1, 1},
+		{"U8", 1, 1},
+		{"U16", 2, 2},
+		{"U32", 4, 4},
+		{"U64", 8, 8},
+		{"I64", 8, 8},
+		{"PhysicalAddress", 8, 8},
+		{"VirtualAddress", 8, 8},
+		{"never", 0, 1},
+		{"void", 0, 1},
+	} {
+		ctx.program.Types[primitive.name] = TypeInfo{Name: primitive.name, Kind: TypeKindPrimitive, Size: primitive.size, Align: primitive.align, StorageSize: primitive.size, Fields: map[string]FieldInfo{}}
+	}
+	ctx.program.Types["StringLiteral"] = TypeInfo{
+		Name:        "StringLiteral",
+		Kind:        TypeKindPrimitive,
+		Size:        16,
+		Align:       8,
+		StorageSize: 16,
+		Fields: map[string]FieldInfo{
+			"address": {Name: "address", Type: Type{Name: "VirtualAddress", Kind: TypeKindPrimitive}, Offset: 0, Size: 8, Align: 8},
+			"length":  {Name: "length", Type: Type{Name: "U64", Kind: TypeKindPrimitive}, Offset: 8, Size: 8, Align: 8},
+		},
+		FieldOrder: []string{"address", "length"},
+	}
+}
+
+func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool) TypeInfo {
+	if typ == nil {
+		return TypeInfo{Name: "U64", Kind: TypeKindPrimitive, Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
+	}
+	if info, ok := ctx.program.Types[typ.Name]; ok && (info.Size != 0 || info.Align != 0 || len(info.Fields) != 0 || typ.Name == "never" || typ.Name == "void") {
+		return info
+	}
+	key := typeKey(typ.Module, typ.Name)
+	if visiting[key] {
+		return TypeInfo{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind), Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
+	}
+	visiting[key] = true
+
+	info := TypeInfo{
+		Name:   typ.Name,
+		Module: typ.Module,
+		Kind:   semKindToIR(typ.Kind),
+		Fields: map[string]FieldInfo{},
+		Align:  1,
+	}
+	offset := 0
+	for _, field := range typ.Fields {
+		fieldInfo := ctx.ensureTypeInfo(field.Type, visiting)
+		fieldType := ctx.irType(field.Type)
+		size := fieldInfo.Size
+		align := fieldInfo.Align
+		if isHandleRecordKind(fieldType.Kind) {
+			size = 8
+			align = 8
+		}
+		if align == 0 {
+			align = 8
+		}
+		offset = layout.AlignUp(offset, align)
+		info.Fields[field.Name] = FieldInfo{
+			Name:          field.Name,
+			Type:          fieldType,
+			Offset:        offset,
+			Size:          size,
+			Align:         align,
+			StorageOffset: -1,
+		}
+		info.FieldOrder = append(info.FieldOrder, field.Name)
+		offset += size
+		if align > info.Align {
+			info.Align = align
+		}
+	}
+	if info.Align == 0 {
+		info.Align = 1
+	}
+	info.Size = layout.AlignUp(offset, info.Align)
+	if info.Kind != TypeKindPrimitive && info.Size == 0 {
+		info.Size = 8
+		info.Align = 8
+	}
+	storageOffset := info.Size
+	for _, semField := range typ.Fields {
+		fieldName := semField.Name
+		field := info.Fields[fieldName]
+		if field.Type.Kind != TypeKindData {
+			continue
+		}
+		fieldInfo := ctx.ensureTypeInfo(semField.Type, visiting)
+		storageAlign := fieldInfo.Align
+		if storageAlign == 0 {
+			storageAlign = 8
+		}
+		storageOffset = layout.AlignUp(storageOffset, storageAlign)
+		field.StorageOffset = storageOffset
+		field.StorageSize = fieldInfo.StorageSize
+		if field.StorageSize == 0 {
+			field.StorageSize = fieldInfo.Size
+		}
+		info.Fields[fieldName] = field
+		storageOffset += field.StorageSize
+	}
+	info.StorageSize = layout.AlignUp(storageOffset, info.Align)
+	if info.StorageSize == 0 {
+		info.StorageSize = info.Size
+	}
+	ctx.program.Types[typ.Name] = info
+	delete(visiting, key)
+	return info
+}
+
+func (ctx *lowerContext) findImage() (string, *ast.ImageDecl, string) {
+	for _, mod := range ctx.checked.Modules {
+		for _, decl := range mod.Decls {
+			if image, ok := decl.(*ast.ImageDecl); ok {
+				return mod.Name, image, image.Name
+			}
+		}
+	}
+	moduleName, imageName := firstImageType(ctx.checked)
+	return moduleName, nil, imageName
+}
+
+func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase *ast.PhaseDecl) Function {
+	params := make([]Value, 0, len(phase.Params))
+	scope := newLowerScope(nil)
+	for _, param := range phase.Params {
+		typ := ctx.resolveType(moduleName, param.Type)
+		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
+		params = append(params, p)
+		scope.define(param.Name, lowerBinding{value: p, typ: typ})
+	}
+	assigned := assignedNames(phase.Body)
+	ops := ctx.lowerStmtList(moduleName, nil, scope, assigned, phase.Body)
+	return Function{
+		Symbol:              symbol,
+		Return:              ctx.irType(ctx.resolveType(moduleName, phase.Return)),
+		Params:              params,
+		Blocks:              []Block{{Label: "entry", Ops: ops}},
+		PreserveStackReturn: phase.Name == "delegated_hardware",
+	}
+}
+
+func (ctx *lowerContext) lowerSourceMethods() {
+	for _, mod := range ctx.checked.Modules {
+		for _, decl := range mod.Decls {
+			typeName, methods, ok := compositeMethods(decl)
+			if !ok {
+				continue
+			}
+			receiverType := ctx.resolveType(mod.Name, typeName)
+			for i := range methods {
+				method := &methods[i]
+				if method.IsAsm {
+					continue
+				}
+				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerMethod(mod.Name, receiverType, method))
+			}
+		}
+	}
+}
+
+func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, method *ast.MethodDecl) Function {
+	symbol := symbolName("method", moduleName, receiverType.Name, method.Name)
+	params := []Value{}
+	scope := newLowerScope(nil)
+
+	self := &Param{Symbol: "self", Type: ctx.irType(receiverType)}
+	params = append(params, self)
+	scope.define("self", lowerBinding{value: self, typ: receiverType})
+
+	for _, param := range method.Params {
+		if param.Name == "self" {
+			continue
+		}
+		typ := ctx.resolveType(moduleName, param.Type)
+		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
+		params = append(params, p)
+		scope.define(param.Name, lowerBinding{value: p, typ: typ})
+	}
+
+	assigned := assignedNames(method.Body)
+	ops := ctx.lowerStmtList(moduleName, receiverType, scope, assigned, method.Body)
+	return Function{
+		Symbol:              symbol,
+		Return:              ctx.irType(ctx.methodDeclReturn(moduleName, method)),
+		Params:              params,
+		Blocks:              []Block{{Label: "entry", Ops: ops}},
+		PreserveStackReturn: ctx.isOwnershipTransferMethod(receiverType, method),
+	}
+}
+
+func (ctx *lowerContext) isOwnershipTransferMethod(receiverType *sem.Type, method *ast.MethodDecl) bool {
+	if receiverType == nil || method == nil || ctx.checked == nil || ctx.checked.OwnedRoot == nil {
+		return false
+	}
+	if receiverType.Kind != sem.KindClass || !receiverType.Unique || !receiverType.DelegatedOnly {
+		return false
+	}
+	if !receiverHasMethodReturning(receiverType, ctx.checked.OwnedRoot) {
+		return false
+	}
+	return sameSemType(ctx.methodDeclReturn(receiverType.Module, method), ctx.checked.OwnedRoot)
+}
+
+func (ctx *lowerContext) lowerStmtList(moduleName string, receiverType *sem.Type, scope *lowerScope, assigned map[string]bool, stmts []ast.Stmt) []Operation {
+	var ops []Operation
+	for _, stmt := range stmts {
+		ops = append(ops, ctx.lowerStmt(moduleName, receiverType, scope, assigned, stmt)...)
+	}
+	return ops
+}
+
+func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, scope *lowerScope, assigned map[string]bool, stmt ast.Stmt) []Operation {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		value, valueOps, typ := ctx.lowerExpr(moduleName, receiverType, scope, s.Expr)
+		ops := append([]Operation{}, valueOps...)
+		if assigned[s.Name] {
+			local := &Local{Symbol: s.Name, Type: ctx.irType(typ)}
+			ops = append(ops, &Copy{Target: local, Source: value, Type: local.Type})
+			scope.define(s.Name, lowerBinding{value: local, typ: typ})
+			return ops
+		}
+		scope.define(s.Name, lowerBinding{value: value, typ: typ})
+		return ops
+	case *ast.AssignStmt:
+		value, valueOps, typ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
+		ops := append([]Operation{}, valueOps...)
+		switch target := s.Target.(type) {
+		case *ast.NameExpr:
+			binding, ok := scope.lookup(target.Name)
+			if !ok {
+				ctx.errorf("unknown assignment target %q", target.Name)
+				return ops
+			}
+			ops = append(ops, &Copy{Target: binding.value, Source: value, Type: ctx.irType(binding.typ)})
+		case *ast.FieldExpr:
+			object, objectOps, objectType := ctx.lowerExpr(moduleName, receiverType, scope, target.Base)
+			ops = append(objectOps, ops...)
+			field := ctx.lookupField(objectType, target.Field)
+			if field == nil {
+				ctx.errorf("unknown field %s", target.Field)
+				return ops
+			}
+			ops = append(ops, &FieldStore{Object: object, ObjectType: objectType.Name, Field: target.Field, Value: value, Type: ctx.irType(typ), Offset: field.Offset})
+		default:
+			ctx.errorf("unsupported assignment target %T", s.Target)
+		}
+		return ops
+	case *ast.ReturnStmt:
+		if s.Value == nil {
+			return []Operation{&Return{}}
+		}
+		value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
+		return append(valueOps, &Return{Value: value})
+	case *ast.ExprStmt:
+		call, ok := s.Expr.(*ast.CallExpr)
+		if !ok {
+			ctx.errorf("unsupported expression statement %T", s.Expr)
+			return nil
+		}
+		_, ops, _ := ctx.lowerExpr(moduleName, receiverType, scope, call)
+		return ops
+	case *ast.WhileStmt:
+		condition, conditionOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Cond)
+		bodyScope := newLowerScope(scope)
+		body := ctx.lowerStmtList(moduleName, receiverType, bodyScope, assigned, s.Body)
+		return []Operation{&While{ConditionOps: conditionOps, Condition: condition, Body: body}}
+	case *ast.ForStmt:
+		iterable, iterableOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.InExpr)
+		loopScope := newLowerScope(scope)
+		index := &Local{Symbol: s.Var + "_index", Type: Type{Name: "U64", Kind: TypeKindPrimitive}}
+		byteValue := &Local{Symbol: s.Var, Type: Type{Name: "U8", Kind: TypeKindPrimitive}}
+		loopScope.define(s.Var, lowerBinding{value: byteValue, typ: ctx.resolveType(moduleName, "U8")})
+		body := ctx.lowerStmtList(moduleName, receiverType, loopScope, assigned, s.Body)
+		return []Operation{&ForBytes{IterableOps: iterableOps, Iterable: iterable, Index: index, ByteValue: byteValue, Body: body}}
+	case *ast.IfStmt:
+		condition, conditionOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Cond)
+		thenOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Then)
+		elseOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Else)
+		return []Operation{&If{ConditionOps: conditionOps, Condition: condition, Then: thenOps, Else: elseOps}}
+	default:
+		ctx.errorf("unsupported statement %T", stmt)
+		return nil
+	}
+}
+
+func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, scope *lowerScope, expr ast.Expr) (Value, []Operation, *sem.Type) {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if binding, ok := scope.lookup(e.Name); ok {
+			return binding.value, nil, binding.typ
+		}
+		typ := ctx.resolveType(moduleName, e.Name)
+		if typ != nil {
+			value := &Local{Symbol: e.Name, Type: ctx.irType(typ)}
+			return value, nil, typ
+		}
+		ctx.errorf("unknown name %q", e.Name)
+		return &ConstInt{Value: 0, Type: Type{Name: "U64", Kind: TypeKindPrimitive}}, nil, ctx.resolveType(moduleName, "U64")
+	case *ast.IntLiteral:
+		value, err := strconv.ParseUint(e.Value, 0, 64)
+		if err != nil {
+			ctx.errorf("invalid integer literal %q", e.Value)
+			value = 0
+		}
+		typ := ctx.resolveType(moduleName, "U64")
+		c := &ConstInt{Symbol: "const", Value: value, Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
+	case *ast.BoolLiteral:
+		var raw uint64
+		if e.Value {
+			raw = 1
+		}
+		typ := ctx.resolveType(moduleName, "Bool")
+		c := &ConstInt{Symbol: "bool", Value: raw, Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
+	case *ast.StringLiteral:
+		typ := ctx.resolveType(moduleName, "StringLiteral")
+		dataSymbol := symbolName("str", moduleName, fmt.Sprintf("%d", ctx.stringSeq))
+		ctx.stringSeq++
+		ctx.program.Data = append(ctx.program.Data, DataObject{Symbol: dataSymbol, Bytes: append([]byte(e.Value), 0)})
+		value := &StringLiteral{Symbol: "string", Value: e.Value, DataSymbol: dataSymbol, Type: ctx.irType(typ)}
+		return value, []Operation{value}, typ
+	case *ast.FieldExpr:
+		object, objectOps, objectType := ctx.lowerExpr(moduleName, receiverType, scope, e.Base)
+		field := ctx.lookupField(objectType, e.Field)
+		if field == nil {
+			ctx.errorf("unknown field %s", e.Field)
+			return object, objectOps, objectType
+		}
+		load := &FieldLoad{
+			Object:     object,
+			ObjectType: objectType.Name,
+			Field:      e.Field,
+			Type:       field.Type,
+			Offset:     field.Offset,
+		}
+		return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
+	case *ast.ConstructorExpr:
+		typ := ctx.resolveType(moduleName, e.Type)
+		var ops []Operation
+		fields := make([]FieldValue, 0, len(e.Args))
+		for _, arg := range e.Args {
+			value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, arg.Value)
+			ops = append(ops, valueOps...)
+			fields = append(fields, FieldValue{Name: arg.Name, Value: value})
+		}
+		construct := &Construct{Symbol: e.Type, Type: ctx.irType(typ), Fields: fields}
+		ops = append(ops, construct)
+		return construct, ops, typ
+	case *ast.CallExpr:
+		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		method := ctx.lookupMethod(recvType, e.Method)
+		args, argOps := ctx.lowerCallArgs(moduleName, receiverType, scope, method, e.Args)
+		ret := ctx.methodReturn(moduleName, method)
+		call := &Call{
+			Symbol:   symbolName("method", recvType.Module, recvType.Name, e.Method),
+			Receiver: receiver,
+			Args:     args,
+			Type:     ctx.irType(ret),
+		}
+		ops := append(receiverOps, argOps...)
+		ops = append(ops, call)
+		return call, ops, ret
+	case *ast.BinaryExpr:
+		left, leftOps, leftType := ctx.lowerExpr(moduleName, receiverType, scope, e.Left)
+		right, rightOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, e.Right)
+		resultType := leftType
+		op := lowerBinaryOp(e.Op)
+		if isLowerComparison(op) {
+			resultType = ctx.resolveType(moduleName, "Bool")
+		}
+		binary := &Binary{Op: op, Left: left, Right: right, Type: ctx.irType(resultType)}
+		ops := append(leftOps, rightOps...)
+		ops = append(ops, binary)
+		return binary, ops, resultType
+	default:
+		ctx.errorf("unsupported expression %T", expr)
+		typ := ctx.resolveType(moduleName, "U64")
+		return &ConstInt{Value: 0, Type: ctx.irType(typ)}, nil, typ
+	}
+}
+
+func (ctx *lowerContext) lowerCallArgs(moduleName string, receiverType *sem.Type, scope *lowerScope, method *sem.Method, args []ast.NamedArg) ([]Value, []Operation) {
+	_ = receiverType
+	var values []Value
+	var ops []Operation
+	if method == nil {
+		for _, arg := range args {
+			value, valueOps, _ := ctx.lowerExpr(moduleName, nil, scope, arg.Value)
+			ops = append(ops, valueOps...)
+			values = append(values, value)
+		}
+		return values, ops
+	}
+	params := method.Params
+	if len(params) > 0 && params[0].Name == "self" {
+		params = params[1:]
+	}
+	for i, param := range params {
+		var argExpr ast.Expr
+		for j := range args {
+			if args[j].Name == param.Name || (args[j].Name == "" && j == i) {
+				argExpr = args[j].Value
+				break
+			}
+		}
+		if argExpr == nil {
+			continue
+		}
+		value, valueOps, _ := ctx.lowerExpr(moduleName, nil, scope, argExpr)
+		ops = append(ops, valueOps...)
+		values = append(values, value)
+	}
+	return values, ops
+}
+
+func (ctx *lowerContext) lookupField(typ *sem.Type, fieldName string) *FieldInfo {
+	if typ == nil {
+		return nil
+	}
+	info := ctx.ensureTypeInfo(typ, map[string]bool{})
+	field, ok := info.Fields[fieldName]
+	if !ok {
+		return nil
+	}
+	return &field
+}
+
+func (ctx *lowerContext) lookupMethod(typ *sem.Type, methodName string) *sem.Method {
+	if typ == nil {
+		return nil
+	}
+	for i := range typ.Methods {
+		if typ.Methods[i].Name == methodName {
+			return &typ.Methods[i]
+		}
+	}
+	return nil
+}
+
+func (ctx *lowerContext) methodReturn(moduleName string, method *sem.Method) *sem.Type {
+	if method == nil || method.Return == nil {
+		if ctx.checked != nil && ctx.checked.OwnedRoot != nil {
+			return ctx.checked.OwnedRoot
+		}
+		return ctx.resolveType(moduleName, "void")
+	}
+	return method.Return
+}
+
+func (ctx *lowerContext) methodDeclReturn(moduleName string, method *ast.MethodDecl) *sem.Type {
+	if method == nil || method.Return == "" {
+		return ctx.resolveType(moduleName, "void")
+	}
+	return ctx.resolveType(moduleName, method.Return)
+}
+
+func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {
+	if raw == "" {
+		return ctx.resolveType(moduleName, "void")
+	}
+	if ctx.checked != nil && ctx.checked.Index != nil {
+		if typ, ok := ctx.checked.Index.Lookup(moduleName, raw); ok && typ != nil {
+			ctx.ensureTypeInfo(typ, map[string]bool{})
+			return typ
+		}
+		if typ := ctx.checked.Index.MustType(raw); typ != nil {
+			ctx.ensureTypeInfo(typ, map[string]bool{})
+			return typ
+		}
+	}
+	if typ := ctx.types[typeKey(moduleName, raw)]; typ != nil {
+		ctx.ensureTypeInfo(typ, map[string]bool{})
+		return typ
+	}
+	if typ := ctx.types[raw]; typ != nil {
+		ctx.ensureTypeInfo(typ, map[string]bool{})
+		return typ
+	}
+	key := typeKey(moduleName, raw)
+	if typ := ctx.pseudo[key]; typ != nil {
+		return typ
+	}
+	typ := &sem.Type{Module: moduleName, Name: raw, Kind: sem.KindClass}
+	if info, ok := ctx.program.Types[raw]; ok && info.Kind == TypeKindPrimitive {
+		typ.Kind = sem.KindPrimitive
+	}
+	ctx.pseudo[key] = typ
+	ctx.ensureTypeInfo(typ, map[string]bool{})
+	return typ
+}
+
+func (ctx *lowerContext) irType(typ *sem.Type) Type {
+	if typ == nil {
+		return Type{Name: "void", Kind: TypeKindPrimitive}
+	}
+	return Type{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind)}
+}
+
+func (ctx *lowerContext) errorf(format string, args ...any) {
+	ctx.diags = append(ctx.diags, diag.Diagnostic{
+		Phase:   "cg",
+		Code:    diag.CG0001,
+		Message: fmt.Sprintf(format, args...),
+	})
+}
+
+func assignedNames(stmts []ast.Stmt) map[string]bool {
+	out := map[string]bool{}
+	var walk func([]ast.Stmt)
+	walk = func(stmts []ast.Stmt) {
+		for _, stmt := range stmts {
+			switch s := stmt.(type) {
+			case *ast.AssignStmt:
+				if name, ok := s.Target.(*ast.NameExpr); ok {
+					out[name.Name] = true
+				}
+			case *ast.IfStmt:
+				walk(s.Then)
+				walk(s.Else)
+			case *ast.WhileStmt:
+				walk(s.Body)
+			case *ast.ForStmt:
+				walk(s.Body)
+			}
+		}
+	}
+	walk(stmts)
+	return out
+}
+
+func compositeMethods(decl ast.Decl) (string, []ast.MethodDecl, bool) {
+	switch d := decl.(type) {
+	case *ast.ClassDecl:
+		return d.Name, d.Methods, true
+	case *ast.DriverDecl:
+		return d.Name, d.Methods, true
+	case *ast.DriverPathDecl:
+		return d.Name, d.Methods, true
+	case *ast.ExecutorDecl:
+		return d.Name, d.Methods, true
+	default:
+		return "", nil, false
+	}
+}
+
+func lowerBinaryOp(op string) string {
+	switch op {
+	case "+":
+		return "add"
+	case "-":
+		return "sub"
+	case "&":
+		return "and"
+	case "==":
+		return "eq"
+	case "!=":
+		return "ne"
+	case "<":
+		return "lt"
+	case "<=":
+		return "le"
+	case ">":
+		return "gt"
+	case ">=":
+		return "ge"
+	default:
+		return op
+	}
+}
+
+func isLowerComparison(op string) bool {
+	switch op {
+	case "eq", "ne", "lt", "le", "gt", "ge":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHandleRecordKind(kind TypeKind) bool {
+	switch kind {
+	case TypeKindData, TypeKindClass, TypeKindDriver, TypeKindDriverPath, TypeKindExecutor:
+		return true
+	default:
+		return false
+	}
+}
+
+func semKindToIR(kind sem.Kind) TypeKind {
+	switch kind {
+	case sem.KindPrimitive:
+		return TypeKindPrimitive
+	case sem.KindData:
+		return TypeKindData
+	case sem.KindClass:
+		return TypeKindClass
+	case sem.KindDriver:
+		return TypeKindDriver
+	case sem.KindDriverPath:
+		return TypeKindDriverPath
+	case sem.KindExecutor:
+		return TypeKindExecutor
+	case sem.KindImage:
+		return TypeKindImage
+	default:
+		return TypeKindUnknown
+	}
 }
 
 func firstImageType(checked *sem.CheckedProgram) (string, string) {
@@ -78,14 +779,18 @@ func firstImageType(checked *sem.CheckedProgram) (string, string) {
 	return "", ""
 }
 
-func lowerAsmMethods(checked *sem.CheckedProgram) []AsmMethod {
+func (ctx *lowerContext) lowerAsmMethods() []AsmMethod {
 	var out []AsmMethod
-	for moduleName, byName := range checked.Index.ByModule {
+	if ctx == nil || ctx.checked == nil || ctx.checked.Index == nil {
+		return out
+	}
+	for moduleName, byName := range ctx.checked.Index.ByModule {
 		for _, typ := range byName {
 			if typ == nil {
 				continue
 			}
-			offsets, widths := receiverLayout(typ)
+			typeInfo := ctx.ensureTypeInfo(typ, map[string]bool{})
+			offsets, widths := receiverLayout(typeInfo)
 			for _, method := range typ.Methods {
 				if !method.IsAsm || method.AsmBody == nil {
 					continue
@@ -105,24 +810,13 @@ func lowerAsmMethods(checked *sem.CheckedProgram) []AsmMethod {
 	return out
 }
 
-func receiverLayout(typ *sem.Type) (map[string]int, map[string]int) {
+func receiverLayout(info TypeInfo) (map[string]int, map[string]int) {
 	offsets := map[string]int{}
 	widths := map[string]int{}
-	if typ == nil {
-		return offsets, widths
-	}
-	fields := make([]layout.Field, 0, len(typ.Fields))
-	for _, field := range typ.Fields {
-		fields = append(fields, layout.Field{Name: field.Name, Type: typeName(field.Type)})
-	}
-	record, err := layout.Compute(fields)
-	if err != nil {
-		return offsets, widths
-	}
-	for _, field := range typ.Fields {
-		fieldLayout := record.Fields[field.Name]
-		offsets[field.Name] = fieldLayout.Offset
-		widths[field.Name] = fieldLayout.Size * 8
+	for _, fieldName := range info.FieldOrder {
+		field := info.Fields[fieldName]
+		offsets[fieldName] = field.Offset
+		widths[fieldName] = field.Size * 8
 	}
 	return offsets, widths
 }
@@ -136,323 +830,6 @@ func methodParams(method sem.Method) []Value {
 		out = append(out, &Param{Symbol: param.Name, Type: Type{Name: typeName(param.Type)}})
 	}
 	return out
-}
-
-func delegatedPhaseFunction(symbol string, delegatedType string, ownedType string) Function {
-	hardware := &Param{Symbol: "hardware", Type: Type{Name: delegatedType}}
-	owned := &Call{
-		Symbol:   symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware"),
-		Receiver: hardware,
-		Type:     Type{Name: ownedType},
-	}
-	return Function{
-		Symbol: symbol,
-		Params: []Value{hardware},
-		Blocks: []Block{{
-			Label: "entry",
-			Ops: []Operation{
-				owned,
-				&Return{Value: owned},
-			},
-		}},
-	}
-}
-
-func ownedPhaseFunction(symbol string, ownedType string, executorSymbol string) Function {
-	hardware := &Param{Symbol: "hardware", Type: Type{Name: ownedType}}
-	start := &Call{
-		Symbol:   executorSymbol,
-		Receiver: hardware,
-		Type:     Type{Name: "never"},
-	}
-	return Function{
-		Symbol: symbol,
-		Params: []Value{hardware},
-		Blocks: []Block{{
-			Label: "entry",
-			Ops:   []Operation{start},
-		}},
-	}
-}
-
-func transitionTransferMethod() AsmMethod {
-	return AsmMethod{
-		Symbol:       symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware"),
-		ReceiverType: "DelegatedHardware",
-		Return:       Type{Name: "OwnedHardware"},
-		Body:         transitionTransferBody(),
-	}
-}
-
-func transitionTransferBody() string {
-	return strings.TrimSpace(`
-push rbp
-mov rbp, rsp
-sub rsp, 82112
-mov [rbp - 8], rdi
-
-get_memory_map:
-mov rdi, [rbp - 8]
-mov r10, [rdi + 0]
-mov r11, [rdi + 8]
-mov rax, 65536
-mov [rbp - 16], rax
-mov rcx, rbp
-add rcx, -16
-mov rdx, rbp
-add rdx, -82112
-mov r8, rbp
-add r8, -24
-mov r9, rbp
-add r9, -32
-mov rax, rbp
-add rax, -40
-mov [rsp + 32], rax
-mov rax, [r11 + 56]
-call rax
-mov r10, 0x8000000000000005
-cmp rax, r10
-jne exit_boot_services
-jmp get_memory_map
-
-exit_boot_services:
-mov rdi, [rbp - 8]
-mov rcx, [rdi + 0]
-mov r11, [rdi + 8]
-mov rdx, [rbp - 24]
-mov rax, [r11 + 232]
-call rax
-mov r10, 0x8000000000000002
-cmp rax, r10
-jne activate_owned_hardware
-jmp get_memory_map
-
-activate_owned_hardware:
-cli
-mov r11, 0x300000
-mov rcx, 1536
-mov rax, 0
-zero_page_tables:
-mov [r11], rax
-add r11, 8
-sub rcx, 1
-jne zero_page_tables
-mov r11, 0x300000
-mov rax, 0x301003
-mov [r11], rax
-mov rax, 0x302003
-mov [r11 + 4096], rax
-mov r12, 0x302000
-mov rcx, 512
-mov rax, 0x83
-fill_identity_pd:
-mov [r12], rax
-add r12, 8
-add rax, 2097152
-sub rcx, 1
-jne fill_identity_pd
-
-mov r11, 0x303000
-mov rax, 0
-mov [r11], rax
-mov rax, 0x00af9a000000ffff
-mov [r11 + 8], rax
-mov rax, 0x00cf92000000ffff
-mov [r11 + 16], rax
-mov ax, 23
-mov [r11 + 24], ax
-mov [r11 + 26], r11
-call capture_fatal_handler
-fatal_halt:
-hlt
-jmp fatal_halt
-capture_fatal_handler:
-pop r13
-mov r12, 0x304000
-mov rcx, 256
-idt_gate_loop:
-mov rax, r13
-mov [r12], ax
-mov ax, 8
-mov [r12 + 2], ax
-mov al, 0
-mov [r12 + 4], al
-mov al, 0x8e
-mov [r12 + 5], al
-mov rax, r13
-shr rax, 16
-mov [r12 + 6], ax
-mov rax, r13
-shr rax, 32
-mov [r12 + 8], eax
-mov rax, 0
-mov [r12 + 12], eax
-add r12, 16
-sub rcx, 1
-jne idt_gate_loop
-mov r11, 0x303000
-mov ax, 4095
-mov [r11 + 40], ax
-mov rax, 0x304000
-mov [r11 + 42], rax
-mov rax, 0x300000
-mov cr3, rax
-lgdt [r11 + 24]
-lidt [r11 + 40]
-mov rax, 0x400000
-mov rsp, rax
-call reload_cs_target
-reload_cs_target:
-pop rax
-add rax, 10
-push 8
-push rax
-retfq
-mov ax, 0x10
-mov ds, ax
-mov es, ax
-mov ss, ax
-mov fs, ax
-mov gs, ax
-mov rax, 0
-ret
-`)
-}
-
-func lowerStringData(modules []*ast.Module) []DataObject {
-	var out []DataObject
-	seen := map[string]bool{}
-	for _, mod := range modules {
-		for _, decl := range mod.Decls {
-			walkDeclStrings(decl, func(value string) {
-				if seen[value] {
-					return
-				}
-				seen[value] = true
-				out = append(out, DataObject{Symbol: symbolName("str", mod.Name, fmt.Sprintf("%d", len(out))), Bytes: append([]byte(value), 0)})
-			})
-		}
-	}
-	return out
-}
-
-func findFirstStringLiteral(modules []*ast.Module) string {
-	out := ""
-	for _, mod := range modules {
-		for _, decl := range mod.Decls {
-			walkDeclStrings(decl, func(value string) {
-				if out == "" {
-					out = value
-				}
-			})
-			if out != "" {
-				return out
-			}
-		}
-	}
-	return "hello from wrela\n"
-}
-
-func findExecutorStart(modules []*ast.Module) (string, string) {
-	message := findFirstStringLiteral(modules)
-	for _, mod := range modules {
-		for _, decl := range mod.Decls {
-			executor, ok := decl.(*ast.ExecutorDecl)
-			if !ok {
-				continue
-			}
-			for _, method := range executor.Methods {
-				if method.IsStart {
-					return symbolName("method", mod.Name, executor.Name, method.Name), message
-				}
-			}
-		}
-	}
-	return symbolName("method", "examples.hello.program", "HelloWorld", "run"), message
-}
-
-func walkDeclStrings(decl ast.Decl, visit func(string)) {
-	switch d := decl.(type) {
-	case *ast.ClassDecl:
-		walkMethodsStrings(d.Methods, visit)
-	case *ast.DriverDecl:
-		walkMethodsStrings(d.Methods, visit)
-	case *ast.DriverPathDecl:
-		walkMethodsStrings(d.Methods, visit)
-	case *ast.ExecutorDecl:
-		walkMethodsStrings(d.Methods, visit)
-	case *ast.ImageDecl:
-		for _, phase := range d.Phases {
-			walkStmtStrings(phase.Body, visit)
-		}
-	}
-}
-
-func walkMethodsStrings(methods []ast.MethodDecl, visit func(string)) {
-	for _, method := range methods {
-		walkStmtStrings(method.Body, visit)
-	}
-}
-
-func walkStmtStrings(stmts []ast.Stmt, visit func(string)) {
-	for _, stmt := range stmts {
-		switch s := stmt.(type) {
-		case *ast.LetStmt:
-			walkExprStrings(s.Expr, visit)
-		case *ast.AssignStmt:
-			walkExprStrings(s.Target, visit)
-			walkExprStrings(s.Value, visit)
-		case *ast.ReturnStmt:
-			walkExprStrings(s.Value, visit)
-		case *ast.ExprStmt:
-			walkExprStrings(s.Expr, visit)
-		case *ast.IfStmt:
-			walkExprStrings(s.Cond, visit)
-			walkStmtStrings(s.Then, visit)
-			walkStmtStrings(s.Else, visit)
-		case *ast.WhileStmt:
-			walkExprStrings(s.Cond, visit)
-			walkStmtStrings(s.Body, visit)
-		case *ast.ForStmt:
-			walkExprStrings(s.InExpr, visit)
-			walkStmtStrings(s.Body, visit)
-		}
-	}
-}
-
-func walkExprStrings(expr ast.Expr, visit func(string)) {
-	switch e := expr.(type) {
-	case nil:
-	case *ast.StringLiteral:
-		visit(e.Value)
-	case *ast.ConstructorExpr:
-		for _, arg := range e.Args {
-			walkExprStrings(arg.Value, visit)
-		}
-	case *ast.CallExpr:
-		walkExprStrings(e.Receiver, visit)
-		for _, arg := range e.Args {
-			walkExprStrings(arg.Value, visit)
-		}
-	case *ast.FieldExpr:
-		walkExprStrings(e.Base, visit)
-	case *ast.BinaryExpr:
-		walkExprStrings(e.Left, visit)
-		walkExprStrings(e.Right, visit)
-	}
-}
-
-func serialExecutorBody(message string) string {
-	if message == "" {
-		message = "hello from wrela\n"
-	}
-	var b strings.Builder
-	b.WriteString("mov dx, 0x03f8\n")
-	for i := 0; i < len(message); i++ {
-		fmt.Fprintf(&b, "mov al, %d\nout dx, al\n", message[i])
-	}
-	b.WriteString("owned_halt:\nhlt\njmp owned_halt\n")
-	return b.String()
 }
 
 func symbolName(parts ...string) string {
@@ -479,4 +856,30 @@ func typeName(typ *sem.Type) string {
 		return ""
 	}
 	return typ.Name
+}
+
+func sameSemType(a, b *sem.Type) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Name != b.Name {
+		return false
+	}
+	return a.Module == "" || b.Module == "" || a.Module == b.Module
+}
+
+func receiverHasMethodReturning(receiver *sem.Type, ret *sem.Type) bool {
+	if receiver == nil || ret == nil {
+		return false
+	}
+	for _, method := range receiver.Methods {
+		if sameSemType(method.Return, ret) {
+			return true
+		}
+	}
+	return false
+}
+
+func typeKey(moduleName, name string) string {
+	return moduleName + "." + name
 }

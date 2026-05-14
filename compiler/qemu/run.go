@@ -6,17 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Options struct {
-	QEMUBinary string
-	OVMFCode   string
-	OVMFVars   string
-	ESPDir     string
-	ImagePath  string
-	Memory     string
-	Timeout    time.Duration
+	QEMUBinary  string
+	OVMFCode    string
+	OVMFVars    string
+	ESPDir      string
+	ImagePath   string
+	Memory      string
+	CPU         string
+	Timeout     time.Duration
+	SuccessText string
 }
 
 func Args(opts Options) []string {
@@ -24,9 +27,13 @@ func Args(opts Options) []string {
 	if memory == "" {
 		memory = "256M"
 	}
+	cpu := opts.CPU
+	if cpu == "" {
+		cpu = "x86-64-v3"
+	}
 	return []string{
 		"-machine", "q35",
-		"-cpu", "x86-64-v3",
+		"-cpu", cpu,
 		"-m", memory,
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + opts.OVMFCode,
 		"-drive", "if=pflash,format=raw,file=" + opts.OVMFVars,
@@ -57,7 +64,28 @@ func Run(opts Options) (string, error) {
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	err := cmd.Run()
-	return output.String(), err
+	out := output.String()
+	if opts.SuccessText != "" && strings.Contains(out, opts.SuccessText) {
+		return out, nil
+	}
+	if err != nil && opts.CPU == "" && strings.Contains(out, "unable to find CPU model 'x86-64-v3'") {
+		opts.CPU = "Haswell-v3"
+		return runStaged(ctx, bin, opts)
+	}
+	return out, err
+}
+
+func runStaged(ctx context.Context, bin string, opts Options) (string, error) {
+	cmd := exec.CommandContext(ctx, bin, Args(opts)...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
+	out := output.String()
+	if opts.SuccessText != "" && strings.Contains(out, opts.SuccessText) {
+		return out, nil
+	}
+	return out, err
 }
 
 func StageESP(imagePath, espDir string) error {

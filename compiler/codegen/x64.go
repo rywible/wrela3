@@ -14,11 +14,26 @@ import (
 const diagnosticPhase = "cg"
 
 type Frame struct {
-	Slots map[ir.Value]int
-	Size  int
+	Slots            map[ir.Value]int
+	ObjectSlots      map[ir.Value]int
+	Size             int
+	ReturnType       ir.Type
+	ContinuationSlot int
+	RecordReturnSlot int
+	HasRecordReturn  bool
+	PreserveStackRet bool
+}
+
+type compileContext struct {
+	types map[string]ir.TypeInfo
 }
 
 type internalReloc struct {
+	Offset uint64
+	Symbol string
+}
+
+type dataReloc struct {
 	Offset uint64
 	Symbol string
 }
@@ -27,6 +42,7 @@ type compiledUnit struct {
 	Symbol    string
 	Bytes     []byte
 	CallReloc []internalReloc
+	DataReloc []dataReloc
 }
 
 type jumpFixup struct {
@@ -39,9 +55,13 @@ type Emitter struct {
 	Code      []byte
 	Labels    map[string]int
 	CallReloc []internalReloc
+	DataReloc []dataReloc
 	Jumps     []jumpFixup
 	Diags     []diag.Diagnostic
+	ctx       compileContext
 }
+
+const runtimeImageBase = 0x100000
 
 func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	if program == nil {
@@ -52,9 +72,14 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}}
 	}
 
+	ctx := compileContext{types: program.Types}
+	if ctx.types == nil {
+		ctx.types = map[string]ir.TypeInfo{}
+	}
+
 	units := make([]compiledUnit, 0, len(program.Functions)+len(program.AsmMethods)+1)
 	for _, fn := range program.Functions {
-		unit, ds := compileFunction(fn)
+		unit, ds := compileFunction(fn, ctx)
 		if len(ds) != 0 {
 			return nil, ds
 		}
@@ -76,8 +101,9 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	}
 
 	sections := []Section{{Name: ".text", Data: nil, Characteristics: 0x60000020}}
+	dataBytes, dataOffsets := buildRData(program)
 	if len(program.Data) > 0 {
-		sections = append(sections, Section{Name: ".rdata", Data: buildRData(program), Characteristics: 0x40000040})
+		sections = append(sections, Section{Name: ".rdata", Data: dataBytes, Characteristics: 0x40000040})
 	}
 
 	symbols := map[string]uint64{}
@@ -92,6 +118,16 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	}
 	sections[0].RVA = 0x1000
 
+	if len(sections) > 1 {
+		alignedSize := alignUpLen(uint64(len(sections[0].Data)), 0x1000)
+		sections[0].Data = append(sections[0].Data, make([]byte, alignedSize-uint64(len(sections[0].Data)))...)
+		sections[1].RVA = 0x1000 + uint64(len(sections[0].Data))
+		for symbol, offset := range dataOffsets {
+			symbols[symbol] = sections[1].RVA + offset
+		}
+	}
+
+	var relocs []Reloc
 	for _, unit := range units {
 		unitStart := unitOffsets[unit.Symbol]
 		for _, rel := range unit.CallReloc {
@@ -107,32 +143,42 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 			rel32 := int64(target) - int64(callPos+4)
 			binary.LittleEndian.PutUint32(sections[0].Data[unitStart+rel.Offset:unitStart+rel.Offset+4], uint32(int32(rel32)))
 		}
-	}
-
-	if len(sections) > 1 {
-		alignedSize := alignUpLen(uint64(len(sections[0].Data)), 0x1000)
-		sections[0].Data = append(sections[0].Data, make([]byte, alignedSize-uint64(len(sections[0].Data)))...)
-		sections[1].RVA = 0x1000 + uint64(len(sections[0].Data))
+		for _, rel := range unit.DataReloc {
+			target, ok := symbols[rel.Symbol]
+			if !ok {
+				return nil, []diag.Diagnostic{{
+					Phase:   diagnosticPhase,
+					Code:    diag.CG0001,
+					Message: "unknown data symbol: " + rel.Symbol,
+				}}
+			}
+			location := unitStart + rel.Offset
+			binary.LittleEndian.PutUint64(sections[0].Data[location:location+8], uint64(runtimeImageBase)+target)
+			relocs = append(relocs, Reloc{Kind: RelocKindDIR64, Offset: rel.Offset, Symbol: unit.Symbol})
+		}
 	}
 
 	return &Image{
 		EntrySymbol: program.Entry.Symbol,
 		Sections:    sections,
 		Symbols:     symbols,
+		Relocs:      relocs,
 	}, nil
 }
 
-func buildRData(program *ir.Program) []byte {
+func buildRData(program *ir.Program) ([]byte, map[string]uint64) {
 	out := []byte{}
+	offsets := map[string]uint64{}
 	for _, obj := range program.Data {
+		offsets[obj.Symbol] = uint64(len(out))
 		out = append(out, obj.Bytes...)
 	}
-	return out
+	return out, offsets
 }
 
-func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
-	frame := buildFrame(fn)
-	e := &Emitter{Labels: map[string]int{}}
+func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
+	frame := buildFrame(fn, ctx)
+	e := &Emitter{Labels: map[string]int{}, ctx: ctx}
 
 	emitPrologue(e, fn.Params, frame)
 	hasReturn := false
@@ -144,6 +190,14 @@ func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
 			switch v := op.(type) {
 			case *ir.ConstInt:
 				emitConst(e, v, frame)
+			case *ir.Local:
+				// Local slots are allocated by the frame builder.
+			case *ir.StringLiteral:
+				emitStringLiteral(e, v, frame)
+			case *ir.Construct:
+				emitConstruct(e, v, frame)
+			case *ir.Copy:
+				emitCopy(e, v, frame)
 			case *ir.Binary:
 				emitBinary(e, v, frame)
 			case *ir.Call:
@@ -161,6 +215,8 @@ func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
 				emitBranch(e, v, frame)
 			case *ir.FieldLoad:
 				emitFieldLoad(e, v, frame)
+			case *ir.FieldStore:
+				emitFieldStore(e, v, frame)
 			}
 		}
 	}
@@ -172,7 +228,7 @@ func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
 	if len(e.Diags) != 0 {
 		return compiledUnit{}, e.Diags
 	}
-	return compiledUnit{Symbol: fn.Symbol, Bytes: e.Code, CallReloc: e.CallReloc}, nil
+	return compiledUnit{Symbol: fn.Symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}, nil
 }
 
 func compileAsmMethodUnit(method ir.AsmMethod) (compiledUnit, []diag.Diagnostic) {
@@ -198,11 +254,25 @@ func compileEntryAdapterUnit(entry ir.EntryAdapter) (compiledUnit, []diag.Diagno
 	return compiledUnit{Symbol: entry.Symbol, Bytes: e.Code, CallReloc: e.CallReloc}, nil
 }
 
-func buildFrame(fn ir.Function) Frame {
+func buildFrame(fn ir.Function, ctx compileContext) Frame {
 	offset := 0
 	slots := map[ir.Value]int{}
+	objectSlots := map[ir.Value]int{}
+	hasRecordReturn := false
+	continuationSlot := 0
+	recordReturnSlot := 0
+	returnType := functionReturnType(fn)
+	if fn.PreserveStackReturn {
+		offset += 8
+		continuationSlot = -offset
+	}
+	if ctx.shouldPassRecordReturn(returnType.Name) {
+		offset += 8
+		recordReturnSlot = -offset
+		hasRecordReturn = true
+	}
 	for _, p := range fn.Params {
-		size := valueSize(p)
+		size := valueSize(ctx, p)
 		offset += size
 		slots[p] = -offset
 	}
@@ -210,31 +280,126 @@ func buildFrame(fn ir.Function) Frame {
 		if _, ok := slots[v]; ok {
 			continue
 		}
-		size := valueSize(v)
+		if needsObjectSlot(ctx, v) {
+			size := objectStorageSize(ctx, v)
+			offset += size
+			objectSlots[v] = -offset
+		}
+		size := valueSize(ctx, v)
 		offset += size
 		slots[v] = -offset
 	}
-	return Frame{Slots: slots, Size: layout.AlignUp(offset, 16)}
+	return Frame{
+		Slots:            slots,
+		ObjectSlots:      objectSlots,
+		Size:             layout.AlignUp(offset, 16),
+		ReturnType:       returnType,
+		ContinuationSlot: continuationSlot,
+		RecordReturnSlot: recordReturnSlot,
+		HasRecordReturn:  hasRecordReturn,
+		PreserveStackRet: fn.PreserveStackReturn,
+	}
 }
 
-func valueSize(value ir.Value) int {
+func needsObjectSlot(ctx compileContext, value ir.Value) bool {
+	switch v := value.(type) {
+	case *ir.Construct, *ir.StringLiteral:
+		return true
+	case *ir.Call:
+		return ctx.shouldPassRecordReturn(v.Type.Name)
+	default:
+		return false
+	}
+}
+
+func objectStorageSize(ctx compileContext, value ir.Value) int {
+	size := ctx.storageSize(valueTypeName(value))
+	if size <= 0 {
+		return 8
+	}
+	return size
+}
+
+func functionReturnType(fn ir.Function) ir.Type {
+	if fn.Return.Name != "" {
+		return fn.Return
+	}
+	if typ, ok := firstReturnType(fn.Blocks); ok {
+		return typ
+	}
+	return ir.Type{Name: "void"}
+}
+
+func firstReturnType(blocks []ir.Block) (ir.Type, bool) {
+	for _, block := range blocks {
+		if typ, ok := firstReturnTypeInOps(block.Ops); ok {
+			return typ, true
+		}
+	}
+	return ir.Type{}, false
+}
+
+func firstReturnTypeInOps(ops []ir.Operation) (ir.Type, bool) {
+	for _, op := range ops {
+		switch v := op.(type) {
+		case *ir.Return:
+			if v.Value != nil {
+				return ir.Type{Name: valueTypeName(v.Value)}, true
+			}
+		case *ir.If:
+			if typ, ok := firstReturnTypeInOps(v.Then); ok {
+				return typ, true
+			}
+			if typ, ok := firstReturnTypeInOps(v.Else); ok {
+				return typ, true
+			}
+		case *ir.While:
+			if typ, ok := firstReturnTypeInOps(v.Body); ok {
+				return typ, true
+			}
+		case *ir.ForBytes:
+			if typ, ok := firstReturnTypeInOps(v.Body); ok {
+				return typ, true
+			}
+		}
+	}
+	return ir.Type{}, false
+}
+
+func valueSize(ctx compileContext, value ir.Value) int {
 	switch v := value.(type) {
 	case *ir.Param:
-		return maxValueSize(v.Type.Name)
+		return ctx.representationSize(v.Type.Name)
+	case *ir.Local:
+		return ctx.representationSize(v.Type.Name)
 	case *ir.ConstInt:
-		return maxValueSize(v.Type.Name)
+		return ctx.representationSize(v.Type.Name)
 	case *ir.Binary:
-		return maxValueSize(v.Type.Name)
+		return ctx.representationSize(v.Type.Name)
 	case *ir.Call:
-		return maxValueSize(v.Type.Name)
+		return ctx.representationSize(v.Type.Name)
 	case *ir.FieldLoad:
-		return maxValueSize(v.Type.Name)
+		return ctx.representationSize(v.Type.Name)
+	case *ir.Construct:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.StringLiteral:
+		return ctx.representationSize(v.Type.Name)
 	default:
 		return 8
 	}
 }
 
-func maxValueSize(name string) int {
+func (ctx compileContext) representationSize(name string) int {
+	if ctx.isHandleType(name) {
+		return 8
+	}
+	return ctx.objectSize(name)
+}
+
+func (ctx compileContext) objectSize(name string) int {
+	if info, ok := ctx.types[name]; ok && info.Size > 0 {
+		return info.Size
+	}
 	switch name {
 	case "U8", "I8", "Bool":
 		return 1
@@ -242,7 +407,7 @@ func maxValueSize(name string) int {
 		return 2
 	case "U32", "I32":
 		return 4
-	case "Bytes", "MutableBytes", "StringLiteral", "data", "class", "driver", "path", "executor":
+	case "StringLiteral", "Bytes", "MutableBytes", "DelegatedBytes", "DelegatedMutableBytes":
 		return 16
 	default:
 		s, _, err := layout.SizeAlign(name)
@@ -253,8 +418,57 @@ func maxValueSize(name string) int {
 	}
 }
 
-func valueWidthBits(value ir.Value) int {
-	size := valueSize(value)
+func (ctx compileContext) storageSize(name string) int {
+	if info, ok := ctx.types[name]; ok {
+		if info.StorageSize > 0 {
+			return info.StorageSize
+		}
+		if info.Size > 0 {
+			return info.Size
+		}
+	}
+	return ctx.objectSize(name)
+}
+
+func (ctx compileContext) isHandleType(name string) bool {
+	if name == "StringLiteral" {
+		return true
+	}
+	info, ok := ctx.types[name]
+	if ok {
+		return isHandleTypeKind(info.Kind)
+	}
+	switch name {
+	case "Bytes", "MutableBytes", "DelegatedBytes", "DelegatedMutableBytes", "UefiHandle", "UefiStatus", "UefiMemoryMap", "UefiMemoryMapResult":
+		return true
+	case "", "Bool", "U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "PhysicalAddress", "VirtualAddress", "never", "void":
+		return false
+	default:
+		return true
+	}
+}
+
+func isHandleTypeKind(kind ir.TypeKind) bool {
+	switch kind {
+	case ir.TypeKindData, ir.TypeKindClass, ir.TypeKindDriver, ir.TypeKindDriverPath, ir.TypeKindExecutor:
+		return true
+	default:
+		return false
+	}
+}
+
+func (ctx compileContext) shouldPassRecordReturn(typeName string) bool {
+	if typeName == "" || typeName == "never" {
+		return false
+	}
+	if info, ok := ctx.types[typeName]; ok {
+		return info.Kind == ir.TypeKindData
+	}
+	return shouldPassRecordReturn(typeName)
+}
+
+func valueWidthBits(ctx compileContext, value ir.Value) int {
+	size := valueSize(ctx, value)
 	switch size {
 	case 1:
 		return 8
@@ -355,6 +569,13 @@ func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
 		e.emit(0x48, 0x81, 0xEC)
 		e.emitInt32(int32(frame.Size))
 	}
+	if frame.RecordReturnSlot != 0 {
+		emitStoreSlotFromReg(e, asm.MustLookup("r10"), frame.RecordReturnSlot, 64)
+	}
+	if frame.ContinuationSlot != 0 {
+		emitLoadMemToReg(e, scratchRegs[0], asm.MustLookup("rbp"), 8, 64)
+		emitStoreSlotFromReg(e, scratchRegs[0], frame.ContinuationSlot, 64)
+	}
 	for i, p := range params {
 		if i >= len(argRegs) {
 			break
@@ -363,7 +584,7 @@ func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
 		if !ok {
 			continue
 		}
-		emitStoreSlotFromReg(e, argRegs[i], slot, valueWidthBits(p))
+		emitStoreSlotFromReg(e, argRegs[i], slot, valueWidthBits(e.ctx, p))
 	}
 }
 
@@ -373,23 +594,39 @@ func emitEpilogue(e *Emitter) {
 	e.emit(0xC3)
 }
 
+func emitStackPreservingEpilogue(e *Emitter, frame Frame) {
+	if frame.ContinuationSlot != 0 {
+		emitLoadSlotToReg(e, scratchRegs[1], frame.ContinuationSlot, 64)
+		emitLoadMemToReg(e, asm.MustLookup("rbp"), asm.MustLookup("rbp"), 0, 64)
+		e.emit(0x41, 0x52)
+	}
+	e.emit(0xC3)
+}
+
 func emitConst(e *Emitter, c *ir.ConstInt, frame Frame) {
 	slot, ok := frame.Slots[c]
 	if !ok {
 		return
 	}
 	emitMovImmToReg(e, scratchRegs[0], int64(c.Value))
-	emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(c))
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(e.ctx, c))
 }
 
 func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	emitLoadValue(e, frame, op.Left, scratchRegs[0])
 	emitLoadValue(e, frame, op.Right, scratchRegs[1])
-	if op.Op == "add" {
+	switch op.Op {
+	case "add":
 		emitRegRegOp(e, 0x01, scratchRegs[0], scratchRegs[1])
-	} else if op.Op == "sub" {
+	case "sub":
 		emitRegRegOp(e, 0x29, scratchRegs[0], scratchRegs[1])
-	} else {
+	case "and":
+		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
+	case "eq", "ne", "lt", "le", "gt", "ge":
+		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
+		emitMovImmToReg(e, scratchRegs[0], 0)
+		emitSetccAl(e, setccOpcode(op.Op))
+	default:
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: " + op.Op})
 		return
 	}
@@ -398,7 +635,7 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	if !ok {
 		return
 	}
-	emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(op))
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(e.ctx, op))
 }
 
 func emitCall(e *Emitter, call *ir.Call, frame Frame) {
@@ -416,8 +653,8 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 		})
 		return
 	}
-	if shouldPassRecordReturn(call.Type.Name) {
-		slot, ok := frame.Slots[call]
+	if e.ctx.shouldPassRecordReturn(call.Type.Name) {
+		slot, ok := frame.ObjectSlots[call]
 		if !ok {
 			e.Diags = append(e.Diags, diag.Diagnostic{
 				Phase:   diagnosticPhase,
@@ -438,8 +675,8 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 	rel := uint64(len(e.Code) - 4)
 	e.CallReloc = append(e.CallReloc, internalReloc{Offset: rel, Symbol: call.Symbol})
 
-	if slot, ok := frame.Slots[call]; ok {
-		emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(call))
+	if slot, ok := frame.Slots[call]; ok && call.Type.Name != "void" && call.Type.Name != "never" {
+		emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(e.ctx, call))
 	}
 }
 
@@ -453,7 +690,10 @@ func shouldPassRecordReturn(typeName string) bool {
 	if strings.HasSuffix(typeName, "Result") {
 		return true
 	}
-	if typeName == "DelegatedBytes" || typeName == "DelegatedMutableBytes" || typeName == "UefiMemoryMap" {
+	switch typeName {
+	case "Bytes", "MutableBytes", "DelegatedBytes", "DelegatedMutableBytes",
+		"UefiHandle", "UefiStatus", "UefiMemoryMap", "Com1IoPortClaim",
+		"ExecutorPlacement", "MemoryPlan", "VirtualMemoryPlan", "CpuPlan":
 		return true
 	}
 	return false
@@ -461,9 +701,7 @@ func shouldPassRecordReturn(typeName string) bool {
 
 func isRegisterReturnedType(typeName string) bool {
 	switch typeName {
-	case "Bool", "U8", "U16", "U32", "U64", "I64", "PhysicalAddress", "VirtualAddress", "StringLiteral", "Bytes", "MutableBytes", "String", "Data":
-		return true
-	case "data", "class", "driver", "path", "executor":
+	case "Bool", "U8", "U16", "U32", "U64", "I64", "PhysicalAddress", "VirtualAddress", "StringLiteral", "String", "Data":
 		return true
 	}
 	return false
@@ -482,13 +720,23 @@ func emitLoadValue(e *Emitter, frame Frame, value ir.Value, dst asm.Reg) {
 	case *ir.ConstInt:
 		emitMovImmToReg(e, dst, int64(c.Value))
 	default:
-		emitLoadSlotToReg(e, dst, slot, valueWidthBits(value))
+		emitLoadSlotToReg(e, dst, slot, valueWidthBits(e.ctx, value))
 	}
 }
 
 func emitReturn(e *Emitter, r *ir.Return, frame Frame) {
 	if r.Value != nil {
-		emitLoadValue(e, frame, r.Value, scratchRegs[0])
+		if frame.HasRecordReturn {
+			emitLoadSlotToReg(e, scratchRegs[1], frame.RecordReturnSlot, 64)
+			emitCopyValueToAddressAsType(e, frame, r.Value, scratchRegs[1], frame.ReturnType.Name)
+			emitRegRegMove(e, scratchRegs[0], scratchRegs[1])
+		} else {
+			emitLoadValue(e, frame, r.Value, scratchRegs[0])
+		}
+	}
+	if frame.PreserveStackRet {
+		emitStackPreservingEpilogue(e, frame)
+		return
 	}
 	emitEpilogue(e)
 }
@@ -501,6 +749,7 @@ func emitBranch(e *Emitter, branch *ir.Branch, frame Frame) {
 func emitIf(e *Emitter, cond *ir.If, frame Frame) {
 	done := e.newLabel("if_done")
 	elseLabel := e.newLabel("if_else")
+	emitOperations(e, cond.ConditionOps, frame)
 	emitConditionJump(e, cond.Condition, elseLabel, frame)
 	emitOperations(e, cond.Then, frame)
 	e.emitJmp(done)
@@ -513,6 +762,7 @@ func emitWhile(e *Emitter, wh *ir.While, frame Frame) {
 	start := e.newLabel("while_start")
 	done := e.newLabel("while_done")
 	e.bindLabel(start)
+	emitOperations(e, wh.ConditionOps, frame)
 	emitConditionJump(e, wh.Condition, done, frame)
 	emitOperations(e, wh.Body, frame)
 	e.emitJmp(start)
@@ -529,8 +779,7 @@ func emitForBytes(e *Emitter, loop *ir.ForBytes, frame Frame) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing forbytes index slot"})
 		return
 	}
-	iterSlot, ok := frame.Slots[loop.Iterable]
-	if !ok {
+	if _, ok := frame.Slots[loop.Iterable]; !ok {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing forbytes iterable slot"})
 		return
 	}
@@ -540,22 +789,27 @@ func emitForBytes(e *Emitter, loop *ir.ForBytes, frame Frame) {
 		return
 	}
 
+	emitOperations(e, loop.IterableOps, frame)
 	emitMovImmToReg(e, scratchRegs[0], 0)
-	emitStoreSlotFromReg(e, scratchRegs[0], indexSlot, valueWidthBits(loop.Index))
+	emitStoreSlotFromReg(e, scratchRegs[0], indexSlot, valueWidthBits(e.ctx, loop.Index))
 
 	start := e.newLabel("for_bytes_start")
 	done := e.newLabel("for_bytes_done")
 	e.bindLabel(start)
 
-	emitLoadSlotOffsetToReg(e, scratchRegs[1], iterSlot, 8, 64) // length
+	iterBase, iterDisp, ok := emitValueAddress(e, frame, loop.Iterable)
+	if !ok {
+		return
+	}
+	emitLoadMemToReg(e, scratchRegs[1], iterBase, iterDisp+8, 64) // length
 	emitLoadSlotToReg(e, scratchRegs[0], indexSlot, 64)
 	emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
 	e.emitJcc(0x8D, done)
 
-	emitLoadSlotToReg(e, asm.MustLookup("rdi"), iterSlot, 64) // bytes.address
-	emitLoadSlotToReg(e, scratchRegs[1], indexSlot, 64)
+	emitLoadMemToReg(e, asm.MustLookup("rdi"), iterBase, iterDisp, 64) // bytes.address
+	emitLoadSlotToReg(e, asm.MustLookup("rcx"), indexSlot, 64)
 	e.emit(0x48, 0x0F, 0xB6, 0x04, 0x0F)
-	emitStoreSlotFromReg(e, scratchRegs[0], byteSlot, valueWidthBits(loop.ByteValue))
+	emitStoreSlotFromReg(e, scratchRegs[0], byteSlot, valueWidthBits(e.ctx, loop.ByteValue))
 
 	emitOperations(e, loop.Body, frame)
 	emitLoadSlotToReg(e, asm.MustLookup("rcx"), indexSlot, 64)
@@ -570,6 +824,14 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 		switch v := op.(type) {
 		case *ir.ConstInt:
 			emitConst(e, v, frame)
+		case *ir.Local:
+			// Local slots are allocated by the frame builder.
+		case *ir.StringLiteral:
+			emitStringLiteral(e, v, frame)
+		case *ir.Construct:
+			emitConstruct(e, v, frame)
+		case *ir.Copy:
+			emitCopy(e, v, frame)
 		case *ir.Binary:
 			emitBinary(e, v, frame)
 		case *ir.Call:
@@ -586,6 +848,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitBranch(e, v, frame)
 		case *ir.FieldLoad:
 			emitFieldLoad(e, v, frame)
+		case *ir.FieldStore:
+			emitFieldStore(e, v, frame)
 		}
 	}
 }
@@ -597,10 +861,17 @@ func emitConditionJump(e *Emitter, cond ir.Value, falseTarget string, frame Fram
 			e.emitJmp(falseTarget)
 		}
 	case *ir.Binary:
-		emitLoadValue(e, frame, c.Left, scratchRegs[0])
-		emitLoadValue(e, frame, c.Right, scratchRegs[1])
+		if isComparisonOp(c.Op) {
+			emitLoadValue(e, frame, c.Left, scratchRegs[0])
+			emitLoadValue(e, frame, c.Right, scratchRegs[1])
+			emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
+			e.emitJcc(negateConditionOpcode(c.Op), falseTarget)
+			return
+		}
+		emitLoadValue(e, frame, cond, scratchRegs[0])
+		emitMovImmToReg(e, scratchRegs[1], 0)
 		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
-		e.emitJcc(negateConditionOpcode(c.Op), falseTarget)
+		e.emitJcc(0x84, falseTarget)
 	default:
 		emitLoadValue(e, frame, cond, scratchRegs[0])
 		emitMovImmToReg(e, scratchRegs[1], 0)
@@ -609,22 +880,297 @@ func emitConditionJump(e *Emitter, cond ir.Value, falseTarget string, frame Fram
 	}
 }
 
-func emitFieldLoad(e *Emitter, op *ir.FieldLoad, frame Frame) {
-	baseSlot, ok := frame.Slots[op.Object]
+func emitStringLiteral(e *Emitter, op *ir.StringLiteral, frame Frame) {
+	slot, ok := frame.Slots[op]
 	if !ok {
-		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing object slot for field load"})
 		return
 	}
-	emitLoadSlotToReg(e, asm.MustLookup("rdi"), baseSlot, 64)
-	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: scratchRegs[0]},
-		asm.MemOperand{Base: asm.MustLookup("rdi"), Disp: int64(op.Offset), Width: valueWidthBitsFromType(op.Type.Name)},
-	}})
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing string literal object slot"})
+		return
+	}
+	emitMovDataAddressToReg(e, scratchRegs[0], op.DataSymbol)
+	emitStoreSlotFromReg(e, scratchRegs[0], objectSlot, 64)
+	emitMovImmToReg(e, scratchRegs[0], int64(len(op.Value)))
+	emitStoreSlotFromReg(e, scratchRegs[0], objectSlot+8, 64)
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing constructor object slot"})
+		return
+	}
+	size := e.ctx.storageSize(op.Type.Name)
+	emitZeroSlotRange(e, objectSlot, size)
+	info := e.ctx.types[op.Type.Name]
+	for _, field := range op.Fields {
+		fieldInfo, ok := info.Fields[field.Name]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown constructor field: " + field.Name})
+			continue
+		}
+		emitCopyValueToStackRange(e, frame, field.Value, objectSlot+fieldInfo.Offset, fieldInfo.Size)
+	}
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitCopy(e *Emitter, op *ir.Copy, frame Frame) {
+	if op.Target == nil || op.Source == nil {
+		return
+	}
+	slot, ok := frame.Slots[op.Target]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing copy target slot"})
+		return
+	}
+	emitCopyValueToStackRange(e, frame, op.Source, slot, e.ctx.representationSize(op.Type.Name))
+}
+
+func emitFieldLoad(e *Emitter, op *ir.FieldLoad, frame Frame) {
 	outSlot, ok := frame.Slots[op]
 	if !ok {
 		return
 	}
-	emitStoreSlotFromReg(e, scratchRegs[0], outSlot, valueWidthBitsFromType(op.Type.Name))
+	base, disp, ok := emitObjectAddress(e, frame, op.Object, op.Offset)
+	if !ok {
+		return
+	}
+	size := e.ctx.representationSize(op.Type.Name)
+	emitCopyMemoryToStackRange(e, base, disp, outSlot, size)
+}
+
+func emitFieldStore(e *Emitter, op *ir.FieldStore, frame Frame) {
+	base, disp, ok := emitObjectAddress(e, frame, op.Object, op.Offset)
+	if !ok {
+		return
+	}
+	size := e.ctx.representationSize(op.Type.Name)
+	emitCopyValueToMemoryRange(e, frame, op.Value, base, disp, size)
+}
+
+func emitZeroSlotRange(e *Emitter, slot int, size int) {
+	emitMovImmToReg(e, scratchRegs[0], 0)
+	for offset := 0; offset < size; {
+		width := copyWidth(size - offset)
+		emitStoreSlotFromReg(e, scratchRegs[0], slot+offset, width)
+		offset += width / 8
+	}
+}
+
+func emitCopyValueToStackRange(e *Emitter, frame Frame, value ir.Value, dstSlot int, size int) {
+	if e.ctx.isHandleType(valueTypeName(value)) && size != 8 {
+		base, disp, ok := emitValueAddress(e, frame, value)
+		if !ok {
+			return
+		}
+		emitCopyMemoryToStackRange(e, base, disp, dstSlot, size)
+		return
+	}
+	emitLoadValue(e, frame, value, scratchRegs[0])
+	emitStoreSlotFromReg(e, scratchRegs[0], dstSlot, valueWidthBits(e.ctx, value))
+}
+
+func emitCopyValueToMemoryRange(e *Emitter, frame Frame, value ir.Value, dstBase asm.Reg, dstDisp int64, size int) {
+	if e.ctx.isHandleType(valueTypeName(value)) && size != 8 {
+		srcBase, srcDisp, ok := emitValueAddress(e, frame, value)
+		if !ok {
+			return
+		}
+		emitCopyMemoryToMemoryRange(e, srcBase, srcDisp, dstBase, dstDisp, size)
+		return
+	}
+	emitLoadValue(e, frame, value, scratchRegs[0])
+	emitStoreMemFromReg(e, dstBase, dstDisp, scratchRegs[0], valueWidthBits(e.ctx, value))
+}
+
+func emitCopyValueToAddress(e *Emitter, frame Frame, value ir.Value, dstBase asm.Reg) {
+	emitCopyValueToAddressAsType(e, frame, value, dstBase, valueTypeName(value))
+}
+
+func emitCopyValueToAddressAsType(e *Emitter, frame Frame, value ir.Value, dstBase asm.Reg, typeName string) {
+	if e.ctx.isHandleType(typeName) {
+		srcBase, srcDisp, ok := emitValueAddress(e, frame, value)
+		if !ok {
+			return
+		}
+		emitDeepCopyObjectToAddress(e, typeName, srcBase, srcDisp, dstBase, 0)
+		return
+	}
+	emitCopyValueToMemoryRange(e, frame, value, dstBase, 0, e.ctx.representationSize(typeName))
+}
+
+func emitDeepCopyObjectToAddress(e *Emitter, typeName string, srcBase asm.Reg, srcDisp int64, dstBase asm.Reg, dstDisp int64) {
+	emitCopyMemoryToMemoryRange(e, srcBase, srcDisp, dstBase, dstDisp, e.ctx.objectSize(typeName))
+	info, ok := e.ctx.types[typeName]
+	if !ok {
+		return
+	}
+	for _, fieldName := range info.FieldOrder {
+		field := info.Fields[fieldName]
+		if field.Type.Kind != ir.TypeKindData || field.StorageOffset < 0 {
+			continue
+		}
+		emitStoreNestedDestinationHandle(e, dstBase, dstDisp+int64(field.Offset), dstDisp+int64(field.StorageOffset))
+		emitPushReg(e, srcBase)
+		emitPushReg(e, dstBase)
+		emitLoadMemToReg(e, asm.MustLookup("r11"), srcBase, srcDisp+int64(field.Offset), 64)
+		emitRegRegMove(e, asm.MustLookup("r10"), dstBase)
+		if childDisp := dstDisp + int64(field.StorageOffset); childDisp != 0 {
+			e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+				asm.RegOperand{Reg: asm.MustLookup("r10")},
+				asm.ImmOperand{Value: childDisp},
+			}})
+		}
+		emitDeepCopyObjectToAddress(e, field.Type.Name, asm.MustLookup("r11"), 0, asm.MustLookup("r10"), 0)
+		emitPopReg(e, dstBase)
+		emitPopReg(e, srcBase)
+	}
+}
+
+func emitStoreNestedDestinationHandle(e *Emitter, dstBase asm.Reg, fieldDisp int64, storageDisp int64) {
+	emitRegRegMove(e, scratchRegs[0], dstBase)
+	if storageDisp != 0 {
+		e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+			asm.RegOperand{Reg: scratchRegs[0]},
+			asm.ImmOperand{Value: storageDisp},
+		}})
+	}
+	emitStoreMemFromReg(e, dstBase, fieldDisp, scratchRegs[0], 64)
+}
+
+func emitCopyMemoryToStackRange(e *Emitter, srcBase asm.Reg, srcDisp int64, dstSlot int, size int) {
+	for offset := 0; offset < size; {
+		width := copyWidth(size - offset)
+		emitLoadMemToReg(e, scratchRegs[0], srcBase, srcDisp+int64(offset), width)
+		emitStoreSlotFromReg(e, scratchRegs[0], dstSlot+offset, width)
+		offset += width / 8
+	}
+}
+
+func emitCopyMemoryToMemoryRange(e *Emitter, srcBase asm.Reg, srcDisp int64, dstBase asm.Reg, dstDisp int64, size int) {
+	for offset := 0; offset < size; {
+		width := copyWidth(size - offset)
+		emitLoadMemToReg(e, scratchRegs[0], srcBase, srcDisp+int64(offset), width)
+		emitStoreMemFromReg(e, dstBase, dstDisp+int64(offset), scratchRegs[0], width)
+		offset += width / 8
+	}
+}
+
+func emitAddressOfValue(e *Emitter, frame Frame, value ir.Value, dst asm.Reg) {
+	base, disp, ok := emitValueAddress(e, frame, value)
+	if !ok {
+		return
+	}
+	if base.Name == "rbp" {
+		emitSlotFromBase(e, dst, asm.MustLookup("rbp"), int(disp))
+		return
+	}
+	emitRegRegMove(e, dst, base)
+	if disp != 0 {
+		e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+			asm.RegOperand{Reg: dst},
+			asm.ImmOperand{Value: disp},
+		}})
+	}
+}
+
+func emitValueAddress(e *Emitter, frame Frame, value ir.Value) (asm.Reg, int64, bool) {
+	slot, ok := frame.Slots[value]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing value slot"})
+		return asm.Reg{}, 0, false
+	}
+	if e.ctx.isHandleType(valueTypeName(value)) {
+		emitLoadSlotToReg(e, asm.MustLookup("r11"), slot, 64)
+		return asm.MustLookup("r11"), 0, true
+	}
+	return asm.MustLookup("rbp"), int64(slot), true
+}
+
+func emitObjectAddress(e *Emitter, frame Frame, object ir.Value, offset int) (asm.Reg, int64, bool) {
+	base, disp, ok := emitValueAddress(e, frame, object)
+	if !ok {
+		return asm.Reg{}, 0, false
+	}
+	return base, disp + int64(offset), true
+}
+
+func emitMovDataAddressToReg(e *Emitter, reg asm.Reg, symbol string) {
+	if reg.Name != "rax" {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "data address loads require rax"})
+		return
+	}
+	e.emit(0x48, 0xB8)
+	e.DataReloc = append(e.DataReloc, dataReloc{Offset: uint64(len(e.Code)), Symbol: symbol})
+	e.emit(0, 0, 0, 0, 0, 0, 0, 0)
+}
+
+func emitLoadMemToReg(e *Emitter, reg asm.Reg, base asm.Reg, disp int64, width int) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: reg},
+		asm.MemOperand{Base: base, Disp: disp, Width: width},
+	}})
+}
+
+func emitStoreMemFromReg(e *Emitter, base asm.Reg, disp int64, reg asm.Reg, width int) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: base, Disp: disp, Width: width},
+		asm.RegOperand{Reg: reg},
+	}})
+}
+
+func copyWidth(remainingBytes int) int {
+	switch {
+	case remainingBytes >= 8:
+		return 64
+	case remainingBytes >= 4:
+		return 32
+	case remainingBytes >= 2:
+		return 16
+	default:
+		return 8
+	}
+}
+
+func valueTypeName(value ir.Value) string {
+	switch v := value.(type) {
+	case *ir.Param:
+		return v.Type.Name
+	case *ir.Local:
+		return v.Type.Name
+	case *ir.ConstInt:
+		return v.Type.Name
+	case *ir.Binary:
+		return v.Type.Name
+	case *ir.Call:
+		return v.Type.Name
+	case *ir.FieldLoad:
+		return v.Type.Name
+	case *ir.Construct:
+		return v.Type.Name
+	case *ir.StringLiteral:
+		return v.Type.Name
+	default:
+		return ""
+	}
+}
+
+func isComparisonOp(op string) bool {
+	switch op {
+	case "eq", "ne", "lt", "le", "gt", "ge":
+		return true
+	default:
+		return false
+	}
 }
 
 func emitLoadSlotToReg(e *Emitter, reg asm.Reg, slot int, width int) {
@@ -644,6 +1190,18 @@ func emitLoadSlotOffsetToReg(e *Emitter, reg asm.Reg, slot int, offset int, widt
 func emitStoreSlotFromReg(e *Emitter, reg asm.Reg, slot int, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
+		asm.RegOperand{Reg: reg},
+	}})
+}
+
+func emitPushReg(e *Emitter, reg asm.Reg) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "push", Operands: []asm.Operand{
+		asm.RegOperand{Reg: reg},
+	}})
+}
+
+func emitPopReg(e *Emitter, reg asm.Reg) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "pop", Operands: []asm.Operand{
 		asm.RegOperand{Reg: reg},
 	}})
 }
@@ -669,12 +1227,35 @@ func emitCmpRegReg(e *Emitter, left asm.Reg, right asm.Reg) {
 func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {
 	rex := byte(0x48)
 	if right.High {
-		rex |= 0x01
-	}
-	if left.High {
 		rex |= 0x04
 	}
+	if left.High {
+		rex |= 0x01
+	}
 	e.emit(rex, opcode, encodeModRM(3, right.Low3, left.Low3))
+}
+
+func emitSetccAl(e *Emitter, opcode byte) {
+	e.emit(0x0F, opcode, 0xC0)
+}
+
+func setccOpcode(op string) byte {
+	switch op {
+	case "eq":
+		return 0x94
+	case "ne":
+		return 0x95
+	case "lt":
+		return 0x9C
+	case "le":
+		return 0x9E
+	case "gt":
+		return 0x9F
+	case "ge":
+		return 0x9D
+	default:
+		return 0x94
+	}
 }
 
 func negateConditionOpcode(op string) byte {

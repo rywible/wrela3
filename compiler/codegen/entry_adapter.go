@@ -28,8 +28,8 @@ var entryRecordFields = map[string][]entryRecordField{
 	"UefiMemoryMap": {
 		{Name: "descriptors", Type: "DelegatedBytes"},
 		{Name: "descriptor_size", Type: "U64"},
-		{Name: "key", Type: "U64"},
 		{Name: "descriptor_version", Type: "U32"},
+		{Name: "key", Type: "U64"},
 	},
 	"DelegatedMemory": {
 		{Name: "arena_base", Type: "VirtualAddress"},
@@ -45,16 +45,19 @@ var entryRecordFields = map[string][]entryRecordField{
 }
 
 type entryFrameLayout struct {
-	FrameSize                     int
-	UefiHandleOffset              int
-	UefiBootServicesOffset        int
-	UefiBootServicesCallsOffset   int
-	DelegatedMemoryOffset         int
-	DelegatedHardwareOffset       int
-	DelegatedMemoryMapOffset      int
-	DelegatedHardwareImageOffset  int
-	DelegatedHardwareBootOffset   int
-	DelegatedHardwareMemoryOffset int
+	FrameSize                      int
+	UefiHandleOffset               int
+	UefiBootServicesOffset         int
+	UefiBootServicesCallsOffset    int
+	DelegatedBytesOffset           int
+	UefiMemoryMapOffset            int
+	DelegatedMemoryOffset          int
+	DelegatedHardwareOffset        int
+	UefiMemoryMapDescriptorsOffset int
+	DelegatedMemoryMapOffset       int
+	DelegatedHardwareImageOffset   int
+	DelegatedHardwareBootOffset    int
+	DelegatedHardwareMemoryOffset  int
 }
 
 func buildEntryAdapterLayout() entryFrameLayout {
@@ -63,7 +66,15 @@ func buildEntryAdapterLayout() entryFrameLayout {
 		records[name] = buildEntryRecordLayout(name, fields, records)
 	}
 
-	ordered := []string{"UefiHandle", "UefiBootServices", "UefiBootServicesCalls", "DelegatedMemory", "DelegatedHardware"}
+	ordered := []string{
+		"UefiHandle",
+		"UefiBootServices",
+		"UefiBootServicesCalls",
+		"DelegatedBytes",
+		"UefiMemoryMap",
+		"DelegatedMemory",
+		"DelegatedHardware",
+	}
 	offsets := map[string]int{}
 	cursor := 0
 	for _, name := range ordered {
@@ -76,18 +87,22 @@ func buildEntryAdapterLayout() entryFrameLayout {
 	frameSize := layout.AlignUp(cursor, 16)
 	hw := records["DelegatedHardware"]
 	mem := records["DelegatedMemory"]
+	memoryMap := records["UefiMemoryMap"]
 
 	return entryFrameLayout{
-		FrameSize:                     frameSize,
-		UefiHandleOffset:              offsets["UefiHandle"],
-		UefiBootServicesOffset:        offsets["UefiBootServices"],
-		UefiBootServicesCallsOffset:   offsets["UefiBootServicesCalls"],
-		DelegatedMemoryOffset:         offsets["DelegatedMemory"],
-		DelegatedHardwareOffset:       offsets["DelegatedHardware"],
-		DelegatedHardwareImageOffset:  offsets["DelegatedHardware"] + hw.Fields["image_handle"].Offset,
-		DelegatedHardwareBootOffset:   offsets["DelegatedHardware"] + hw.Fields["boot_services"].Offset,
-		DelegatedHardwareMemoryOffset: offsets["DelegatedHardware"] + hw.Fields["delegated_memory"].Offset,
-		DelegatedMemoryMapOffset:      offsets["DelegatedMemory"] + mem.Fields["last_memory_map"].Offset,
+		FrameSize:                      frameSize,
+		UefiHandleOffset:               offsets["UefiHandle"],
+		UefiBootServicesOffset:         offsets["UefiBootServices"],
+		UefiBootServicesCallsOffset:    offsets["UefiBootServicesCalls"],
+		DelegatedBytesOffset:           offsets["DelegatedBytes"],
+		UefiMemoryMapOffset:            offsets["UefiMemoryMap"],
+		DelegatedMemoryOffset:          offsets["DelegatedMemory"],
+		DelegatedHardwareOffset:        offsets["DelegatedHardware"],
+		UefiMemoryMapDescriptorsOffset: offsets["UefiMemoryMap"] + memoryMap.Fields["descriptors"].Offset,
+		DelegatedHardwareImageOffset:   offsets["DelegatedHardware"] + hw.Fields["image_handle"].Offset,
+		DelegatedHardwareBootOffset:    offsets["DelegatedHardware"] + hw.Fields["boot_services"].Offset,
+		DelegatedHardwareMemoryOffset:  offsets["DelegatedHardware"] + hw.Fields["delegated_memory"].Offset,
+		DelegatedMemoryMapOffset:       offsets["DelegatedMemory"] + mem.Fields["last_memory_map"].Offset,
 	}
 }
 
@@ -119,12 +134,8 @@ func buildEntryRecordLayout(name string, fields []entryRecordField, cache map[st
 }
 
 func entryTypeSizeAlign(name string, cache map[string]layout.Record) (int, int) {
-	if record, ok := cache[name]; ok && (record.Size != 0 || record.Align != 0 || len(record.Fields) != 0) {
-		return record.Size, record.Align
-	}
-	if fields, ok := entryRecordFields[name]; ok {
-		record := buildEntryRecordLayout(name, fields, cache)
-		return record.Size, record.Align
+	if _, ok := entryRecordFields[name]; ok {
+		return 8, 8
 	}
 	if s, a, err := layout.SizeAlign(name); err == nil {
 		return s, a
@@ -145,21 +156,16 @@ func emitStoreImmediateSlot(e *Emitter, value int64, slot int) {
 	emitStoreSlotFromReg(e, asm.MustLookup("rax"), slot, 64)
 }
 
-func emitCopyStackBytes(e *Emitter, dstSlot, srcSlot, size int) {
-	for i := 0; i < size; i += 8 {
-		e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-			asm.RegOperand{Reg: asm.MustLookup("rax")},
-			asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(srcSlot + i), Width: 64},
-		}})
-		emitStoreSlotFromReg(e, asm.MustLookup("rax"), dstSlot+i, 64)
-	}
+func emitStoreSlotAddress(e *Emitter, dstSlot, srcSlot int) {
+	emitSlotFromBase(e, asm.MustLookup("rax"), asm.MustLookup("rbp"), srcSlot)
+	emitStoreSlotFromReg(e, asm.MustLookup("rax"), dstSlot, 64)
 }
 
 func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter) {
 	adapterLayout := buildEntryAdapterLayout()
 	records := map[string]layout.Record{}
-	uefiHandleRecord := buildEntryRecordLayout("UefiHandle", entryRecordFields["UefiHandle"], records)
-	bootCallsRecord := buildEntryRecordLayout("UefiBootServicesCalls", entryRecordFields["UefiBootServicesCalls"], records)
+	delegatedBytesRecord := buildEntryRecordLayout("DelegatedBytes", entryRecordFields["DelegatedBytes"], records)
+	uefiMemoryMapRecord := buildEntryRecordLayout("UefiMemoryMap", entryRecordFields["UefiMemoryMap"], records)
 	delegatedMemoryRecord := buildEntryRecordLayout("DelegatedMemory", entryRecordFields["DelegatedMemory"], records)
 
 	e.emit(0x55)
@@ -183,13 +189,6 @@ func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter) {
 	}})
 	emitStoreSlotFromReg(e, asm.MustLookup("rax"), adapterLayout.UefiBootServicesOffset, 64)
 
-	// UefiBootServicesCalls.
-	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("rax")},
-		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(adapterLayout.UefiBootServicesOffset), Width: 64},
-	}})
-	emitStoreSlotFromReg(e, asm.MustLookup("rax"), adapterLayout.UefiBootServicesCallsOffset, 64)
-
 	for i := 0; i < delegatedMemoryRecord.Size; i += 8 {
 		emitStoreImmediateSlot(e, 0, adapterLayout.DelegatedMemoryOffset+i)
 	}
@@ -197,9 +196,19 @@ func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter) {
 	emitStoreImmediateSlot(e, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
 	emitStoreImmediateSlot(e, 0, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["next_offset"].Offset)
 
-	emitCopyStackBytes(e, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset, uefiHandleRecord.Size)
-	emitCopyStackBytes(e, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset, bootCallsRecord.Size)
-	emitCopyStackBytes(e, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset, delegatedMemoryRecord.Size)
+	for i := 0; i < delegatedBytesRecord.Size; i += 8 {
+		emitStoreImmediateSlot(e, 0, adapterLayout.DelegatedBytesOffset+i)
+	}
+	for i := 0; i < uefiMemoryMapRecord.Size; i += 8 {
+		emitStoreImmediateSlot(e, 0, adapterLayout.UefiMemoryMapOffset+i)
+	}
+
+	emitStoreSlotAddress(e, adapterLayout.UefiBootServicesCallsOffset, adapterLayout.UefiBootServicesOffset)
+	emitStoreSlotAddress(e, adapterLayout.UefiMemoryMapDescriptorsOffset, adapterLayout.DelegatedBytesOffset)
+	emitStoreSlotAddress(e, adapterLayout.DelegatedMemoryMapOffset, adapterLayout.UefiMemoryMapOffset)
+	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
+	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
+	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
 
 	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), adapterLayout.DelegatedHardwareOffset)
 	emitSymbolCall(e, entry.DelegatedPhaseSymbol)

@@ -43,8 +43,8 @@ data DelegatedMutableBytes {
 data UefiMemoryMap {
     descriptors: DelegatedBytes
     descriptor_size: U64
-    key: U64
     descriptor_version: U32
+    key: U64
 }
 
 data UefiMemoryMapResult {
@@ -70,7 +70,16 @@ class DelegatedMemory {
     }
 
     asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
+        push rbx
+        push r12
+        push r13
+        push r14
+        push r15
+
         mov r10, self.next_offset
+        add r10, 4095
+        mov rax, 0xfffffffffffff000
+        and r10, rax
         mov r11, self.arena_base
         add r11, r10
         mov r12, r11
@@ -82,6 +91,7 @@ class DelegatedMemory {
         add r14, 4096
         add r14, 4096
         mov self.next_offset, r14
+        mov rbx, r11
 
         mov rcx, 1536
         mov r14, 0
@@ -98,24 +108,90 @@ class DelegatedMemory {
         add r14, 3
         mov [r11 - 8192], r14
 
-        mov r11, r13
-        mov rcx, 512
-        mov r14, 0x83
-        mov rax, 0x200000
-    pd_loop:
-        mov [r11], r14
-        add r11, 8
-        add r14, rax
-        sub rcx, 1
-        jne pd_loop
+        // memory_map is the UefiMemoryMap handle in rsi; descriptor_size advances descriptors.
+        mov r8, [rsi]
+        mov r9, [rsi]
+        mov r8, [r8]
+        mov r9, [r9 + 8]
+        add r9, r8
+        mov r10, [rsi + 8]
 
-        mov rax, self.arena_base
-        add rax, self.next_offset
-        sub rax, 12288
+    descriptor_loop:
+        cmp r8, r9
+        jge descriptors_done
+        mov rax, [r8 + 8]
+        mov rcx, [r8 + 24]
+        cmp rcx, 0
+        jle advance_descriptor
+
+        mov rdx, rax
+        shr rdx, 12
+        mov r15, rdx
+    reduce_pd_index:
+        cmp r15, 512
+        jl pd_index_ready
+        sub r15, 512
+        jmp reduce_pd_index
+
+    pd_index_ready:
+        add rcx, r15
+        mov r14, rax
+        shr r14, 21
+        cmp r14, 512
+        jge advance_descriptor
+
+        mov r11, r13
+        mov rdx, r14
+    pd_slot_loop:
+        cmp rdx, 0
+        jle pd_slot_ready
+        add r11, 8
+        sub rdx, 1
+        jmp pd_slot_loop
+
+    pd_slot_ready:
+        mov r12, 0
+        mov rdx, r14
+    pde_base_loop:
+        cmp rdx, 0
+        jle map_descriptor_pages
+        add r12, 0x200000
+        sub rdx, 1
+        jmp pde_base_loop
+
+    map_descriptor_pages:
+        cmp rcx, 0
+        jle advance_descriptor
+        cmp r14, 512
+        jge advance_descriptor
+        mov rdx, r12
+        add rdx, 0x83
+        mov [r11], rdx
+        add r11, 8
+        add r12, 0x200000
+        add r14, 1
+        sub rcx, 512
+        jmp map_descriptor_pages
+
+    advance_descriptor:
+        add r8, r10
+        jmp descriptor_loop
+
+    descriptors_done:
+
+        mov rax, rbx
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop rbx
         ret
     }
 
     asm fn build_owned_gdt(self) -> DelegatedBytes {
+        push r12
+        push r14
+
         mov r14, self.next_offset
         mov r11, self.arena_base
         add r11, r14
@@ -131,17 +207,24 @@ class DelegatedMemory {
         add r12, 16
         mov rax, 0
         mov [r12], rax
-        mov rax, 0x00209A000000FFFF
+        mov rax, 0x00AF9A000000FFFF
         mov [r12 + 8], rax
-        mov rax, 0x000092000000FFFF
+        mov rax, 0x00CF92000000FFFF
         mov [r12 + 16], rax
 
         mov [r10], r11
         mov [r10 + 8], 40
+        mov rax, r10
+        pop r14
+        pop r12
         ret
     }
 
     asm fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
+        push r12
+        push r13
+        push r14
+
         mov r14, self.next_offset
         mov r11, self.arena_base
         add r11, r14
@@ -181,6 +264,10 @@ class DelegatedMemory {
 
         mov [r10 + 0], r11
         mov [r10 + 8], 4112
+        mov rax, r10
+        pop r14
+        pop r13
+        pop r12
         ret
     }
 

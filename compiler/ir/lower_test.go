@@ -36,8 +36,18 @@ func TestLowerSynthesizesEntryAdapterFromImage(t *testing.T) {
 }
 
 func TestLowerUsesSourceVisiblePhaseAndExecutorPath(t *testing.T) {
-	ownedRoot := &sem.Type{Name: "OwnedHardware"}
-	image := &sem.Type{Module: "examples.hello.main", Name: "HelloSerial", Kind: sem.KindImage}
+	executorType := &sem.Type{
+		Module: "examples.hello.program",
+		Name:   "HelloWorld",
+		Kind:   sem.KindExecutor,
+		Methods: []sem.Method{{
+			Name:   "run",
+			Return: &sem.Type{Name: "never", Kind: sem.KindPrimitive},
+		}, {
+			Name:   "source_marker",
+			Return: &sem.Type{Name: "void", Kind: sem.KindPrimitive},
+		}},
+	}
 	checked := &sem.CheckedProgram{
 		Modules: []*ast.Module{{
 			Name: "examples.hello.program",
@@ -46,58 +56,32 @@ func TestLowerUsesSourceVisiblePhaseAndExecutorPath(t *testing.T) {
 				Methods: []ast.MethodDecl{{
 					Name:    "run",
 					IsStart: true,
-					Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.StringLiteral{
-						Value: "hello from wrela\n",
+					Return:  "never",
+					Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.CallExpr{
+						Receiver: &ast.NameExpr{Name: "self"},
+						Method:   "source_marker",
 					}}},
 				}},
 			}},
 		}},
 		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
-			"examples.hello.main": {"HelloSerial": image},
+			"examples.hello.program": {"HelloWorld": executorType},
 		}},
-		OwnedRoot: ownedRoot,
 	}
 	program, diags := Lower(checked)
 	if len(diags) != 0 {
 		t.Fatalf("diags = %#v", diags)
 	}
 
-	delegated := findFunction(program, program.Entry.DelegatedPhaseSymbol)
-	if delegated == nil {
-		t.Fatalf("delegated phase %q was not lowered as a function", program.Entry.DelegatedPhaseSymbol)
-	}
-	if !functionCalls(*delegated, "_wrela_method_platform_uefi_transition_DelegatedHardware_exit_to_owned_hardware") {
-		t.Fatalf("delegated phase does not call source-visible ownership transfer: %#v", delegated.Blocks)
-	}
-	if method := findAsmMethod(program, program.Entry.DelegatedPhaseSymbol); method != nil && strings.Contains(method.Body, "mov rax, 0") {
-		t.Fatalf("delegated phase still has placeholder asm body: %q", method.Body)
-	}
-	transfer := findAsmMethod(program, "_wrela_method_platform_uefi_transition_DelegatedHardware_exit_to_owned_hardware")
-	if transfer == nil {
-		t.Fatal("missing generated ownership transfer method")
-	}
-	for _, want := range []string{"fill_identity_pd:", "idt_gate_loop:", "shr rax, 16", "shr rax, 32", "fatal_halt:", "mov cr3, rax"} {
-		if !strings.Contains(transfer.Body, want) {
-			t.Fatalf("ownership transfer body missing %q in:\n%s", want, transfer.Body)
-		}
-	}
-
-	owned := findFunction(program, program.Entry.OwnedPhaseSymbol)
-	if owned == nil {
-		t.Fatalf("owned phase %q was not lowered as a function", program.Entry.OwnedPhaseSymbol)
-	}
-	if !functionCalls(*owned, "_wrela_method_examples_hello_program_HelloWorld_run") {
-		t.Fatalf("owned phase does not call executor start path: %#v", owned.Blocks)
-	}
-
-	executor := findAsmMethod(program, "_wrela_method_examples_hello_program_HelloWorld_run")
+	executor := findFunction(program, "_wrela_method_examples_hello_program_HelloWorld_run")
 	if executor == nil {
-		t.Fatal("missing lowered executor start method")
+		t.Fatal("missing lowered executor start function")
 	}
-	for _, want := range []string{"mov al, 104", "mov al, 10", "out dx, al", "hlt"} {
-		if !strings.Contains(executor.Body, want) {
-			t.Fatalf("executor body missing %q in:\n%s", want, executor.Body)
-		}
+	if !functionCalls(*executor, "_wrela_method_examples_hello_program_HelloWorld_source_marker") {
+		t.Fatalf("executor did not lower source call: %#v", executor.Blocks)
+	}
+	if method := findAsmMethod(program, "_wrela_method_examples_hello_program_HelloWorld_run"); method != nil && strings.Contains(method.Body, "mov dx, 0x03f8") {
+		t.Fatalf("executor start still lowered to fixed serial asm: %q", method.Body)
 	}
 }
 

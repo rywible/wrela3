@@ -2,11 +2,13 @@ package codegen
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/ir"
 	"github.com/ryanwible/wrela3/compiler/layout"
@@ -29,17 +31,31 @@ func TestUEFIAmd64BootServiceAsmMethodCodegen(t *testing.T) {
 	if !bytes.Contains(unit.Bytes, []byte{0xFF, 0xD0}) {
 		t.Fatalf("missing call rax in get_memory_map: %x", unit.Bytes)
 	}
+	instructions, ds, _ := lowerAndEncodeAsmMethod(getMap)
+	if len(ds) != 0 {
+		t.Fatalf("lowerAndEncodeAsmMethod get_memory_map diagnostics: %#v", ds)
+	}
+	if !hasInstructionSequence(instructions,
+		"mov r10 [rax+16]",
+		"mov r11 [rax+32]",
+		"mov [r11+8] r10",
+	) {
+		t.Fatalf("get_memory_map must copy returned MemoryMapSize into descriptors.length: %#v", instructionSignatures(instructions))
+	}
 
 	exitBS := asmMethodFromSem(t, checked, "platform.uefi.boot_services", "UefiBootServicesCalls", "exit_boot_services")
 	exitUnit, ds := compileAsmMethodUnit(exitBS)
 	if len(ds) != 0 {
 		t.Fatalf("compileAsmMethodUnit exit_boot_services diagnostics: %#v", ds)
 	}
-	if !bytes.Contains(exitUnit.Bytes, []byte{0x48, 0x83, 0xEC, 0x20}) {
-		t.Fatalf("missing 48 83 EC 20 shadow-frame setup in exit_boot_services: %x", exitUnit.Bytes)
+	if !bytes.Contains(exitUnit.Bytes, []byte{0x48, 0x83, 0xEC, 0x30}) {
+		t.Fatalf("missing 48 83 EC 30 shadow/spill-frame setup in exit_boot_services: %x", exitUnit.Bytes)
 	}
 	if !bytes.Contains(exitUnit.Bytes, []byte{0xFF, 0xD0}) {
 		t.Fatalf("missing call rax in exit_boot_services: %x", exitUnit.Bytes)
+	}
+	if !bytes.Contains(exitUnit.Bytes, []byte{0x49, 0x89, 0x03}) {
+		t.Fatalf("exit_boot_services must store firmware status into hidden UefiStatus return slot: %x", exitUnit.Bytes)
 	}
 }
 
@@ -64,6 +80,35 @@ func TestUEFITransitionActivateAsmMethodCodegen(t *testing.T) {
 	}
 	if !bytes.Contains(unit.Bytes, []byte{0x48, 0xcb}) {
 		t.Fatalf("missing retfq in activate_owned_hardware")
+	}
+	instructions, ds, _ := lowerAndEncodeAsmMethod(activate)
+	if len(ds) != 0 {
+		t.Fatalf("lowerAndEncodeAsmMethod activate_owned_hardware diagnostics: %#v", ds)
+	}
+	assertInstructionOrder(t, instructions,
+		"mov rax [rsp]",
+		"mov rsp rsi",
+		"push rax",
+		"push rax",
+		"push rax",
+		"ret",
+	)
+}
+
+func TestUEFISerialWrite8PreservesValueBeforePortRegisterSetup(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	write8 := asmMethodFromSem(t, checked, "machine.x86_64.serial", "SerialWriterRegisters", "write8")
+	unit, ds := compileAsmMethodUnit(write8)
+	if len(ds) != 0 {
+		t.Fatalf("compileAsmMethodUnit write8 diagnostics: %#v", ds)
+	}
+	valueMove := bytes.Index(unit.Bytes, []byte{0x8A, 0xC2})      // mov al, dl
+	portLoad := bytes.Index(unit.Bytes, []byte{0x66, 0x8B, 0x17}) // mov dx, [rdi]
+	if valueMove < 0 || portLoad < 0 {
+		t.Fatalf("write8 missing value move or port load: %x", unit.Bytes)
+	}
+	if valueMove > portLoad {
+		t.Fatalf("write8 must move value into al before dx is reused for the port: %x", unit.Bytes)
 	}
 }
 
@@ -91,6 +136,94 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 			t.Fatalf("compiled asm unit for %q is empty", method.Symbol)
 		}
 	}
+
+	identityInstructions, ds, _ := lowerAndEncodeAsmMethod(identity)
+	if len(ds) != 0 {
+		t.Fatalf("lowerAndEncodeAsmMethod build_identity_paging diagnostics: %#v", ds)
+	}
+	for _, want := range []string{
+		"descriptor_loop",
+		"map_descriptor_pages",
+		"advance_descriptor",
+	} {
+		if !hasAsmLabel(identityInstructions, want) {
+			t.Fatalf("build_identity_paging lowered asm missing label %q", want)
+		}
+	}
+	for _, want := range []asm.MemOperand{
+		{Base: asm.MustLookup("rsi"), Disp: 0},
+		{Base: asm.MustLookup("rsi"), Disp: 8},
+		{Base: asm.MustLookup("r8"), Disp: 8},
+		{Base: asm.MustLookup("r8"), Disp: 24},
+	} {
+		if !hasAsmMemoryLoad(identityInstructions, want) {
+			t.Fatalf("build_identity_paging lowered asm missing memory_map/descriptor load %#v", want)
+		}
+	}
+	assertInstructionOrder(t, identityInstructions,
+		"push rbx",
+		"push r12",
+		"push r13",
+		"push r14",
+		"push r15",
+		"add r10 imm",
+		"and r10 rax",
+		"pop r15",
+		"pop r14",
+		"pop r13",
+		"pop r12",
+		"pop rbx",
+		"ret",
+	)
+
+	gdtUnit, ds := compileAsmMethodUnit(gdt)
+	if len(ds) != 0 {
+		t.Fatalf("compileAsmMethodUnit build_owned_gdt diagnostics: %#v", ds)
+	}
+	for name, want := range map[string][]byte{
+		"code descriptor": {0x48, 0xB8, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xAF, 0x00},
+		"data descriptor": {0x48, 0xB8, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xCF, 0x00},
+	} {
+		if !bytes.Contains(gdtUnit.Bytes, want) {
+			t.Fatalf("build_owned_gdt missing %s immediate %x in %x", name, want, gdtUnit.Bytes)
+		}
+	}
+	gdtInstructions, ds, _ := lowerAndEncodeAsmMethod(gdt)
+	if len(ds) != 0 {
+		t.Fatalf("lowerAndEncodeAsmMethod build_owned_gdt diagnostics: %#v", ds)
+	}
+	assertInstructionOrder(t, gdtInstructions, "push r12", "push r14", "pop r14", "pop r12", "ret")
+
+	idtInstructions, ds, _ := lowerAndEncodeAsmMethod(idt)
+	if len(ds) != 0 {
+		t.Fatalf("lowerAndEncodeAsmMethod build_fatal_idt diagnostics: %#v", ds)
+	}
+	assertInstructionOrder(t, idtInstructions, "push r12", "push r13", "push r14", "pop r14", "pop r13", "pop r12", "ret")
+}
+
+func hasAsmLabel(instructions []asm.Instruction, label string) bool {
+	for _, in := range instructions {
+		if in.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAsmMemoryLoad(instructions []asm.Instruction, want asm.MemOperand) bool {
+	for _, in := range instructions {
+		if in.Mnemonic != "mov" || len(in.Operands) != 2 {
+			continue
+		}
+		mem, ok := in.Operands[1].(asm.MemOperand)
+		if !ok {
+			continue
+		}
+		if mem.Base.Name == want.Base.Name && mem.Disp == want.Disp && mem.Width == want.Width {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCheckedUEFIModules(t *testing.T) *sem.CheckedProgram {
@@ -183,6 +316,78 @@ func asmMethodSymbol(moduleName, typeName, methodName string) string {
 	return "_wrela_method_" + strings.ReplaceAll(moduleName, ".", "_") + "_" + typeName + "_" + methodName
 }
 
+func assertInstructionOrder(t *testing.T, instructions []asm.Instruction, want ...string) {
+	t.Helper()
+	next := 0
+	for _, instruction := range instructions {
+		if next == len(want) {
+			return
+		}
+		if instructionSignature(instruction) == want[next] {
+			next++
+		}
+	}
+	if next != len(want) {
+		t.Fatalf("missing instruction order item %q in %#v", want[next], instructionSignatures(instructions))
+	}
+}
+
+func hasInstructionSequence(instructions []asm.Instruction, want ...string) bool {
+	next := 0
+	for _, instruction := range instructions {
+		if next == len(want) {
+			return true
+		}
+		if instructionSignature(instruction) == want[next] {
+			next++
+		}
+	}
+	return next == len(want)
+}
+
+func instructionSignatures(instructions []asm.Instruction) []string {
+	out := make([]string, 0, len(instructions))
+	for _, instruction := range instructions {
+		signature := instructionSignature(instruction)
+		if signature != "" {
+			out = append(out, signature)
+		}
+	}
+	return out
+}
+
+func instructionSignature(instruction asm.Instruction) string {
+	if instruction.Mnemonic == "" {
+		return ""
+	}
+	parts := []string{instruction.Mnemonic}
+	for _, operand := range instruction.Operands {
+		parts = append(parts, operandSignature(operand))
+	}
+	return strings.Join(parts, " ")
+}
+
+func operandSignature(operand asm.Operand) string {
+	switch op := operand.(type) {
+	case asm.RegOperand:
+		return op.Reg.Name
+	case asm.MemOperand:
+		if op.Disp == 0 {
+			return "[" + op.Base.Name + "]"
+		}
+		if op.Disp > 0 {
+			return fmt.Sprintf("[%s+%d]", op.Base.Name, op.Disp)
+		}
+		return fmt.Sprintf("[%s%d]", op.Base.Name, op.Disp)
+	case asm.ImmOperand:
+		return "imm"
+	case asm.LabelRef:
+		return op.Name
+	default:
+		return "operand"
+	}
+}
+
 func parseUEFIModulesForCodegen(t *testing.T) []*ast.Module {
 	t.Helper()
 	workdir, err := os.Getwd()
@@ -201,6 +406,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)
 	for i, path := range paths {

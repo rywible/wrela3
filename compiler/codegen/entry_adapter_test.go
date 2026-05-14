@@ -35,14 +35,16 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	entry := image.Sections[0].Data[int(image.Symbols["_wrela_efi_entry"]-0x1000):]
 	adapterLayout := buildEntryAdapterLayout()
 
-	if adapterLayout.FrameSize != 176 {
-		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 176)
+	if adapterLayout.FrameSize != 128 {
+		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 128)
 	}
 	if adapterLayout.UefiHandleOffset != -8 ||
 		adapterLayout.UefiBootServicesOffset != -16 ||
 		adapterLayout.UefiBootServicesCallsOffset != -24 ||
-		adapterLayout.DelegatedMemoryOffset != -88 ||
-		adapterLayout.DelegatedHardwareOffset != -168 {
+		adapterLayout.DelegatedBytesOffset != -40 ||
+		adapterLayout.UefiMemoryMapOffset != -72 ||
+		adapterLayout.DelegatedMemoryOffset != -104 ||
+		adapterLayout.DelegatedHardwareOffset != -128 {
 		t.Fatalf("unexpected base offsets: %#v", adapterLayout)
 	}
 
@@ -75,25 +77,37 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		asm.RegOperand{Reg: asm.MustLookup("rax")},
 	}})
 
-	assertContainsInstruction(t, entry, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("rax")},
-		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(adapterLayout.UefiBootServicesOffset), Width: 64},
-	}})
-	assertContainsInstruction(t, entry, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(adapterLayout.UefiBootServicesCallsOffset), Width: 64},
-		asm.RegOperand{Reg: asm.MustLookup("rax")},
-	}})
+	bootCallsRecord := buildEntryRecordLayout("UefiBootServicesCalls", entryRecordFields["UefiBootServicesCalls"], map[string]layout.Record{})
+	if bootCallsRecord.Size != 8 || bootCallsRecord.Fields["boot_services"].Size != 8 {
+		t.Fatalf("UefiBootServicesCalls layout = %#v, want handle field", bootCallsRecord)
+	}
 
 	delegatedMemoryRecord := buildEntryRecordLayout("DelegatedMemory", entryRecordFields["DelegatedMemory"], map[string]layout.Record{})
+	if delegatedMemoryRecord.Size != 32 || delegatedMemoryRecord.Fields["last_memory_map"].Offset != 24 || delegatedMemoryRecord.Fields["last_memory_map"].Size != 8 {
+		t.Fatalf("DelegatedMemory layout = %#v, want last_memory_map handle at +24", delegatedMemoryRecord)
+	}
 	assertStoresImmediateSlot(t, entry, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_base"].Offset)
 	assertStoresImmediateSlot(t, entry, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
 	assertStoresImmediateSlot(t, entry, 0, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["next_offset"].Offset)
 
-	uefiHandleRecord := buildEntryRecordLayout("UefiHandle", entryRecordFields["UefiHandle"], map[string]layout.Record{})
-	bootCallsRecord := buildEntryRecordLayout("UefiBootServicesCalls", entryRecordFields["UefiBootServicesCalls"], map[string]layout.Record{})
-	assertCopiesStackRange(t, entry, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset, uefiHandleRecord.Size)
-	assertCopiesStackRange(t, entry, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset, bootCallsRecord.Size)
-	assertCopiesStackRange(t, entry, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset, delegatedMemoryRecord.Size)
+	memoryMapRecord := buildEntryRecordLayout("UefiMemoryMap", entryRecordFields["UefiMemoryMap"], map[string]layout.Record{})
+	if memoryMapRecord.Size != 32 || memoryMapRecord.Fields["descriptors"].Size != 8 || memoryMapRecord.Fields["key"].Offset != 24 {
+		t.Fatalf("UefiMemoryMap layout = %#v, want descriptors handle and key at +24", memoryMapRecord)
+	}
+	hardwareRecord := buildEntryRecordLayout("DelegatedHardware", entryRecordFields["DelegatedHardware"], map[string]layout.Record{})
+	if hardwareRecord.Size != 24 ||
+		hardwareRecord.Fields["image_handle"].Offset != 0 ||
+		hardwareRecord.Fields["boot_services"].Offset != 8 ||
+		hardwareRecord.Fields["delegated_memory"].Offset != 16 {
+		t.Fatalf("DelegatedHardware layout = %#v, want three handle fields", hardwareRecord)
+	}
+
+	assertStoresSlotAddress(t, entry, adapterLayout.UefiBootServicesCallsOffset, adapterLayout.UefiBootServicesOffset)
+	assertStoresSlotAddress(t, entry, adapterLayout.UefiMemoryMapDescriptorsOffset, adapterLayout.DelegatedBytesOffset)
+	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedMemoryMapOffset, adapterLayout.UefiMemoryMapOffset)
+	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
+	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
+	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
 }
 
 func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
@@ -200,7 +214,7 @@ func TestCompileCallPassesRecordReturnSlotInR10(t *testing.T) {
 		}}),
 		mustEncode(t, asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
 			asm.RegOperand{Reg: asm.MustLookup("r10")},
-			asm.ImmOperand{Value: -8},
+			asm.ImmOperand{Value: -16},
 		}})...,
 	)
 	if callOffset < len(encodedR10) || !bytes.Equal(callerCode[callOffset-len(encodedR10):callOffset], encodedR10) {
@@ -251,16 +265,23 @@ func assertStoresImmediateSlot(t *testing.T, code []byte, value int64, slot int)
 	}
 }
 
-func assertCopiesStackRange(t *testing.T, code []byte, dstSlot, srcSlot, size int) {
+func assertStoresSlotAddress(t *testing.T, code []byte, dstSlot, srcSlot int) {
 	t.Helper()
-	for i := 0; i < size; i += 8 {
-		assertContainsInstruction(t, code, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+	sequence := append(
+		mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 			asm.RegOperand{Reg: asm.MustLookup("rax")},
-			asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(srcSlot + i), Width: 64},
-		}})
-		assertContainsInstruction(t, code, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-			asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(dstSlot + i), Width: 64},
+			asm.RegOperand{Reg: asm.MustLookup("rbp")},
+		}}),
+		mustEncode(t, asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
 			asm.RegOperand{Reg: asm.MustLookup("rax")},
-		}})
+			asm.ImmOperand{Value: int64(srcSlot)},
+		}})...,
+	)
+	sequence = append(sequence, mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(dstSlot), Width: 64},
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+	}})...)
+	if !bytes.Contains(code, sequence) {
+		t.Fatalf("missing address store of stack slot %d to stack slot %d", srcSlot, dstSlot)
 	}
 }

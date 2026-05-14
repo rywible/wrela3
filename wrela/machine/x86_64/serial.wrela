@@ -7,9 +7,9 @@ driver path SerialWriterRegisters {
     port_base: U16
 
     asm fn write8(self, offset: U16, value: U8) {
+        mov al, value
         mov dx, self.port_base
         add dx, offset
-        mov al, value
         out dx, al
         ret
     }

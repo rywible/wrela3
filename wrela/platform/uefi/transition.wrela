@@ -74,7 +74,11 @@ unique class DelegatedHardware {
         idt_base: VirtualAddress
     ) {
         cli
+        mov rax, [rsp]
         mov rsp, owned_stack_top
+        push rax
+        push rax
+        push rax
         mov cr3, cr3_value
         mov r11, gdt_base
         lgdt [r11]

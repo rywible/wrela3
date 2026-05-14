@@ -64,35 +64,167 @@ func TestBuildHelloImageContainsRuntimeSignals(t *testing.T) {
 	}
 
 	image := compileHelloImage(t)
-	transition := symbolBytes(t, image, "_wrela_method_platform_uefi_transition_DelegatedHardware_exit_to_owned_hardware")
+	getMap := symbolBytes(t, image, "_wrela_method_platform_uefi_boot_services_UefiBootServicesCalls_get_memory_map")
+	exitBootServices := symbolBytes(t, image, "_wrela_method_platform_uefi_boot_services_UefiBootServicesCalls_exit_boot_services")
+	activate := symbolBytes(t, image, "_wrela_method_platform_uefi_transition_DelegatedHardware_activate_owned_hardware")
 	for name, pattern := range map[string][]byte{
-		"GetMemoryMap table load":       {0x49, 0x8B, 0x43, 0x38},
-		"ExitBootServices table load":  {0x49, 0x8B, 0x83, 0xE8, 0x00, 0x00, 0x00},
-		"UEFI indirect call":           {0xFF, 0xD0},
-		"cli":                          {0xFA},
-		"mov cr3":                      {0x0F, 0x22, 0xD8},
-		"retfq":                        {0x48, 0xCB},
-		"mov ds, ax":                   {0x8E, 0xD8},
-		"mov es, ax":                   {0x8E, 0xC0},
-		"mov ss, ax":                   {0x8E, 0xD0},
-		"mov fs, ax":                   {0x8E, 0xE0},
-		"mov gs, ax":                   {0x8E, 0xE8},
+		"GetMemoryMap UEFI indirect call":     {0xFF, 0xD0},
+		"ExitBootServices UEFI indirect call": {0xFF, 0xD0},
 	} {
-		if !containsBytes(transition, pattern) {
-			t.Fatalf("transition symbol missing %s pattern %s", name, strings.ToUpper(hexBytes(pattern)))
+		haystack := getMap
+		if strings.HasPrefix(name, "ExitBootServices") {
+			haystack = exitBootServices
+		}
+		if !containsBytes(haystack, pattern) {
+			t.Fatalf("boot service bridge missing %s pattern %s", name, strings.ToUpper(hexBytes(pattern)))
+		}
+	}
+	for name, pattern := range map[string][]byte{
+		"cli":        {0xFA},
+		"mov cr3":    {0x0F, 0x22, 0xDA},
+		"retfq":      {0x48, 0xCB},
+		"mov ds, ax": {0x8E, 0xD8},
+		"mov es, ax": {0x8E, 0xC0},
+		"mov ss, ax": {0x8E, 0xD0},
+		"mov fs, ax": {0x8E, 0xE0},
+		"mov gs, ax": {0x8E, 0xE8},
+	} {
+		if !containsBytes(activate, pattern) {
+			t.Fatalf("activate_owned_hardware symbol missing %s pattern %s", name, strings.ToUpper(hexBytes(pattern)))
 		}
 	}
 
-	executor := symbolBytes(t, image, "_wrela_method_examples_hello_program_HelloWorld_run")
-	if !containsBytes(executor, []byte{0xEE}) {
-		t.Fatal("executor symbol missing COM1 out instruction")
+	serialWrite8 := symbolBytes(t, image, "_wrela_method_machine_x86_64_serial_SerialWriterRegisters_write8")
+	if !containsBytes(serialWrite8, []byte{0xEE}) {
+		t.Fatal("serial writer symbol missing COM1 out instruction")
 	}
-	if !containsBytes(executor, []byte{0xF4, 0xE9}) {
-		t.Fatal("executor symbol missing halt loop")
+	haltForever := symbolBytes(t, image, "_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever")
+	if !containsBytes(haltForever, []byte{0xF4, 0xE9}) {
+		t.Fatal("executor memory halt symbol missing halt loop")
+	}
+}
+
+func TestHelloTransitionFunctionsPreserveOwnedStackReturn(t *testing.T) {
+	program := compileHelloProgram(t)
+	for _, symbol := range []string{
+		program.Entry.DelegatedPhaseSymbol,
+		"_wrela_method_platform_uefi_transition_DelegatedHardware_exit_to_owned_hardware",
+	} {
+		fn := findIRFunction(program, symbol)
+		if fn == nil {
+			t.Fatalf("missing IR function %s", symbol)
+		}
+		if !fn.PreserveStackReturn {
+			t.Fatalf("%s must return without restoring the old delegated stack", symbol)
+		}
+	}
+}
+
+func TestHelloOwnedPhaseCallsExecutorRun(t *testing.T) {
+	program := compileHelloProgram(t)
+	assertFunctionCalls(t, program, program.Entry.OwnedPhaseSymbol, "_wrela_method_examples_hello_program_HelloWorld_run")
+}
+
+func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
+	program := compileHelloProgram(t)
+	assertFunctionCalls(t, program,
+		"_wrela_method_examples_hello_program_HelloWorld_run",
+		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_static_bytes",
+		"_wrela_method_machine_x86_64_serial_SerialWritePath_write",
+		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever",
+	)
+	assertFunctionCalls(t, program,
+		"_wrela_method_machine_x86_64_serial_SerialWritePath_write",
+		"_wrela_method_machine_x86_64_serial_SerialWritePath_wait_until_ready",
+		"_wrela_method_machine_x86_64_serial_SerialWriterRegisters_write8",
+	)
+	assertFunctionCalls(t, program,
+		"_wrela_method_machine_x86_64_serial_SerialWritePath_wait_until_ready",
+		"_wrela_method_machine_x86_64_serial_SerialWriterRegisters_read8",
+		"_wrela_method_machine_x86_64_serial_SerialWritePath_pause",
+	)
+}
+
+func TestHelloTransitionCompiledBytesUseSavedContinuation(t *testing.T) {
+	image := compileHelloImage(t)
+	for _, symbol := range []string{
+		"_wrela_phase_examples_hello_main_HelloSerial_delegated_hardware",
+		"_wrela_method_platform_uefi_transition_DelegatedHardware_exit_to_owned_hardware",
+	} {
+		code := symbolBytes(t, image, symbol)
+		if containsBytes(code, []byte{0x48, 0x89, 0xEC, 0x5D, 0xC3}) {
+			t.Fatalf("%s must not restore rsp to the delegated stack before returning", symbol)
+		}
+		if !containsBytes(code, []byte{0x4C, 0x8B, 0x55, 0xF8}) {
+			t.Fatalf("%s missing saved continuation load", symbol)
+		}
+		if !containsBytes(code, []byte{0x48, 0x8B, 0x6D, 0x00, 0x41, 0x52, 0xC3}) {
+			t.Fatalf("%s missing caller-rbp restore and owned-stack continuation return", symbol)
+		}
 	}
 }
 
 func compileHelloImage(t *testing.T) *codegen.Image {
+	t.Helper()
+	program := compileHelloProgram(t)
+	image, ds := codegen.Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	return image
+}
+
+func findIRFunction(program *ir.Program, symbol string) *ir.Function {
+	for i := range program.Functions {
+		if program.Functions[i].Symbol == symbol {
+			return &program.Functions[i]
+		}
+	}
+	return nil
+}
+
+func assertFunctionCalls(t *testing.T, program *ir.Program, symbol string, want ...string) {
+	t.Helper()
+	fn := findIRFunction(program, symbol)
+	if fn == nil {
+		t.Fatalf("missing IR function %s", symbol)
+	}
+	calls := functionCalls(*fn)
+	for _, target := range want {
+		if !calls[target] {
+			t.Fatalf("%s missing call to %s; calls: %#v", symbol, target, calls)
+		}
+	}
+}
+
+func functionCalls(fn ir.Function) map[string]bool {
+	out := map[string]bool{}
+	for _, block := range fn.Blocks {
+		collectCalls(block.Ops, out)
+	}
+	return out
+}
+
+func collectCalls(ops []ir.Operation, out map[string]bool) {
+	for _, op := range ops {
+		switch v := op.(type) {
+		case *ir.Call:
+			out[v.Symbol] = true
+		case *ir.If:
+			collectCalls(v.ConditionOps, out)
+			collectCalls(v.Then, out)
+			collectCalls(v.Else, out)
+		case *ir.While:
+			collectCalls(v.ConditionOps, out)
+			collectCalls(v.Body, out)
+		case *ir.ForBytes:
+			collectCalls(v.IterableOps, out)
+			collectCalls(v.Body, out)
+		}
+	}
+}
+
+func compileHelloProgram(t *testing.T) *ir.Program {
 	t.Helper()
 	repoRoot := resolveRepoRoot(".")
 	graph, err := source.LoadGraph(source.Options{
@@ -121,11 +253,7 @@ func compileHelloImage(t *testing.T) *codegen.Image {
 	if len(ds) != 0 {
 		t.Fatalf("Lower diagnostics: %#v", ds)
 	}
-	image, ds := codegen.Compile(program)
-	if len(ds) != 0 {
-		t.Fatalf("Compile diagnostics: %#v", ds)
-	}
-	return image
+	return program
 }
 
 func symbolBytes(t *testing.T, image *codegen.Image, symbol string) []byte {

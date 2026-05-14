@@ -18,16 +18,34 @@ class UefiBootServicesCalls {
 
         mov [rbp - 8], r10
         mov rcx, [rbp - 8]
-        add rcx, 48
+        add rcx, 16
+        mov rax, [rsi + 8]
+        mov [rcx], rax
+
+        mov rax, [rbp - 8]
+        mov r11, rax
+        add r11, 24
+        mov [rax], r11
+        mov r11, rax
+        add r11, 32
+        mov [rax + 8], r11
+        mov r11, rax
+        add r11, 64
+        mov [rax + 32], r11
+        mov r10, [rsi]
+        mov [rax + 64], r10
+        mov r10, [rsi + 8]
+        mov [rax + 72], r10
 
         mov rax, self.boot_services
+        mov rax, [rax]
         mov rdx, [rsi]
         mov r8, [rbp - 8]
-        add r8, 32
+        add r8, 56
         mov r9, [rbp - 8]
-        add r9, 24
+        add r9, 40
         mov r11, [rbp - 8]
-        add r11, 40
+        add r11, 48
         mov [rsp + 32], r11
 
         mov rax, [rax + 56]
@@ -35,15 +53,11 @@ class UefiBootServicesCalls {
 
         mov r11, rax
         mov rax, [rbp - 8]
-        mov [rax + 0], r11
-        mov r10, [rsi]
-        mov [rax + 8], r10
-        mov r10, [rsi + 8]
-        mov [rax + 16], r10
-        mov r10, [rbp - 8]
-        add r10, 48
-        mov r11, [r10]
-        mov [rax + 48], r11
+        mov r10, [rax]
+        mov [r10], r11
+        mov r10, [rax + 16]
+        mov r11, [rax + 32]
+        mov [r11 + 8], r10
 
         mov rax, [rbp - 8]
         add rsp, 48
@@ -54,14 +68,20 @@ class UefiBootServicesCalls {
     asm fn exit_boot_services(self, image: UefiHandle, map_key: U64) -> UefiStatus {
         push rbp
         mov rbp, rsp
-        sub rsp, 32
+        sub rsp, 48
 
-        mov rcx, rsi
+        mov [rbp - 8], r10
+        mov rcx, [rsi]
         mov rax, self.boot_services
+        mov rax, [rax]
         mov rax, [rax + 232]
         call rax
 
-        add rsp, 32
+        mov r11, [rbp - 8]
+        mov [r11], rax
+        mov rax, r11
+
+        add rsp, 48
         pop rbp
         ret
     }

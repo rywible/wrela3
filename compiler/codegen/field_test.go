@@ -50,7 +50,7 @@ func TestCompileFieldLoadUsesOffset(t *testing.T) {
 	}
 
 	code := image.Sections[0].Data
-	if !bytes.Contains(code, []byte{0x48, 0x8B, 0x47, 0x08}) {
+	if !bytes.Contains(code, []byte{0x49, 0x8B, 0x43, 0x08}) {
 		t.Fatalf("expected load from offset 8, got %#x", code)
 	}
 }

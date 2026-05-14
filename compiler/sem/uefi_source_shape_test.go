@@ -29,39 +29,66 @@ func TestUEFIPlatformBootServicesAndTransitionAsmShapes(t *testing.T) {
 	for _, want := range []string{
 		"sub rsp, 48",
 		"mov rcx, [rbp - 8]",
-		"add rcx, 48",
+		"add rcx, 16",
+		"mov rax, [rsi + 8]",
+		"mov [rcx], rax",
+		"add r11, 24",
+		"mov [rax], r11",
+		"add r11, 32",
+		"mov [rax + 8], r11",
+		"add r11, 64",
+		"mov [rax + 32], r11",
+		"mov [rax + 64], r10",
+		"mov [rax + 72], r10",
 		"mov rdx, [rsi]",
 		"mov r8, [rbp - 8]",
-		"add r8, 32",
+		"add r8, 56",
 		"mov r9, [rbp - 8]",
-		"add r9, 24",
+		"add r9, 40",
+		"add r11, 48",
 		"mov [rsp + 32], r11",
+		"mov rax, [rax]",
 		"mov rax, [rax + 56]",
 		"call rax",
+		"mov r10, [rax]",
+		"mov [r10], r11",
+		"mov r10, [rax + 16]",
+		"mov r11, [rax + 32]",
+		"mov [r11 + 8], r10",
 	} {
 		if !strings.Contains(getMap.AsmBody.Source, want) {
 			t.Fatalf("get_memory_map body missing %q in:\n%s", want, getMap.AsmBody.Source)
 		}
 	}
-	if strings.Contains(getMap.AsmBody.Source, "mov rax, [rax + 0]") {
-		t.Fatalf("get_memory_map should load boot_services once, not double-deref: %s", getMap.AsmBody.Source)
+	if !strings.Contains(getMap.AsmBody.Source, "mov rax, [rax]\n        mov rdx") {
+		t.Fatalf("get_memory_map should dereference the UefiBootServices handle before table lookup: %s", getMap.AsmBody.Source)
 	}
 
+	if !strings.Contains(exitBS.AsmBody.Source, "sub rsp, 48") {
+		t.Fatalf("exit_boot_services body missing aligned shadow/spill frame: %s", exitBS.AsmBody.Source)
+	}
 	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + 232]") {
 		t.Fatalf("exit_boot_services body missing UEFI table offset 232: %s", exitBS.AsmBody.Source)
 	}
-	if strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + 0]") {
-		t.Fatalf("exit_boot_services should load boot_services once, not double-deref: %s", exitBS.AsmBody.Source)
+	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax]\n        mov rax, [rax + 232]") {
+		t.Fatalf("exit_boot_services should dereference the UefiBootServices handle before table lookup: %s", exitBS.AsmBody.Source)
 	}
-	if !strings.Contains(exitBS.AsmBody.Source, "mov rcx, rsi") {
+	if !strings.Contains(exitBS.AsmBody.Source, "mov rcx, [rsi]") {
 		t.Fatalf("exit_boot_services body missing image arg move: %s", exitBS.AsmBody.Source)
+	}
+	if !strings.Contains(exitBS.AsmBody.Source, "mov [r11], rax") || !strings.Contains(exitBS.AsmBody.Source, "mov rax, r11") {
+		t.Fatalf("exit_boot_services must materialize and return UefiStatus handle: %s", exitBS.AsmBody.Source)
 	}
 
 	transition := moduleType(t, checked.Index, "platform.uefi.transition", "DelegatedHardware")
 	activate := methodByName(t, transition, "activate_owned_hardware")
 	for _, want := range []string{
 		"cli",
+		"mov rax, [rsp]",
 		"mov rsp, owned_stack_top",
+		"push rax",
+		"push rax",
+		"push rax",
 		"mov cr3, cr3_value",
 		"lgdt [r11]",
 		"call reload_cs",
@@ -124,8 +151,31 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	for _, want := range []string{
 		"self.next_offset",
 		"self.arena_base",
+		"push rbx",
+		"push r12",
+		"push r13",
+		"push r14",
+		"push r15",
+		"add r10, 4095",
+		"and r10, rax",
+		"mov rbx, r11",
+		"memory_map",
+		"descriptor_size",
+		"descriptor_loop",
+		"map_descriptor_pages",
+		"mov r8, [rsi]",
+		"mov r8, [r8]",
+		"mov r9, [rsi]",
+		"mov r9, [r9 + 8]",
+		"mov rax, [r8 + 8]",
+		"mov rcx, [r8 + 24]",
 		"mov [r11 - 12288]",
 		"jne zero_loop",
+		"pop r15",
+		"pop r14",
+		"pop r13",
+		"pop r12",
+		"pop rbx",
 	} {
 		if !strings.Contains(identity.AsmBody.Source, want) {
 			t.Fatalf("build_identity_paging asm body missing %q in:\n%s", want, identity.AsmBody.Source)
@@ -133,9 +183,15 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	}
 	for _, want := range []string{
 		"self.next_offset",
-		"0x00209A000000FFFF",
+		"push r12",
+		"push r14",
+		"0x00AF9A000000FFFF",
+		"0x00CF92000000FFFF",
 		"mov [r10], r11",
 		"mov [r10 + 8], 40",
+		"mov rax, r10",
+		"pop r14",
+		"pop r12",
 	} {
 		if !strings.Contains(gdt.AsmBody.Source, want) {
 			t.Fatalf("build_owned_gdt asm body missing %q in:\n%s", want, gdt.AsmBody.Source)
@@ -143,11 +199,18 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	}
 	for _, want := range []string{
 		"self.next_offset",
+		"push r12",
+		"push r13",
+		"push r14",
 		"fatal_handler",
 		"256",
 		"jne idt_gate_loop",
 		"mov [r10 + 0], r11",
 		"mov [r10 + 8], 4112",
+		"mov rax, r10",
+		"pop r14",
+		"pop r13",
+		"pop r12",
 	} {
 		if !strings.Contains(idt.AsmBody.Source, want) {
 			t.Fatalf("build_fatal_idt asm body missing %q in:\n%s", want, idt.AsmBody.Source)
@@ -158,6 +221,23 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	}
 	if !strings.Contains(fatalHandler.AsmBody.Source, "hlt") {
 		t.Fatalf("fatal_idt_handler must include hlt: %s", fatalHandler.AsmBody.Source)
+	}
+}
+
+func TestUEFIMemoryMapFieldOrderMatchesPlan(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+	memoryMap := moduleType(t, index, "platform.uefi.types", "UefiMemoryMap")
+	got := make([]string, 0, len(memoryMap.Fields))
+	for _, field := range memoryMap.Fields {
+		got = append(got, field.Name)
+	}
+	want := []string{"descriptors", "descriptor_size", "descriptor_version", "key"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("UefiMemoryMap fields = %#v, want %#v", got, want)
 	}
 }
 

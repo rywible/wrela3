@@ -101,6 +101,16 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Code:    diag.ASM0002,
 				Message: "unsupported add form",
 			})
+		case "and":
+			if b, ok := encodeBinaryRegReg(ins, 0x21); ok {
+				out = append(out, b...)
+				break
+			}
+			diags = append(diags, diag.Diagnostic{
+				Phase:   "asm",
+				Code:    diag.ASM0002,
+				Message: "unsupported and form",
+			})
 		case "sub":
 			if b, ok := encodeBinaryRegMem(ins, 0x2B); ok {
 				out = append(out, b...)
