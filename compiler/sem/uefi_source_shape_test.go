@@ -43,9 +43,15 @@ func TestUEFIPlatformBootServicesAndTransitionAsmShapes(t *testing.T) {
 			t.Fatalf("get_memory_map body missing %q in:\n%s", want, getMap.AsmBody.Source)
 		}
 	}
+	if strings.Contains(getMap.AsmBody.Source, "mov rax, [rax + 0]") {
+		t.Fatalf("get_memory_map should load boot_services once, not double-deref: %s", getMap.AsmBody.Source)
+	}
 
 	if !strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + 232]") {
 		t.Fatalf("exit_boot_services body missing UEFI table offset 232: %s", exitBS.AsmBody.Source)
+	}
+	if strings.Contains(exitBS.AsmBody.Source, "mov rax, [rax + 0]") {
+		t.Fatalf("exit_boot_services should load boot_services once, not double-deref: %s", exitBS.AsmBody.Source)
 	}
 	if !strings.Contains(exitBS.AsmBody.Source, "mov rcx, rsi") {
 		t.Fatalf("exit_boot_services body missing image arg move: %s", exitBS.AsmBody.Source)
@@ -73,6 +79,19 @@ func TestUEFIPlatformBootServicesAndTransitionAsmShapes(t *testing.T) {
 			t.Fatalf("activate_owned_hardware body missing %q in:\n%s", want, activate.AsmBody.Source)
 		}
 	}
+	capture := methodByName(t, transition, "capture_fatal_idt_handler")
+	if !capture.IsAsm || capture.AsmBody == nil {
+		t.Fatalf("missing capture_fatal_idt_handler asm method")
+	}
+	if !strings.Contains(capture.AsmBody.Source, "call fatal_idt_capture_return") {
+		t.Fatalf("capture_fatal_idt_handler missing capture call: %s", capture.AsmBody.Source)
+	}
+	if !strings.Contains(capture.AsmBody.Source, "fatal_idt_capture_return") {
+		t.Fatalf("capture_fatal_idt_handler missing capture label: %s", capture.AsmBody.Source)
+	}
+	if !strings.Contains(capture.AsmBody.Source, "hlt") {
+		t.Fatalf("capture_fatal_idt_handler must define fallback handler path: %s", capture.AsmBody.Source)
+	}
 }
 
 func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
@@ -91,49 +110,48 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	gdt := methodByName(t, memory, "build_owned_gdt")
 	idt := methodByName(t, memory, "build_fatal_idt")
 	fatalHandler := methodByName(t, memory, "fatal_idt_handler")
-	typesSource := readFileText(t, filepath.Join(findRepoRoot(t), "wrela/platform/uefi/types.wrela"))
+
+	if !identity.IsAsm || identity.AsmBody == nil {
+		t.Fatalf("build_identity_paging must be asm and non-empty")
+	}
+	if !gdt.IsAsm || gdt.AsmBody == nil {
+		t.Fatalf("build_owned_gdt must be asm and non-empty")
+	}
+	if !idt.IsAsm || idt.AsmBody == nil {
+		t.Fatalf("build_fatal_idt must be asm and non-empty")
+	}
 
 	for _, want := range []string{
-		"pml4",
-		"pdpt",
-		"pd",
-		"memory_map.",
+		"self.next_offset",
+		"self.arena_base",
+		"mov [r11 - 12288]",
+		"jne zero_loop",
 	} {
-		if !strings.Contains(typesSource, "fn build_identity_paging") {
-			t.Fatalf("expected build_identity_paging declaration in types source")
-		}
-		if !strings.Contains(typesSource, want) {
-			t.Fatalf("build_identity_paging body missing %q", want)
+		if !strings.Contains(identity.AsmBody.Source, want) {
+			t.Fatalf("build_identity_paging asm body missing %q in:\n%s", want, identity.AsmBody.Source)
 		}
 	}
 	for _, want := range []string{
-		"gdt_null",
-		"gdt_code",
-		"gdt_data",
-		"gdt_bytes",
+		"self.next_offset",
+		"0x00209A000000FFFF",
+		"mov [r10], r11",
+		"mov [r10 + 8], 40",
 	} {
-		if !strings.Contains(typesSource, "fn build_owned_gdt") {
-			t.Fatalf("expected build_owned_gdt declaration in types source")
-		}
-		if !strings.Contains(typesSource, want) {
-			t.Fatalf("build_owned_gdt body missing %q", want)
+		if !strings.Contains(gdt.AsmBody.Source, want) {
+			t.Fatalf("build_owned_gdt asm body missing %q in:\n%s", want, gdt.AsmBody.Source)
 		}
 	}
 	for _, want := range []string{
-		"gate_count = 256",
-		"gate_size = 16",
-		"length: gate_bytes",
+		"self.next_offset",
 		"fatal_handler",
+		"256",
+		"jne idt_gate_loop",
+		"mov [r10 + 0], r11",
+		"mov [r10 + 8], 4112",
 	} {
-		if !strings.Contains(typesSource, "fn build_fatal_idt") {
-			t.Fatalf("expected build_fatal_idt declaration in types source")
+		if !strings.Contains(idt.AsmBody.Source, want) {
+			t.Fatalf("build_fatal_idt asm body missing %q in:\n%s", want, idt.AsmBody.Source)
 		}
-		if !strings.Contains(typesSource, want) {
-			t.Fatalf("build_fatal_idt body missing %q", want)
-		}
-	}
-	if len(identity.Body) == 0 || len(gdt.Body) == 0 || len(idt.Body) == 0 {
-		t.Fatalf("builder methods must contain non-empty bodies")
 	}
 	if fatalHandler.AsmBody == nil {
 		t.Fatalf("missing fatal_idt_handler asm method")

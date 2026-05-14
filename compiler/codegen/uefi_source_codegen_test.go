@@ -67,6 +67,32 @@ func TestUEFITransitionActivateAsmMethodCodegen(t *testing.T) {
 	}
 }
 
+func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	identity := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_identity_paging")
+	if identity.AsmBody == nil {
+		t.Fatalf("build_identity_paging is not an asm method")
+	}
+	gdt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_owned_gdt")
+	if gdt.AsmBody == nil {
+		t.Fatalf("build_owned_gdt is not an asm method")
+	}
+	idt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_fatal_idt")
+	if idt.AsmBody == nil {
+		t.Fatalf("build_fatal_idt is not an asm method")
+	}
+
+	for _, method := range []ir.AsmMethod{identity, gdt, idt} {
+		unit, ds := compileAsmMethodUnit(method)
+		if len(ds) != 0 {
+			t.Fatalf("compileAsmMethodUnit %q diagnostics: %#v", method.Symbol, ds)
+		}
+		if len(unit.Bytes) == 0 {
+			t.Fatalf("compiled asm unit for %q is empty", method.Symbol)
+		}
+	}
+}
+
 func parseCheckedUEFIModules(t *testing.T) *sem.CheckedProgram {
 	t.Helper()
 	modules := parseUEFIModulesForCodegen(t)

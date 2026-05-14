@@ -51,7 +51,7 @@ unique class DelegatedHardware {
 
         let pml4 = self.delegated_memory.build_identity_paging(memory_map: final_map)
         let gdt = self.delegated_memory.build_owned_gdt()
-        let idt = self.delegated_memory.build_fatal_idt(fatal_handler: 0)
+        let idt = self.delegated_memory.build_fatal_idt(fatal_handler: self.capture_fatal_idt_handler())
         self.activate_owned_hardware(
             owned_stack_top: cpu_plan.owned_stack_top,
             cr3_value: pml4,
@@ -94,5 +94,15 @@ unique class DelegatedHardware {
         push 0x08
         push rax
         retfq
+    }
+
+    asm fn capture_fatal_idt_handler(self) -> VirtualAddress {
+        call fatal_idt_capture_return
+    fatal_idt_handler:
+        hlt
+        jmp fatal_idt_handler
+    fatal_idt_capture_return:
+        pop rax
+        ret
     }
 }

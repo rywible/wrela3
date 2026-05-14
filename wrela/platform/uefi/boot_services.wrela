@@ -20,8 +20,7 @@ class UefiBootServicesCalls {
         mov rcx, [rbp - 8]
         add rcx, 48
 
-        mov rax, [rdi]
-        mov rax, [rax + 0]
+        mov rax, self.boot_services
         mov rdx, [rsi]
         mov r8, [rbp - 8]
         add r8, 32
@@ -58,8 +57,7 @@ class UefiBootServicesCalls {
         sub rsp, 32
 
         mov rcx, rsi
-        mov rax, [rdi]
-        mov rax, [rax + 0]
+        mov rax, self.boot_services
         mov rax, [rax + 232]
         call rax
 
