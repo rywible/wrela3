@@ -1,0 +1,18 @@
+// expect: SEM0007: unique type SerialDriver is constructed more than once
+module negative.duplicate_unique
+
+unique driver SerialDriver {}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let a = SerialDriver()
+        let b = SerialDriver()
+        while true {}
+    }
+}

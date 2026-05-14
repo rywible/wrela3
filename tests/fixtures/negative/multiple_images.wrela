@@ -1,0 +1,26 @@
+// expect: SEM0003: import graph contains more than one image
+module negative.multiple_images
+
+image A {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
+
+image B {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}

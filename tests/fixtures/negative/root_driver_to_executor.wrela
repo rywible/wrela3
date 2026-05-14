@@ -1,0 +1,26 @@
+// expect: SEM0010: root driver SerialDriver cannot be passed into executor HelloWorld
+module negative.root_driver_to_executor
+
+unique driver SerialDriver {}
+
+executor HelloWorld {
+    serial: SerialDriver
+
+    start fn run(self) -> never {
+        while true {}
+    }
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let serial = SerialDriver()
+        let hello = HelloWorld(serial: serial)
+        hello.run()
+    }
+}

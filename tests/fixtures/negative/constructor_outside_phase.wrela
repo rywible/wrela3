@@ -1,0 +1,22 @@
+// expect: SEM0006: class construction is allowed only directly inside image phase bodies
+module negative.constructor_outside_phase
+
+class Other {}
+
+class Helper {
+    fn make(self) -> Other {
+        return Other()
+    }
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
