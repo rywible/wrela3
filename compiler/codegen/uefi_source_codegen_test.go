@@ -70,15 +70,15 @@ func TestUEFITransitionActivateAsmMethodCodegen(t *testing.T) {
 func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	identity := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_identity_paging")
-	if identity.AsmBody == nil {
+	if identity.Body == "" {
 		t.Fatalf("build_identity_paging is not an asm method")
 	}
 	gdt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_owned_gdt")
-	if gdt.AsmBody == nil {
+	if gdt.Body == "" {
 		t.Fatalf("build_owned_gdt is not an asm method")
 	}
 	idt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_fatal_idt")
-	if idt.AsmBody == nil {
+	if idt.Body == "" {
 		t.Fatalf("build_fatal_idt is not an asm method")
 	}
 

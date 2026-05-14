@@ -87,6 +87,10 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				out = append(out, b...)
 				break
 			}
+			if b, ok := encodeBinaryRegMem(ins, 0x03); ok {
+				out = append(out, b...)
+				break
+			}
 			b, ok := encodeBinaryImm(ins, 0, 0x83, 0x81)
 			if ok {
 				out = append(out, b...)
@@ -98,6 +102,10 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Message: "unsupported add form",
 			})
 		case "sub":
+			if b, ok := encodeBinaryRegMem(ins, 0x2B); ok {
+				out = append(out, b...)
+				break
+			}
 			b, ok := encodeBinaryImm(ins, 5, 0x83, 0x81)
 			if ok {
 				out = append(out, b...)
@@ -110,6 +118,10 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 			})
 		case "cmp":
 			if b, ok := encodeBinaryRegReg(ins, 0x39); ok {
+				out = append(out, b...)
+				break
+			}
+			if b, ok := encodeBinaryRegMem(ins, 0x3B); ok {
 				out = append(out, b...)
 				break
 			}
@@ -317,6 +329,9 @@ func encodeMov(ins Instruction) ([]byte, bool) {
 		if src, ok := right.(RegOperand); ok {
 			return encodeMovMemReg(dst, src.Reg)
 		}
+		if src, ok := right.(ImmOperand); ok {
+			return encodeMovMemImm(dst, src.Value)
+		}
 	}
 	return nil, false
 }
@@ -417,6 +432,25 @@ func encodeMovRegMem(reg Reg, mem MemOperand) ([]byte, bool) {
 	}
 }
 
+func encodeMovMemImm(mem MemOperand, value int64) ([]byte, bool) {
+	width := defaultWidth(mem.Width, 64)
+	p := rexForOperand(width == 64, Reg{}, mem.Base)
+	modrmBytes := encodeMemModRM(0, mem)
+	imm32 := []byte{byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24)}
+	switch width {
+	case 8:
+		return append(append(p, 0xC6), append(modrmBytes, byte(value))...), true
+	case 16:
+		return append(append(append([]byte{0x66}, p...), 0xC7), append(modrmBytes, imm32...)...), true
+	case 32:
+		return append(append(p, 0xC7), append(modrmBytes, imm32...)...), true
+	case 64:
+		return append(append(p, 0xC7), append(modrmBytes, imm32...)...), true
+	default:
+		return nil, false
+	}
+}
+
 func encodeBinaryImm(ins Instruction, ext, op8, op32 byte) ([]byte, bool) {
 	if len(ins.Operands) != 2 {
 		return nil, false
@@ -471,6 +505,31 @@ func encodeBinaryRegReg(ins Instruction, opcode byte) ([]byte, bool) {
 		return append([]byte{0x66}, append(p, opcode, modrm(3, src.Reg.Low3, dst.Reg.Low3))...), true
 	case 32, 64:
 		return append(p, opcode, modrm(3, src.Reg.Low3, dst.Reg.Low3)), true
+	default:
+		return nil, false
+	}
+}
+
+func encodeBinaryRegMem(ins Instruction, opcode byte) ([]byte, bool) {
+	if len(ins.Operands) != 2 {
+		return nil, false
+	}
+	dst, ok := ins.Operands[0].(RegOperand)
+	if !ok {
+		return nil, false
+	}
+	src, ok := ins.Operands[1].(MemOperand)
+	if !ok {
+		return nil, false
+	}
+	width := defaultWidth(src.Width, dst.Reg.Width)
+	p := rexForOperand(width == 64, dst.Reg, src.Base)
+	modrmBytes := encodeMemModRM(dst.Reg.Low3, src)
+	switch width {
+	case 16:
+		return append(append(append([]byte{0x66}, p...), opcode), modrmBytes...), true
+	case 32, 64:
+		return append(append(p, opcode), modrmBytes...), true
 	default:
 		return nil, false
 	}

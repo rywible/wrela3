@@ -149,6 +149,22 @@ func TestEncodeExactInstructions(t *testing.T) {
 			}}},
 			want: []byte{0x4C, 0x89, 0x5C, 0x24, 0x20},
 		},
+		{
+			name: "mov mem imm32 sign extended",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				MemOperand{Base: must(Lookup("r10")), Disp: 8},
+				ImmOperand{Value: 40},
+			}}},
+			want: []byte{0x49, 0xC7, 0x42, 0x08, 0x28, 0x00, 0x00, 0x00},
+		},
+		{
+			name: "add reg mem",
+			code: []Instruction{{Mnemonic: "add", Operands: []Operand{
+				RegOperand{must(Lookup("rax"))},
+				MemOperand{Base: must(Lookup("rdi")), Disp: 16, Width: 64},
+			}}},
+			want: []byte{0x48, 0x03, 0x47, 0x10},
+		},
 	}
 
 	for _, tc := range tests {

@@ -3,6 +3,7 @@ package codegen
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -415,6 +416,18 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 		})
 		return
 	}
+	if shouldPassRecordReturn(call.Type.Name) {
+		slot, ok := frame.Slots[call]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{
+				Phase:   diagnosticPhase,
+				Code:    diag.CG0001,
+				Message: "missing slot for data-return call",
+			})
+			return
+		}
+		emitSlotFromBase(e, asm.MustLookup("r10"), asm.MustLookup("rbp"), slot)
+	}
 
 	for i, value := range values {
 		emitLoadValue(e, frame, value, scratchRegs[0])
@@ -428,6 +441,32 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 	if slot, ok := frame.Slots[call]; ok {
 		emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(call))
 	}
+}
+
+func shouldPassRecordReturn(typeName string) bool {
+	if typeName == "" || typeName == "never" {
+		return false
+	}
+	if isRegisterReturnedType(typeName) {
+		return false
+	}
+	if strings.HasSuffix(typeName, "Result") {
+		return true
+	}
+	if typeName == "DelegatedBytes" || typeName == "DelegatedMutableBytes" || typeName == "UefiMemoryMap" {
+		return true
+	}
+	return false
+}
+
+func isRegisterReturnedType(typeName string) bool {
+	switch typeName {
+	case "Bool", "U8", "U16", "U32", "U64", "I64", "PhysicalAddress", "VirtualAddress", "StringLiteral", "Bytes", "MutableBytes", "String", "Data":
+		return true
+	case "data", "class", "driver", "path", "executor":
+		return true
+	}
+	return false
 }
 
 func emitLoadValue(e *Emitter, frame Frame, value ir.Value, dst asm.Reg) {
