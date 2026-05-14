@@ -81,6 +81,14 @@ func TestEncodeExactInstructions(t *testing.T) {
 			want: []byte{0x5D},
 		},
 		{
+			name: "push imm8 and pop rax",
+			code: []Instruction{
+				{Mnemonic: "push", Operands: []Operand{ImmOperand{Value: 8}}},
+				{Mnemonic: "pop", Operands: []Operand{RegOperand{must(Lookup("rax"))}}},
+			},
+			want: []byte{0x6A, 0x08, 0x58},
+		},
+		{
 			name: "retfq",
 			code: []Instruction{{Mnemonic: "retfq"}},
 			want: []byte{0x48, 0xCB},
@@ -95,6 +103,51 @@ func TestEncodeExactInstructions(t *testing.T) {
 				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("gs"))}, RegOperand{must(Lookup("ax"))}}},
 			},
 			want: []byte{0x8E, 0xD8, 0x8E, 0xC0, 0x8E, 0xD0, 0x8E, 0xE0, 0x8E, 0xE8},
+		},
+		{
+			name: "mov high registers",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{must(Lookup("r11"))},
+				RegOperand{must(Lookup("r9"))},
+			}}},
+			want: []byte{0x4D, 0x8B, 0xD9},
+		},
+		{
+			name: "call rax",
+			code: []Instruction{{Mnemonic: "call", Operands: []Operand{RegOperand{must(Lookup("rax"))}}}},
+			want: []byte{0xFF, 0xD0},
+		},
+		{
+			name: "sub rsp imm32",
+			code: []Instruction{{Mnemonic: "sub", Operands: []Operand{
+				RegOperand{must(Lookup("rsp"))},
+				ImmOperand{Value: 32},
+			}}},
+			want: []byte{0x48, 0x83, 0xEC, 0x20},
+		},
+		{
+			name: "cmp rax, r10",
+			code: []Instruction{{Mnemonic: "cmp", Operands: []Operand{
+				RegOperand{must(Lookup("rax"))},
+				RegOperand{must(Lookup("r10"))},
+			}}},
+			want: []byte{0x4C, 0x39, 0xD0},
+		},
+		{
+			name: "shr rax imm8",
+			code: []Instruction{{Mnemonic: "shr", Operands: []Operand{
+				RegOperand{must(Lookup("rax"))},
+				ImmOperand{Value: 16},
+			}}},
+			want: []byte{0x48, 0xC1, 0xE8, 0x10},
+		},
+		{
+			name: "mov through rsp shadow slot",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				MemOperand{Base: must(Lookup("rsp")), Disp: 32, Width: 64},
+				RegOperand{must(Lookup("r11"))},
+			}}},
+			want: []byte{0x4C, 0x89, 0x5C, 0x24, 0x20},
 		},
 	}
 

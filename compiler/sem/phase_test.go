@@ -129,6 +129,33 @@ image Bad {
 		}
 	})
 
+	t.Run("owned phase must have exactly one parameter", func(t *testing.T) {
+		modules := parseModulesForTest(t, `
+module index.phase_owned_arity
+`+phasePrelude+`
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware() -> never {
+        while true {}
+    }
+}
+`)
+		index, ds := BuildIndex(modules)
+		if len(ds) != 0 {
+			t.Fatalf("build index diagnostics: %#v", ds)
+		}
+		_, diags := Check(index, modules)
+		if !hasCode(diags, diag.SEM0005) {
+			t.Fatalf("expected SEM0005, got %#v", diags)
+		}
+	})
+
 	t.Run("valid phases derive owned root", func(t *testing.T) {
 		modules := parseModulesForTest(t, `
 module index.phase_valid

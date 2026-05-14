@@ -133,15 +133,12 @@ func compileFunction(fn ir.Function) (compiledUnit, []diag.Diagnostic) {
 	frame := buildFrame(fn)
 	e := &Emitter{Labels: map[string]int{}}
 
+	emitPrologue(e, fn.Params, frame)
+	hasReturn := false
 	for _, block := range fn.Blocks {
 		if block.Label != "" {
 			e.bindLabel(block.Label)
 		}
-	}
-
-	emitPrologue(e, fn.Params, frame)
-	hasReturn := false
-	for _, block := range fn.Blocks {
 		for _, op := range block.Ops {
 			switch v := op.(type) {
 			case *ir.ConstInt:

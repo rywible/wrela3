@@ -19,7 +19,9 @@ var validInstructions = map[string]struct{}{
 	"in":    {},
 	"mov":   {},
 	"add":   {},
+	"sub":   {},
 	"cmp":   {},
+	"shr":   {},
 	"call":  {},
 	"jmp":   {},
 	"je":    {},
@@ -229,7 +231,7 @@ func parseMemOperand(text string) (MemOperand, bool) {
 		if !ok {
 			return MemOperand{}, false
 		}
-		return MemOperand{Base: r, Width: r.Width}, true
+		return MemOperand{Base: r}, true
 	}
 
 	baseText := ""
@@ -250,13 +252,29 @@ func parseMemOperand(text string) (MemOperand, bool) {
 	}
 	delta, err := strconv.ParseInt(strings.TrimSpace(dispText), 0, 64)
 	if err != nil {
+		compact := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(dispText), " ", ""), "\t", "")
+		delta, err = strconv.ParseInt(compact, 0, 64)
+	}
+	if err != nil {
 		return MemOperand{}, false
 	}
-	return MemOperand{Base: base, Disp: delta, Width: base.Width}, true
+	return MemOperand{Base: base, Disp: delta}, true
 }
 
 func parseIntLiteral(raw string) (int64, error) {
-	return strconv.ParseInt(raw, 0, 64)
+	raw = strings.TrimSpace(raw)
+	value, err := strconv.ParseInt(raw, 0, 64)
+	if err == nil {
+		return value, nil
+	}
+	if strings.HasPrefix(raw, "-") || strings.HasPrefix(raw, "+") {
+		return 0, err
+	}
+	unsigned, unsignedErr := strconv.ParseUint(raw, 0, 64)
+	if unsignedErr != nil {
+		return 0, err
+	}
+	return int64(unsigned), nil
 }
 
 func isBranchInstr(mnemonic string) bool {

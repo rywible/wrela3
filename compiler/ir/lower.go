@@ -39,9 +39,14 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 		program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
 
+	executorSymbol, message := findExecutorStart(checked.Modules)
+	program.Functions = append(program.Functions,
+		delegatedPhaseFunction(delegatedSymbol, program.Entry.DelegatedHardwareType, program.Entry.OwnedHardwareType),
+		ownedPhaseFunction(ownedSymbol, program.Entry.OwnedHardwareType, executorSymbol),
+	)
 	program.AsmMethods = append(program.AsmMethods,
-		AsmMethod{Symbol: delegatedSymbol, Body: "mov rax, 0\nret"},
-		AsmMethod{Symbol: ownedSymbol, Body: serialOwnedPhaseBody(findFirstStringLiteral(checked.Modules))},
+		transitionTransferMethod(),
+		AsmMethod{Symbol: executorSymbol, Return: Type{Name: "never"}, Body: serialExecutorBody(message)},
 	)
 	program.AsmMethods = append(program.AsmMethods, lowerAsmMethods(checked)...)
 	program.Data = lowerStringData(checked.Modules)
@@ -83,9 +88,6 @@ func lowerAsmMethods(checked *sem.CheckedProgram) []AsmMethod {
 			offsets, widths := receiverLayout(typ)
 			for _, method := range typ.Methods {
 				if !method.IsAsm || method.AsmBody == nil {
-					continue
-				}
-				if !asmBodySupported(method.AsmBody.Source) {
 					continue
 				}
 				out = append(out, AsmMethod{
@@ -136,18 +138,185 @@ func methodParams(method sem.Method) []Value {
 	return out
 }
 
-func asmBodySupported(body string) bool {
-	unsupported := []string{
-		"[rbp", "[rsp", "call rax", "call r10", "call r11",
-		"sub rsp", "add rsp", "lea ",
-		"push 0x", "push 8", "push rax",
+func delegatedPhaseFunction(symbol string, delegatedType string, ownedType string) Function {
+	hardware := &Param{Symbol: "hardware", Type: Type{Name: delegatedType}}
+	owned := &Call{
+		Symbol:   symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware"),
+		Receiver: hardware,
+		Type:     Type{Name: ownedType},
 	}
-	for _, needle := range unsupported {
-		if strings.Contains(body, needle) {
-			return false
-		}
+	return Function{
+		Symbol: symbol,
+		Params: []Value{hardware},
+		Blocks: []Block{{
+			Label: "entry",
+			Ops: []Operation{
+				owned,
+				&Return{Value: owned},
+			},
+		}},
 	}
-	return true
+}
+
+func ownedPhaseFunction(symbol string, ownedType string, executorSymbol string) Function {
+	hardware := &Param{Symbol: "hardware", Type: Type{Name: ownedType}}
+	start := &Call{
+		Symbol:   executorSymbol,
+		Receiver: hardware,
+		Type:     Type{Name: "never"},
+	}
+	return Function{
+		Symbol: symbol,
+		Params: []Value{hardware},
+		Blocks: []Block{{
+			Label: "entry",
+			Ops:   []Operation{start},
+		}},
+	}
+}
+
+func transitionTransferMethod() AsmMethod {
+	return AsmMethod{
+		Symbol:       symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware"),
+		ReceiverType: "DelegatedHardware",
+		Return:       Type{Name: "OwnedHardware"},
+		Body:         transitionTransferBody(),
+	}
+}
+
+func transitionTransferBody() string {
+	return strings.TrimSpace(`
+push rbp
+mov rbp, rsp
+sub rsp, 82112
+mov [rbp - 8], rdi
+
+get_memory_map:
+mov rdi, [rbp - 8]
+mov r10, [rdi + 0]
+mov r11, [rdi + 8]
+mov rax, 65536
+mov [rbp - 16], rax
+mov rcx, rbp
+add rcx, -16
+mov rdx, rbp
+add rdx, -82112
+mov r8, rbp
+add r8, -24
+mov r9, rbp
+add r9, -32
+mov rax, rbp
+add rax, -40
+mov [rsp + 32], rax
+mov rax, [r11 + 56]
+call rax
+mov r10, 0x8000000000000005
+cmp rax, r10
+jne exit_boot_services
+jmp get_memory_map
+
+exit_boot_services:
+mov rdi, [rbp - 8]
+mov rcx, [rdi + 0]
+mov r11, [rdi + 8]
+mov rdx, [rbp - 24]
+mov rax, [r11 + 232]
+call rax
+mov r10, 0x8000000000000002
+cmp rax, r10
+jne activate_owned_hardware
+jmp get_memory_map
+
+activate_owned_hardware:
+cli
+mov r11, 0x300000
+mov rcx, 1536
+mov rax, 0
+zero_page_tables:
+mov [r11], rax
+add r11, 8
+sub rcx, 1
+jne zero_page_tables
+mov r11, 0x300000
+mov rax, 0x301003
+mov [r11], rax
+mov rax, 0x302003
+mov [r11 + 4096], rax
+mov r12, 0x302000
+mov rcx, 512
+mov rax, 0x83
+fill_identity_pd:
+mov [r12], rax
+add r12, 8
+add rax, 2097152
+sub rcx, 1
+jne fill_identity_pd
+
+mov r11, 0x303000
+mov rax, 0
+mov [r11], rax
+mov rax, 0x00af9a000000ffff
+mov [r11 + 8], rax
+mov rax, 0x00cf92000000ffff
+mov [r11 + 16], rax
+mov ax, 23
+mov [r11 + 24], ax
+mov [r11 + 26], r11
+call capture_fatal_handler
+fatal_halt:
+hlt
+jmp fatal_halt
+capture_fatal_handler:
+pop r13
+mov r12, 0x304000
+mov rcx, 256
+idt_gate_loop:
+mov rax, r13
+mov [r12], ax
+mov ax, 8
+mov [r12 + 2], ax
+mov al, 0
+mov [r12 + 4], al
+mov al, 0x8e
+mov [r12 + 5], al
+mov rax, r13
+shr rax, 16
+mov [r12 + 6], ax
+mov rax, r13
+shr rax, 32
+mov [r12 + 8], eax
+mov rax, 0
+mov [r12 + 12], eax
+add r12, 16
+sub rcx, 1
+jne idt_gate_loop
+mov r11, 0x303000
+mov ax, 4095
+mov [r11 + 40], ax
+mov rax, 0x304000
+mov [r11 + 42], rax
+mov rax, 0x300000
+mov cr3, rax
+lgdt [r11 + 24]
+lidt [r11 + 40]
+mov rax, 0x400000
+mov rsp, rax
+call reload_cs_target
+reload_cs_target:
+pop rax
+add rax, 10
+push 8
+push rax
+retfq
+mov ax, 0x10
+mov ds, ax
+mov es, ax
+mov ss, ax
+mov fs, ax
+mov gs, ax
+mov rax, 0
+ret
+`)
 }
 
 func lowerStringData(modules []*ast.Module) []DataObject {
@@ -182,6 +351,24 @@ func findFirstStringLiteral(modules []*ast.Module) string {
 		}
 	}
 	return "hello from wrela\n"
+}
+
+func findExecutorStart(modules []*ast.Module) (string, string) {
+	message := findFirstStringLiteral(modules)
+	for _, mod := range modules {
+		for _, decl := range mod.Decls {
+			executor, ok := decl.(*ast.ExecutorDecl)
+			if !ok {
+				continue
+			}
+			for _, method := range executor.Methods {
+				if method.IsStart {
+					return symbolName("method", mod.Name, executor.Name, method.Name), message
+				}
+			}
+		}
+	}
+	return symbolName("method", "examples.hello.program", "HelloWorld", "run"), message
 }
 
 func walkDeclStrings(decl ast.Decl, visit func(string)) {
@@ -255,7 +442,7 @@ func walkExprStrings(expr ast.Expr, visit func(string)) {
 	}
 }
 
-func serialOwnedPhaseBody(message string) string {
+func serialExecutorBody(message string) string {
 	if message == "" {
 		message = "hello from wrela\n"
 	}

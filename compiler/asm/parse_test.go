@@ -60,3 +60,27 @@ func TestParseBodyBranchLabelReference(t *testing.T) {
 		t.Fatalf("jmp operand = %#v, want label ref", instructions[1].Operands[0])
 	}
 }
+
+func TestParseBodySpacedDisplacementAndHighBitImmediate(t *testing.T) {
+	instructions, diags := ParseBody("mov [rbp - 8], rdi\nmov r10, 0x8000000000000005", nil)
+	if len(diags) != 0 {
+		t.Fatalf("expected no diagnostics, got %v", diags)
+	}
+	if len(instructions) != 2 {
+		t.Fatalf("len(instructions) = %d, want 2", len(instructions))
+	}
+	mem, ok := instructions[0].Operands[0].(MemOperand)
+	if !ok {
+		t.Fatalf("first operand = %#v, want memory", instructions[0].Operands[0])
+	}
+	if mem.Base.Name != "rbp" || mem.Disp != -8 {
+		t.Fatalf("memory operand = %#v, want [rbp - 8]", mem)
+	}
+	imm, ok := instructions[1].Operands[1].(ImmOperand)
+	if !ok {
+		t.Fatalf("second operand = %#v, want immediate", instructions[1].Operands[1])
+	}
+	if uint64(imm.Value) != 0x8000000000000005 {
+		t.Fatalf("immediate = %#x, want high-bit UEFI status", uint64(imm.Value))
+	}
+}

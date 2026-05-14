@@ -183,3 +183,42 @@ func TestCompileRejectsTooManyCallArguments(t *testing.T) {
 		t.Fatalf("diags = %#v, want one SEM0013", diags)
 	}
 }
+
+func TestCompileBranchTargetsBlockLabelsAfterPrologue(t *testing.T) {
+	cond := &ir.Param{Symbol: "cond", Type: ir.Type{Name: "Bool"}}
+	one := &ir.ConstInt{Symbol: "one", Value: 1, Type: ir.Type{Name: "U64"}}
+	zero := &ir.ConstInt{Symbol: "zero", Value: 0, Type: ir.Type{Name: "U64"}}
+	fn := ir.Function{
+		Symbol: "branch_blocks",
+		Params: []ir.Value{cond},
+		Blocks: []ir.Block{
+			{Label: "entry", Ops: []ir.Operation{
+				&ir.Branch{Condition: cond, True: "then", False: "else"},
+			}},
+			{Label: "then", Ops: []ir.Operation{one, &ir.Return{Value: one}}},
+			{Label: "else", Ops: []ir.Operation{zero, &ir.Return{Value: zero}}},
+		},
+	}
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := image.Sections[0].Data
+	jcc := bytes.Index(code, []byte{0x0F, 0x84})
+	if jcc < 0 {
+		t.Fatalf("missing conditional branch in %#x", code)
+	}
+	falseTarget := jcc + 6 + int(int32(binary.LittleEndian.Uint32(code[jcc+2:jcc+6])))
+	if falseTarget <= 0 {
+		t.Fatalf("false branch target = %d, want after prologue", falseTarget)
+	}
+	jmp := bytes.IndexByte(code[jcc+6:], 0xE9)
+	if jmp < 0 {
+		t.Fatalf("missing unconditional branch in %#x", code)
+	}
+	jmp += jcc + 6
+	trueTarget := jmp + 5 + int(int32(binary.LittleEndian.Uint32(code[jmp+1:jmp+5])))
+	if trueTarget <= 0 {
+		t.Fatalf("true branch target = %d, want after prologue", trueTarget)
+	}
+}

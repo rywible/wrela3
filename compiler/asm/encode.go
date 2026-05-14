@@ -97,7 +97,22 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Code:    diag.ASM0002,
 				Message: "unsupported add form",
 			})
+		case "sub":
+			b, ok := encodeBinaryImm(ins, 5, 0x83, 0x81)
+			if ok {
+				out = append(out, b...)
+				break
+			}
+			diags = append(diags, diag.Diagnostic{
+				Phase:   "asm",
+				Code:    diag.ASM0002,
+				Message: "unsupported sub form",
+			})
 		case "cmp":
+			if b, ok := encodeBinaryRegReg(ins, 0x39); ok {
+				out = append(out, b...)
+				break
+			}
 			b, ok := encodeBinaryImm(ins, 7, 0x83, 0x81)
 			if ok {
 				out = append(out, b...)
@@ -107,6 +122,17 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 				Phase:   "asm",
 				Code:    diag.ASM0002,
 				Message: "unsupported cmp form",
+			})
+		case "shr":
+			b, ok := encodeShiftImm(ins, 5)
+			if ok {
+				out = append(out, b...)
+				break
+			}
+			diags = append(diags, diag.Diagnostic{
+				Phase:   "asm",
+				Code:    diag.ASM0002,
+				Message: "unsupported shr form",
 			})
 		case "call":
 			b, ok := encodeCall(ins, start, &fixups)
@@ -305,7 +331,7 @@ func encodeMovSegmentReg(dst, src Reg) ([]byte, bool) {
 func encodeMovRegReg(dst, src Reg) ([]byte, bool) {
 	opcode := byte(0x8B)
 	width := max(dst.Width, src.Width)
-	p := rexForOperand(width == 64, src, dst)
+	p := rexForOperand(width == 64, dst, src)
 	switch width {
 	case 8:
 		return append(p, opcode-1, modrm(3, dst.Low3, src.Low3)), true
@@ -358,9 +384,7 @@ func encodeMovRegImm(dst Reg, value int64) ([]byte, bool) {
 func encodeMovMemReg(mem MemOperand, reg Reg) ([]byte, bool) {
 	width := defaultWidth(mem.Width, reg.Width)
 	p := rexForOperand(width == 64, reg, mem.Base)
-	mod, disp := encodeMemDisp(mem)
-	m := modrm(int(mod), reg.Low3, mem.Base.Low3)
-	modrmBytes := append([]byte{m}, disp...)
+	modrmBytes := encodeMemModRM(reg.Low3, mem)
 	switch width {
 	case 8:
 		return append(append(p, 0x88), modrmBytes...), true
@@ -378,9 +402,7 @@ func encodeMovMemReg(mem MemOperand, reg Reg) ([]byte, bool) {
 func encodeMovRegMem(reg Reg, mem MemOperand) ([]byte, bool) {
 	width := defaultWidth(mem.Width, reg.Width)
 	p := rexForOperand(width == 64, reg, mem.Base)
-	mod, disp := encodeMemDisp(mem)
-	m := modrm(int(mod), reg.Low3, mem.Base.Low3)
-	modrmBytes := append([]byte{m}, disp...)
+	modrmBytes := encodeMemModRM(reg.Low3, mem)
 	switch width {
 	case 8:
 		return append(append(p, 0x8A), modrmBytes...), true
@@ -458,17 +480,45 @@ func encodePushPop(ins Instruction, isPush bool) ([]byte, bool) {
 	if len(ins.Operands) != 1 {
 		return nil, false
 	}
-	r, ok := ins.Operands[0].(RegOperand)
+	switch op := ins.Operands[0].(type) {
+	case ImmOperand:
+		if !isPush || op.Value < -128 || op.Value > 127 {
+			return nil, false
+		}
+		return []byte{0x6A, byte(op.Value)}, true
+	case RegOperand:
+		p := rexForOperand(false, Reg{}, op.Reg)
+		if isPush {
+			return append(p, 0x50+byte(op.Reg.Low3)), true
+		}
+		return append(p, 0x58+byte(op.Reg.Low3)), true
+	default:
+		return nil, false
+	}
+}
+
+func encodeShiftImm(ins Instruction, ext byte) ([]byte, bool) {
+	if len(ins.Operands) != 2 {
+		return nil, false
+	}
+	reg, ok := ins.Operands[0].(RegOperand)
 	if !ok {
 		return nil, false
 	}
-	if strings.ToLower(r.Reg.Name) != "rbp" {
+	imm, ok := ins.Operands[1].(ImmOperand)
+	if !ok || imm.Value < 0 || imm.Value > 255 {
 		return nil, false
 	}
-	if isPush {
-		return []byte{0x55}, true
+	width := reg.Reg.Width
+	p := rexForOperand(width == 64, Reg{}, reg.Reg)
+	switch width {
+	case 16:
+		p = append([]byte{0x66}, p...)
+	case 32, 64:
+	default:
+		return nil, false
 	}
-	return []byte{0x5D}, true
+	return append(p, 0xC1, modrm(3, int(ext), reg.Reg.Low3), byte(imm.Value)), true
 }
 
 func encodeDesc(ins Instruction, regField int) ([]byte, bool) {
@@ -480,10 +530,8 @@ func encodeDesc(ins Instruction, regField int) ([]byte, bool) {
 		return nil, false
 	}
 	p := rexForOperand(mem.Width == 64, Reg{}, mem.Base)
-	mod, disp := encodeMemDisp(mem)
-	m := modrm(int(mod), regField, mem.Base.Low3)
-	bytes := []byte{0x0F, 0x01, m}
-	bytes = append(bytes, disp...)
+	bytes := []byte{0x0F, 0x01}
+	bytes = append(bytes, encodeMemModRM(regField, mem)...)
 	return append(p, bytes...), true
 }
 
@@ -492,6 +540,18 @@ func encodeJmp(ins Instruction, start int, fixups *[]branchFixup) ([]byte, bool)
 }
 
 func encodeCall(ins Instruction, start int, fixups *[]branchFixup) ([]byte, bool) {
+	if len(ins.Operands) == 1 {
+		if reg, ok := ins.Operands[0].(RegOperand); ok {
+			p := rexForOperand(false, Reg{}, reg.Reg)
+			return append(p, 0xFF, modrm(3, 2, reg.Reg.Low3)), true
+		}
+		if mem, ok := ins.Operands[0].(MemOperand); ok {
+			p := rexForOperand(false, Reg{}, mem.Base)
+			out := append(p, 0xFF)
+			out = append(out, encodeMemModRM(2, mem)...)
+			return out, true
+		}
+	}
 	return encodeNearBranch(ins, start, 5, 0xE8, false, fixups)
 }
 
@@ -547,8 +607,23 @@ func encodeMemDisp(mem MemOperand) (byte, []byte) {
 	return 2, out
 }
 
+func encodeMemModRM(regField int, mem MemOperand) []byte {
+	mod, disp := encodeMemDisp(mem)
+	rm := mem.Base.Low3
+	if rm == 4 {
+		out := []byte{modrm(int(mod), regField, 4), sib(0, 4, rm)}
+		return append(out, disp...)
+	}
+	out := []byte{modrm(int(mod), regField, rm)}
+	return append(out, disp...)
+}
+
 func modrm(mod, reg, rm int) byte {
 	return byte((mod << 6) | (reg << 3) | rm)
+}
+
+func sib(scale, index, base int) byte {
+	return byte((scale << 6) | (index << 3) | base)
 }
 
 func rexForOperand(w bool, reg, rm Reg) []byte {

@@ -64,16 +64,30 @@ func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
 	}
 	entryOffset := int(entryRVA - 0x1000)
 	entryCode := image.Sections[0].Data[entryOffset:]
-	if !bytes.Contains(entryCode, []byte{0x48, 0x8B, 0xF9}) {
-		t.Fatal("missing mov rdi, rcx")
-	}
-	if !bytes.Contains(entryCode, []byte{0x48, 0x8B, 0xF2}) {
-		t.Fatal("missing mov rsi, rdx")
+	for name, pattern := range map[string][]byte{
+		"stack frame":                    {0x55, 0x48, 0x89, 0xE5},
+		"delegated hardware allocation":  {0x48, 0x83, 0xEC, 0x40},
+		"store image handle":             {0x48, 0x89, 0x4D, 0xC0},
+		"load boot services table":       {0x48, 0x8B, 0x42, 0x60},
+		"store boot services table":      {0x48, 0x89, 0x45, 0xC8},
+		"pass delegated hardware record": {0x48, 0x8B, 0xFD, 0x48, 0x83, 0xC7, 0xC0},
+	} {
+		if !bytes.Contains(entryCode, pattern) {
+			t.Fatalf("entry adapter missing %s pattern %#x", name, pattern)
+		}
 	}
 
-	callOffsets := allOffsets(entryCode, 0xE8)
+	setupEnd := bytes.Index(entryCode, []byte{0x48, 0x8B, 0xFD, 0x48, 0x83, 0xC7, 0xC0})
+	if setupEnd < 0 {
+		t.Fatal("missing final delegated hardware argument setup")
+	}
+	setupEnd += 7
+	callOffsets := allOffsets(entryCode[setupEnd:], 0xE8)
 	if len(callOffsets) < 2 {
 		t.Fatalf("expected two adapter calls, got %d", len(callOffsets))
+	}
+	for i := range callOffsets {
+		callOffsets[i] += setupEnd
 	}
 
 	firstCall := callOffsets[0]

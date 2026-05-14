@@ -134,6 +134,10 @@ func (c *checker) checkImageSignatures() {
 			c.error(delegated.SpanV, diag.SEM0005, "delegated_hardware phase must have one parameter")
 			continue
 		}
+		if len(owned.Params) != 1 {
+			c.error(owned.SpanV, diag.SEM0005, "owned_hardware phase must have one parameter")
+			continue
+		}
 		if delegated.Params[0].Type != "DelegatedHardware" {
 			c.error(delegated.Params[0].Span, diag.SEM0005, "delegated_hardware phase must accept DelegatedHardware")
 		}
