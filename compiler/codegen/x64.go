@@ -15,12 +15,18 @@ const diagnosticPhase = "cg"
 type Frame struct {
 	Slots            map[ir.Value]int
 	ObjectSlots      map[ir.Value]int
+	FrameSaves       map[*ir.FrameBegin]frameSave
 	Size             int
 	ReturnType       ir.Type
 	ContinuationSlot int
 	RecordReturnSlot int
 	HasRecordReturn  bool
 	PreserveStackRet bool
+}
+
+type frameSave struct {
+	Parent          ir.Value
+	SavedOffsetSlot int64
 }
 
 type compileContext struct {
@@ -99,6 +105,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}
 		units = append(units, unit)
 	}
+	units = append(units, compileMemoryTrapUnit())
 
 	sections := []Section{{Name: ".text", Data: nil, Characteristics: 0x60000020}}
 	symbols := map[string]uint64{}
@@ -270,6 +277,17 @@ func emitCallReloc(e *Emitter, symbol string) {
 	e.CallReloc = append(e.CallReloc, internalReloc{Offset: uint64(len(e.Code) - 4), Symbol: symbol})
 }
 
+func compileMemoryTrapUnit() compiledUnit {
+	return compiledUnit{
+		Symbol: "_wrela_memory_oom",
+		Bytes: []byte{
+			0xFA,
+			0xF4,
+			0xEB, 0xFD,
+		},
+	}
+}
+
 type builtDataSection struct {
 	Section Section
 	Offsets map[string]uint64
@@ -329,10 +347,17 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitConst(e, v, frame)
 			case *ir.Local:
 				// Local slots are allocated by the frame builder.
+				continue
 			case *ir.StringLiteral:
 				emitStringLiteral(e, v, frame)
 			case *ir.Construct:
 				emitConstruct(e, v, frame)
+			case *ir.FrameBegin:
+				emitFrameBegin(e, v, frame)
+			case *ir.ArenaReserve:
+				emitArenaReserve(e, v, frame)
+			case *ir.FrameEnd:
+				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
 				emitCopy(e, v, frame)
 			case *ir.Binary:
@@ -414,6 +439,7 @@ func buildFrame(fn ir.Function, ctx compileContext) Frame {
 	offset := 0
 	slots := map[ir.Value]int{}
 	objectSlots := map[ir.Value]int{}
+	frameSaves := map[*ir.FrameBegin]frameSave{}
 	hasRecordReturn := false
 	continuationSlot := 0
 	recordReturnSlot := 0
@@ -436,6 +462,13 @@ func buildFrame(fn ir.Function, ctx compileContext) Frame {
 		if _, ok := slots[v]; ok {
 			continue
 		}
+		if frameBegin, ok := v.(*ir.FrameBegin); ok {
+			offset += 8
+			frameSaves[frameBegin] = frameSave{
+				Parent:          frameBegin.Parent,
+				SavedOffsetSlot: int64(-offset),
+			}
+		}
 		if needsObjectSlot(ctx, v) {
 			size := objectStorageSize(ctx, v)
 			offset += size
@@ -448,6 +481,7 @@ func buildFrame(fn ir.Function, ctx compileContext) Frame {
 	return Frame{
 		Slots:            slots,
 		ObjectSlots:      objectSlots,
+		FrameSaves:       frameSaves,
 		Size:             layout.AlignUp(offset, 16),
 		ReturnType:       returnType,
 		ContinuationSlot: continuationSlot,
@@ -461,6 +495,8 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 	switch v := value.(type) {
 	case *ir.Construct, *ir.StringLiteral:
 		return true
+	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaPlace:
+		return true
 	case *ir.Call:
 		return ctx.shouldPassRecordReturn(v.Type)
 	default:
@@ -469,7 +505,16 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 }
 
 func objectStorageSize(ctx compileContext, value ir.Value) int {
-	size := ctx.storageSize(valueTypeName(value))
+	typ := valueType(value)
+	if info, ok := ctx.typeInfo(typ); ok {
+		if info.StorageSize > 0 {
+			return info.StorageSize
+		}
+		if info.Size > 0 {
+			return info.Size
+		}
+	}
+	size := ctx.storageSize(typ.Name)
 	if size <= 0 {
 		return 8
 	}
@@ -539,6 +584,12 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.Construct:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.StringLiteral:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.FrameBegin:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.ArenaReserve:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.ArenaPlace:
 		return ctx.representationSize(v.Type.Name)
 	default:
 		return 8
@@ -999,10 +1050,17 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitConst(e, v, frame)
 		case *ir.Local:
 			// Local slots are allocated by the frame builder.
+			continue
 		case *ir.StringLiteral:
 			emitStringLiteral(e, v, frame)
 		case *ir.Construct:
 			emitConstruct(e, v, frame)
+		case *ir.FrameBegin:
+			emitFrameBegin(e, v, frame)
+		case *ir.ArenaReserve:
+			emitArenaReserve(e, v, frame)
+		case *ir.FrameEnd:
+			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
 			emitCopy(e, v, frame)
 		case *ir.Binary:
@@ -1105,6 +1163,147 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 	}
 	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
 	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitFrameBegin(e *Emitter, op *ir.FrameBegin, frame Frame) {
+	save, ok := frame.FrameSaves[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing frame save slot"})
+		return
+	}
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing frame object slot"})
+		return
+	}
+
+	parent := asm.MustLookup("rdi")
+	saved := asm.MustLookup("rax")
+	length := asm.MustLookup("r10")
+	end := asm.MustLookup("r11")
+	limit := asm.MustLookup("rcx")
+	base := asm.MustLookup("rsi")
+
+	if !emitValueAddressToReg(e, frame, op.Parent, parent) {
+		return
+	}
+	emitLoadMemToReg(e, saved, parent, 16, 64)
+	emitStoreSlotFromReg(e, saved, int(save.SavedOffsetSlot), 64)
+	emitLoadValue(e, frame, op.Length, length)
+	emitRegRegMove(e, end, saved)
+	emitRegRegOp(e, 0x01, end, length)
+	emitLoadMemToReg(e, limit, parent, 8, 64)
+	emitTrapIfAbove(e, end, limit)
+
+	emitLoadMemToReg(e, base, parent, 0, 64)
+	emitRegRegOp(e, 0x01, base, saved)
+	emitStoreSlotFromReg(e, base, objectSlot, 64)
+	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
+	emitMovImmToReg(e, saved, 0)
+	emitStoreSlotFromReg(e, saved, objectSlot+16, 64)
+	emitStoreMemFromReg(e, parent, 16, end, 64)
+	emitSlotFromBase(e, saved, asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, saved, slot, 64)
+}
+
+func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing reserve object slot"})
+		return
+	}
+
+	arena := asm.MustLookup("rdi")
+	next := asm.MustLookup("rax")
+	length := asm.MustLookup("r10")
+	end := asm.MustLookup("r11")
+	limit := asm.MustLookup("rcx")
+	align := asm.MustLookup("r9")
+	base := asm.MustLookup("rsi")
+
+	if !emitValueAddressToReg(e, frame, op.Arena, arena) {
+		return
+	}
+	emitLoadMemToReg(e, next, arena, 16, 64)
+	emitLoadValue(e, frame, op.Align, align)
+	emitTrapIfZero(e, align)
+	emitRegRegMove(e, end, align)
+	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
+		asm.RegOperand{Reg: end},
+		asm.ImmOperand{Value: 1},
+	}})
+	emitRegRegOp(e, 0x01, next, end)
+	emitNegReg(e, align)
+	emitRegRegOp(e, 0x21, next, align)
+	emitLoadValue(e, frame, op.Length, length)
+	emitRegRegMove(e, end, next)
+	emitRegRegOp(e, 0x01, end, length)
+	emitLoadMemToReg(e, limit, arena, 8, 64)
+	emitTrapIfAbove(e, end, limit)
+
+	emitLoadMemToReg(e, base, arena, 0, 64)
+	emitRegRegOp(e, 0x01, base, next)
+	emitStoreSlotFromReg(e, base, objectSlot, 64)
+	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
+	emitStoreMemFromReg(e, arena, 16, end, 64)
+	emitSlotFromBase(e, next, asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, next, slot, 64)
+}
+
+func emitFrameEnd(e *Emitter, op *ir.FrameEnd, frame Frame) {
+	save, ok := frame.FrameSaves[op.Frame]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing frame end save slot"})
+		return
+	}
+	parent := asm.MustLookup("rdi")
+	saved := asm.MustLookup("rax")
+	if !emitValueAddressToReg(e, frame, save.Parent, parent) {
+		return
+	}
+	emitLoadSlotToReg(e, saved, int(save.SavedOffsetSlot), 64)
+	emitStoreMemFromReg(e, parent, 16, saved, 64)
+}
+
+func emitTrapIfAbove(e *Emitter, value asm.Reg, limit asm.Reg) {
+	ok := e.newLabel("arena_bounds_ok")
+	emitCmpRegReg(e, value, limit)
+	e.emitJcc(0x86, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+}
+
+func emitTrapIfZero(e *Emitter, value asm.Reg) {
+	ok := e.newLabel("arena_nonzero_ok")
+	zero := asm.MustLookup("rcx")
+	emitMovImmToReg(e, zero, 0)
+	emitCmpRegReg(e, value, zero)
+	e.emitJcc(0x85, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+}
+
+func emitValueAddressToReg(e *Emitter, frame Frame, value ir.Value, dst asm.Reg) bool {
+	base, disp, ok := emitValueAddress(e, frame, value)
+	if !ok {
+		return false
+	}
+	emitRegRegMove(e, dst, base)
+	if disp != 0 {
+		e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+			asm.RegOperand{Reg: dst},
+			asm.ImmOperand{Value: disp},
+		}})
+	}
+	return true
 }
 
 func emitCopy(e *Emitter, op *ir.Copy, frame Frame) {
@@ -1392,6 +1591,12 @@ func valueType(value ir.Value) ir.Type {
 		return v.Type
 	case *ir.StringLiteral:
 		return v.Type
+	case *ir.FrameBegin:
+		return v.Type
+	case *ir.ArenaReserve:
+		return v.Type
+	case *ir.ArenaPlace:
+		return v.Type
 	default:
 		return ir.Type{}
 	}
@@ -1451,6 +1656,14 @@ func emitRegRegMove(e *Emitter, dst asm.Reg, src asm.Reg) {
 		asm.RegOperand{Reg: dst},
 		asm.RegOperand{Reg: src},
 	}})
+}
+
+func emitNegReg(e *Emitter, reg asm.Reg) {
+	rex := byte(0x48)
+	if reg.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0xF7, encodeModRM(3, 3, reg.Low3))
 }
 
 func registerForWidth(reg asm.Reg, width int) asm.Reg {

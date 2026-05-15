@@ -35,7 +35,7 @@ func TestCompileReturnConstantPrologueEpilogue(t *testing.T) {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
 	}
 
-	code := image.Sections[0].Data
+	code := symbolBytes(t, image, "answer")
 	prologue := []byte{0x55, 0x48, 0x89, 0xE5, 0x48, 0x81, 0xEC, 0x10, 0x00, 0x00, 0x00}
 	if len(code) < len(prologue) {
 		t.Fatalf("generated code too short: %d", len(code))
