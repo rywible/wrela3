@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestArgsMatchAppendixG(t *testing.T) {
@@ -52,6 +55,132 @@ func TestArgsAllowsCPUOverride(t *testing.T) {
 	if got[3] != "Haswell-v3" {
 		t.Fatalf("cpu arg = %q, want Haswell-v3", got[3])
 	}
+}
+
+func TestRunWritesInputTextToQEMUStdin(t *testing.T) {
+	tmp := t.TempDir()
+	seen := filepath.Join(tmp, "stdin.txt")
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	script := "#!/usr/bin/env sh\ncat > " + seen + "\necho 'serial interrupt: !'\n"
+	if err := os.WriteFile(fakeQEMU, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	out, err := Run(Options{
+		QEMUBinary:  fakeQEMU,
+		OVMFCode:    filepath.Join(tmp, "code.fd"),
+		OVMFVars:    filepath.Join(tmp, "vars.fd"),
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		InputText:   "!",
+		SuccessText: "serial interrupt: !",
+	})
+	if err != nil {
+		t.Fatalf("Run error = %v, output:\n%s", err, out)
+	}
+	data, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	if string(data) != "!" {
+		t.Fatalf("stdin = %q, want !", data)
+	}
+}
+
+func TestArgsAddsEduAndIvshmemDevices(t *testing.T) {
+	got := strings.Join(Args(Options{
+		OVMFCode:          "/code.fd",
+		OVMFVars:          "/vars.fd",
+		ESPDir:            "esp",
+		EnableEdu:         true,
+		EnableIvshmemMsix: true,
+		IvshmemSocketPath: "/tmp/ivshmem.sock",
+	}), " ")
+	for _, want := range []string{
+		"-device edu,addr=0x5",
+		"-chardev socket,path=/tmp/ivshmem.sock,id=ivshmem0",
+		"-chardev socket,path=/tmp/ivshmem.sock,id=ivshmem1",
+		"-device ivshmem-doorbell,vectors=1,chardev=ivshmem0,addr=0x6",
+		"-device ivshmem-doorbell,vectors=1,chardev=ivshmem1,addr=0x7",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("QEMU args missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestIvshmemServerArgs(t *testing.T) {
+	got := IvshmemServerArgs(IvshmemServerOptions{
+		SocketPath: "/tmp/ivshmem.sock",
+		PidPath:    "/tmp/ivshmem.pid",
+		ShmName:    "wrela-ivshmem",
+		Size:       "1M",
+		Vectors:    1,
+	})
+	want := []string{"-S", "/tmp/ivshmem.sock", "-p", "/tmp/ivshmem.pid", "-m", "wrela-ivshmem", "-l", "1M", "-n", "1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("IvshmemServerArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunDoesNotStartQEMUWhenIvshmemServerSocketIsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	fakeServer := filepath.Join(tmp, "fake-ivshmem-server.sh")
+	pidFile := filepath.Join(tmp, "server.pid")
+	serverScript := "#!/usr/bin/env sh\necho $$ > " + pidFile + "\nsleep 30\n"
+	if err := os.WriteFile(fakeServer, []byte(serverScript), 0o755); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	qemuRan := filepath.Join(tmp, "qemu-ran")
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	qemuScript := "#!/usr/bin/env sh\ntouch " + qemuRan + "\n"
+	if err := os.WriteFile(fakeQEMU, []byte(qemuScript), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	_, err := Run(Options{
+		QEMUBinary:            fakeQEMU,
+		OVMFCode:              filepath.Join(tmp, "code.fd"),
+		OVMFVars:              filepath.Join(tmp, "vars.fd"),
+		ESPDir:                filepath.Join(tmp, "esp"),
+		ImagePath:             image,
+		EnableIvshmemMsix:     true,
+		IvshmemServerBinary:   fakeServer,
+		IvshmemSocketPath:     filepath.Join(tmp, "missing.sock"),
+		IvshmemStartupTimeout: 20 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatalf("expected ivshmem startup error")
+	}
+	if _, statErr := os.Stat(qemuRan); !os.IsNotExist(statErr) {
+		t.Fatalf("QEMU must not start before ivshmem socket is ready")
+	}
+	rawPID, readErr := os.ReadFile(pidFile)
+	if readErr == nil {
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+		if processRunning(pid) {
+			t.Fatalf("ivshmem server pid %d still running after startup failure", pid)
+		}
+	}
+}
+
+func processRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func TestRunReturnsSuccessWhenExpectedOutputAppearsBeforeProcessExit(t *testing.T) {
