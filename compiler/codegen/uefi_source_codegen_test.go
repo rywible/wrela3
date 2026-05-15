@@ -322,6 +322,78 @@ func TestPciInterruptConfiguratorWalksCapabilities(t *testing.T) {
 	}
 }
 
+func TestCacheArenaPutBytesContainsEvictionBump(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	method := asmMethodFromSem(t, checked, "machine.x86_64.cache_memory", "CacheArena", "put_bytes")
+	instructions, ds, code := lowerAndEncodeAsmMethod(method)
+	if len(ds) != 0 {
+		t.Fatalf("lower/encode cache put diagnostics: %#v", ds)
+	}
+	if len(code) == 0 {
+		t.Fatal("cache put compiled to empty code")
+	}
+	for _, label := range []string{"slot_offset_loop", "slot_ready", "copy_loop", "copy_done", "victim_ready"} {
+		if !hasAsmLabel(instructions, label) {
+			t.Fatalf("cache put missing label %q in:\n%s", label, method.Body)
+		}
+	}
+	signatures := strings.Join(instructionSignatures(instructions), "\n")
+	for _, want := range []string{
+		"add r13 imm",
+		"mov r11 [r11]",
+		"mov [r11] rsi",
+		"mov [r11+8] r12",
+		"mov [rdi+24] r11",
+		"mov [r10] imm",
+	} {
+		if !strings.Contains(signatures, want) {
+			t.Fatalf("cache put missing lowered instruction %q in:\n%s", want, signatures)
+		}
+	}
+}
+
+func TestCacheArenaGetBytesCopiesIntoFrame(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	method := asmMethodFromSem(t, checked, "machine.x86_64.cache_memory", "CacheArena", "get_bytes")
+	instructions, ds := lowerAsmMethodInstructions(method)
+	if len(ds) != 0 {
+		t.Fatalf("lower cache get diagnostics: %#v", ds)
+	}
+	for _, label := range []string{"get_slot_loop", "get_hit", "frame_has_space", "get_copy_loop", "get_copy_done", "get_miss"} {
+		if !hasAsmLabel(instructions, label) {
+			t.Fatalf("cache get missing label %q in:\n%s", label, method.Body)
+		}
+	}
+
+	unit, ds := compileAsmMethodUnit(method)
+	if len(ds) != 0 {
+		t.Fatalf("compile cache get diagnostics: %#v", ds)
+	}
+	foundOOM := false
+	for _, rel := range unit.CallReloc {
+		if rel.Symbol == "_wrela_memory_oom" {
+			foundOOM = true
+			break
+		}
+	}
+	if !foundOOM {
+		t.Fatalf("cache get must call _wrela_memory_oom on frame reserve failure: %#v", unit.CallReloc)
+	}
+
+	signatures := strings.Join(instructionSignatures(instructions), "\n")
+	for _, want := range []string{
+		"mov r8 [r8]",
+		"mov [rdx+16] r15",
+		"mov [r10] imm",
+		"mov [r10+8] r11",
+		"mov [r10+16] r14",
+	} {
+		if !strings.Contains(signatures, want) {
+			t.Fatalf("cache get missing lowered instruction %q in:\n%s", want, signatures)
+		}
+	}
+}
+
 func hasAsmLabel(instructions []asm.Instruction, label string) bool {
 	for _, in := range instructions {
 		if in.Label == label {
@@ -589,6 +661,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),

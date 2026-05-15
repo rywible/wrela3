@@ -1,6 +1,6 @@
 module machine.x86_64.cache_memory
 
-use { Bytes, MutableBytes } from machine.x86_64.executor_memory
+use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
 
 data CacheLookup {
     hit: Bool
@@ -17,4 +17,139 @@ class CacheArena {
     slot_count: U64
     slot_size: U64
     next_victim: U64
+
+    asm fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult {
+        mov r11, [rdi + CacheArena.slot_size]
+        mov r12, [rdx + Bytes.length]
+        cmp r12, r11
+        jle put_fits
+        mov [r10], 0
+        mov [r10 + 8], 0
+        mov rax, r10
+        ret
+
+put_fits:
+        mov r11, [rdi + CacheArena.storage]
+        mov r11, [r11 + MutableBytes.address]
+        mov r12, [rdi + CacheArena.next_victim]
+        mov r13, [rdi + CacheArena.slot_size]
+        add r13, 16
+
+slot_offset_loop:
+        cmp r12, 0
+        jle slot_ready
+        add r11, r13
+        sub r12, 1
+        jmp slot_offset_loop
+
+slot_ready:
+        mov [r11], rsi
+        mov r12, [rdx + Bytes.length]
+        mov [r11 + 8], r12
+        mov r13, [rdx + Bytes.address]
+        add r11, 16
+
+copy_loop:
+        cmp r12, 0
+        jle copy_done
+        mov al, [r13]
+        mov [r11], al
+        add r13, 1
+        add r11, 1
+        sub r12, 1
+        jmp copy_loop
+
+copy_done:
+        mov r11, [rdi + CacheArena.next_victim]
+        add r11, 1
+        mov r12, [rdi + CacheArena.slot_count]
+        cmp r11, r12
+        jl victim_ready
+        mov r11, 0
+
+victim_ready:
+        mov [rdi + CacheArena.next_victim], r11
+        mov [r10], 1
+        mov [r10 + 8], 1
+        mov rax, r10
+        ret
+    }
+
+    asm fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup {
+        mov r8, [rdi + CacheArena.storage]
+        mov r8, [r8 + MutableBytes.address]
+        mov r9, [rdi + CacheArena.slot_count]
+        mov r15, [rdi + CacheArena.slot_size]
+        add r15, 16
+
+get_slot_loop:
+        cmp r9, 0
+        jle get_miss
+        mov rax, [r8]
+        cmp rax, rsi
+        je get_hit
+        add r8, r15
+        sub r9, 1
+        jmp get_slot_loop
+
+get_hit:
+        mov r12, [r8 + 8]
+        mov r13, r8
+        add r13, 16
+
+        mov r14, [rdx + ArenaFrame.next_offset]
+        add r14, 7
+        mov rax, -8
+        and r14, rax
+        mov r15, r14
+        add r15, r12
+        mov rax, [rdx + ArenaFrame.arena_length]
+        cmp r15, rax
+        jle frame_has_space
+        call _wrela_memory_oom
+
+frame_has_space:
+        mov [rdx + ArenaFrame.next_offset], r15
+        mov r11, [rdx + ArenaFrame.arena_base]
+        add r11, r14
+
+        mov r14, r12
+        mov r15, r11
+
+get_copy_loop:
+        cmp r12, 0
+        jle get_copy_done
+        mov al, [r13]
+        mov [r15], al
+        add r13, 1
+        add r15, 1
+        sub r12, 1
+        jmp get_copy_loop
+
+get_copy_done:
+        mov [r10], 1
+        mov [r10 + 8], r11
+        mov [r10 + 16], r14
+        mov rax, r10
+        ret
+
+get_miss:
+        mov [r10], 0
+        mov [r10 + 8], 0
+        mov [r10 + 16], 0
+        mov rax, r10
+        ret
+    }
+}
+
+class ResponseCache {
+    memory: CacheArena
+
+    fn get(self, key: U64, into: ArenaFrame) -> CacheLookup {
+        return self.memory.get_bytes(key = key, into = into)
+    }
+
+    fn put(self, key: U64, bytes: Bytes) -> CachePutResult {
+        return self.memory.put_bytes(key = key, bytes = bytes)
+    }
 }
