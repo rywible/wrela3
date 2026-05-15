@@ -314,3 +314,214 @@ executor Worker {
 		t.Fatalf("expected SEM0026, got %#v", diags)
 	}
 }
+
+func TestFrameLifetimeFlowsThroughHelperMethod(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class Parser {
+    fn parse(self, heap: ArenaFrame) -> Message {
+        let msg = heap.place(Message(id = 1))
+        return msg
+    }
+}
+executor Worker {
+    memory: ExecutorMemory
+    parser: Parser
+    start fn run(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let msg = self.parser.parse(heap = tick)
+        }
+        while true {}
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if len(diags) != 0 {
+		t.Fatalf("check diagnostics: %#v", diags)
+	}
+}
+
+func TestHelperCannotHideFrameEscape(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class Parser {
+    saved: Message
+    fn parse(self, heap: ArenaFrame) -> Message {
+        let msg = heap.place(Message(id = 1))
+        self.saved = msg
+        return msg
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if !hasCode(diags, diag.SEM0025) {
+		t.Fatalf("expected SEM0025, got %#v", diags)
+	}
+}
+
+func TestMethodLifetimeNamedArgumentsUseParameterMapping(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+data Box { msg: Message }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class Parser {
+    fn parse(self, left: ArenaFrame, right: ArenaFrame) -> Message {
+        let msg = right.place(Message(id = 1))
+        return msg
+    }
+}
+executor Worker {
+    memory: ExecutorMemory
+    parser: Parser
+    start fn run(self) -> never {
+        with self.memory.frame(length = 128) as left_frame {
+            let parent_box = left_frame.place(Box(msg = Message(id = 0)))
+            with left_frame.frame(length = 64) as child_frame {
+                parent_box.msg = self.parser.parse(right = child_frame, left = left_frame)
+            }
+        }
+        while true {}
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if !hasCode(diags, diag.SEM0025) {
+		t.Fatalf("expected SEM0025, got %#v", diags)
+	}
+}
+
+func TestMethodLifetimeForwardReferenceAcrossTypes(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    parser: Parser
+    start fn run(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let msg = self.parser.parse(heap = tick)
+        }
+        while true {}
+    }
+}
+class Parser {
+    fn parse(self, heap: ArenaFrame) -> Message {
+        let msg = heap.place(Message(id = 1))
+        return msg
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if len(diags) != 0 {
+		t.Fatalf("check diagnostics: %#v", diags)
+	}
+}
+
+func TestFrameParameterParentsNestedFrame(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+data Box { msg: Message }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class Parser {
+    fn fill_child(self, heap: ArenaFrame) -> Message {
+        let msg = heap.place(Message(id = 1))
+        with heap.frame(length = 64) as child {
+            let box = child.place(Box(msg = Message(id = 0)))
+            box.msg = msg
+        }
+        return msg
+    }
+}
+executor Worker {
+    memory: ExecutorMemory
+    parser: Parser
+    start fn run(self) -> never {
+        with self.memory.frame(length = 128) as tick {
+            let msg = self.parser.fill_child(heap = tick)
+        }
+        while true {}
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if len(diags) != 0 {
+		t.Fatalf("check diagnostics: %#v", diags)
+	}
+}

@@ -33,6 +33,23 @@ type Lifetime struct {
 	Scope int
 }
 
+type MethodLifetimeSummary struct {
+	ReturnFromParam int
+	ReturnKind      LifetimeKind
+	ReturnStatic    bool
+	ReturnRoot      bool
+	Terminates      bool
+	Invalid         bool
+}
+
+type methodLifetimeTarget struct {
+	ModuleName string
+	Type       *Type
+	Method     ast.MethodDecl
+	ReturnType *Type
+	Context    ContextKind
+}
+
 func ClassifyMemoryType(t *Type) MemoryKind {
 	if t == nil {
 		return MemoryKindNone
@@ -69,6 +86,193 @@ func isCanonicalFrameIntrinsic(moduleName string, typ *Type, method ast.MethodDe
 		params = params[1:]
 	}
 	return len(params) == 1 && params[0].Name == "length" && params[0].Type == "U64"
+}
+
+func (c *checker) registerMethodLifetimeTargets() {
+	if c.methodLifetimeTargets == nil {
+		c.methodLifetimeTargets = map[string]methodLifetimeTarget{}
+	}
+	for _, mod := range c.modules {
+		for _, decl := range mod.Decls {
+			var typeName string
+			var methods []ast.MethodDecl
+			switch d := decl.(type) {
+			case *ast.ClassDecl:
+				typeName, methods = d.Name, d.Methods
+			case *ast.DriverDecl:
+				typeName, methods = d.Name, d.Methods
+			case *ast.DriverPathDecl:
+				typeName, methods = d.Name, d.Methods
+			case *ast.ExecutorDecl:
+				typeName, methods = d.Name, d.Methods
+			default:
+				continue
+			}
+			typ := c.index.resolveInScope(mod.Name, typeName)
+			for _, method := range methods {
+				if method.IsAsm || isCanonicalFrameIntrinsic(mod.Name, typ, method) {
+					continue
+				}
+				marker := ContextNormalMethod
+				returnType := c.mustType(mod.Name, method.Return)
+				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
+					marker = ContextOwnershipTransferAuthorityMethod
+				}
+				c.methodLifetimeTargets[methodLifetimeKey(typ, method.Name)] = methodLifetimeTarget{
+					ModuleName: mod.Name,
+					Type:       typ,
+					Method:     method,
+					ReturnType: returnType,
+					Context:    marker,
+				}
+			}
+		}
+	}
+}
+
+func (c *checker) ensureMethodLifetimeSummary(key string, span source.Span) MethodLifetimeSummary {
+	if summary, ok := c.methodLifetimeSummaries[key]; ok {
+		return summary
+	}
+	target, ok := c.methodLifetimeTargets[key]
+	if !ok {
+		return MethodLifetimeSummary{ReturnFromParam: -1, ReturnRoot: true, Terminates: true}
+	}
+	return c.checkMethodWithLifetimeSummary(key, target, span)
+}
+
+func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifetimeTarget, span source.Span) MethodLifetimeSummary {
+	moduleName := target.ModuleName
+	typ := target.Type
+	method := target.Method
+	summary := MethodLifetimeSummary{ReturnFromParam: -1}
+
+	if c.methodLifetimeSummaries == nil {
+		c.methodLifetimeSummaries = map[string]MethodLifetimeSummary{}
+	}
+	if c.activeMethodSummaries == nil {
+		c.activeMethodSummaries = map[string]bool{}
+	}
+	if c.activeMethodSummaries[key] {
+		c.error(span, diag.SEM0024, "recursive frame lifetime summary is not supported")
+		summary.Invalid = true
+		c.methodLifetimeSummaries[key] = summary
+		return summary
+	}
+
+	scope := c.newMethodLifetimeScope(moduleName, typ, method)
+	prev := c.currentMethodSummary
+	prevPhase := c.currentPhase
+	c.currentMethodSummary = &summary
+	c.currentPhase = method.Name
+	c.activeMethodSummaries[key] = true
+	terminates := c.checkStmtList(moduleName, method.Body, scope, target.ReturnType, target.Context)
+	summary.Terminates = terminates
+	delete(c.activeMethodSummaries, key)
+	c.currentPhase = prevPhase
+	c.currentMethodSummary = prev
+	c.methodLifetimeSummaries[key] = summary
+	return summary
+}
+
+func methodLifetimeKey(typ *Type, methodName string) string {
+	if typ == nil {
+		return "::" + methodName
+	}
+	return typ.Module + "." + typ.Name + "::" + methodName
+}
+
+func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method ast.MethodDecl) *Scope {
+	scope := NewScope(nil)
+	if len(method.Params) > 0 && method.Params[0].Name == "self" {
+		scope.Define("self", typ)
+		scope.DefineLifetime("self", Lifetime{Kind: LifetimeExecutorRoot})
+	}
+	explicitIndex := 0
+	for _, p := range method.Params {
+		if p.Name == "self" {
+			continue
+		}
+		paramType := c.mustType(moduleName, p.Type)
+		scope.Define(p.Name, paramType)
+		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeExecutorRoot})
+		}
+		explicitIndex++
+	}
+	return scope
+}
+
+func (c *checker) recordReturnLifetime(span source.Span, lifetime Lifetime) {
+	if c.currentMethodSummary == nil {
+		return
+	}
+	summary := c.currentMethodSummary
+	switch {
+	case lifetime.Kind == LifetimeStatic:
+		if summary.ReturnFromParam >= 0 {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+			return
+		}
+		summary.ReturnStatic = true
+	case (lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) && lifetime.Scope < 0:
+		paramIndex := -lifetime.Scope - 1
+		if summary.ReturnRoot || summary.ReturnStatic {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+			return
+		}
+		if summary.ReturnFromParam == -1 {
+			summary.ReturnFromParam = paramIndex
+			summary.ReturnKind = lifetime.Kind
+			return
+		}
+		if summary.ReturnFromParam != paramIndex || summary.ReturnKind != lifetime.Kind {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+		}
+	case lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy:
+		c.error(span, diag.SEM0024, "frame value cannot escape")
+		summary.Invalid = true
+	default:
+		if summary.ReturnFromParam >= 0 {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+			return
+		}
+		summary.ReturnRoot = true
+	}
+}
+
+func callArgForParam(method *Method, args []ast.NamedArg, paramIndex int) ast.Expr {
+	if method == nil || paramIndex < 0 {
+		return nil
+	}
+	params := method.Params
+	if len(params) > 0 && params[0].Name == "self" {
+		params = params[1:]
+	}
+	if paramIndex >= len(params) {
+		return nil
+	}
+	param := params[paramIndex]
+	positional := 0
+	for _, arg := range args {
+		if arg.Name != "" {
+			if arg.Name == param.Name {
+				return arg.Value
+			}
+			continue
+		}
+		if positional == paramIndex {
+			return arg.Value
+		}
+		positional++
+	}
+	return nil
 }
 
 func (c *checker) isFrameCall(moduleName string, expr ast.Expr, scope *Scope, ctx ContextKind) bool {
@@ -226,6 +430,10 @@ func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, 
 	if !IsArenaType(recvType) {
 		return nil
 	}
+	receiverLifetime := c.lifetimeOfExpr(expr.Receiver, scope)
+	if receiverLifetime.Kind == LifetimeUnknown {
+		receiverLifetime = Lifetime{Kind: LifetimeExecutorRoot}
+	}
 	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve") {
 		c.error(expr.SpanV, diag.SEM0016, "on handler cannot place or reserve arena memory")
 		return nil
@@ -242,11 +450,11 @@ func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, 
 			return nil
 		}
 		typ := c.typeConstructorExpr(moduleName, cons, scope, ctx)
-		c.rememberLifetime(expr, c.currentFrameLifetime())
+		c.rememberLifetime(expr, receiverLifetime)
 		return typ
 	case "reserve":
 		c.requireReserveArgs(moduleName, expr, scope, ctx)
-		c.rememberLifetime(expr, c.currentFrameLifetime())
+		c.rememberLifetime(expr, receiverLifetime)
 		return c.resolveType("machine.x86_64.executor_memory", "MutableBytes")
 	default:
 		return nil

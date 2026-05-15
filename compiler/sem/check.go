@@ -141,20 +141,24 @@ func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
 }
 
 type checker struct {
-	index                *Index
-	modules              []*ast.Module
-	currentType          *Type
-	currentPhase         string
-	diags                []diag.Diagnostic
-	ownedRoot            *Type
-	graph                ImageGraph
-	bindings             []InterruptBinding
-	runtimeBindings      []InterruptBinding
-	allowFrameCallExpr   bool
-	exprLifetimes        map[ast.Expr]Lifetime
-	frameLifetimeStack   []int
-	frameLifetimeParents map[int]int
-	nextFrameScope       int
+	index                   *Index
+	modules                 []*ast.Module
+	currentType             *Type
+	currentPhase            string
+	diags                   []diag.Diagnostic
+	ownedRoot               *Type
+	graph                   ImageGraph
+	bindings                []InterruptBinding
+	runtimeBindings         []InterruptBinding
+	allowFrameCallExpr      bool
+	exprLifetimes           map[ast.Expr]Lifetime
+	frameLifetimeStack      []int
+	frameLifetimeParents    map[int]int
+	nextFrameScope          int
+	methodLifetimeTargets   map[string]methodLifetimeTarget
+	methodLifetimeSummaries map[string]MethodLifetimeSummary
+	activeMethodSummaries   map[string]bool
+	currentMethodSummary    *MethodLifetimeSummary
 }
 
 type driverPathOwner struct {
@@ -345,6 +349,7 @@ func (c *checker) checkMethodTypesResolved(moduleName string, methods []ast.Meth
 }
 
 func (c *checker) checkDeclBodiesAndConstructors() {
+	c.registerMethodLifetimeTargets()
 	for _, mod := range c.modules {
 		for _, decl := range mod.Decls {
 			switch d := decl.(type) {
@@ -477,29 +482,14 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 			continue
 		}
 
-		marker := ContextNormalMethod
 		returnType := c.mustType(moduleName, method.Return)
-		if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
-			marker = ContextOwnershipTransferAuthorityMethod
-		}
 		if method.IsAsm {
 			continue
 		}
 
-		scope := NewScope(nil)
-		if len(method.Params) > 0 && method.Params[0].Name == "self" {
-			scope.Define("self", typ)
-		}
-		for _, p := range method.Params {
-			if p.Name == "self" {
-				continue
-			}
-			scope.Define(p.Name, c.mustType(moduleName, p.Type))
-		}
-		prevPhase := c.currentPhase
-		c.currentPhase = method.Name
-		terminates := c.checkStmtList(moduleName, method.Body, scope, returnType, marker)
-		c.currentPhase = prevPhase
+		key := methodLifetimeKey(typ, method.Name)
+		summary := c.ensureMethodLifetimeSummary(key, method.SpanV)
+		terminates := summary.Terminates
 		if returnType != nil && !terminates {
 			c.error(method.SpanV, diag.CG0001, "missing return")
 		}
@@ -660,7 +650,14 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		} else {
 			c.requireType(got, expectedReturn, s.Value.Span())
 		}
-		if lifetime := c.lifetimeOfExpr(s.Value, scope); lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheCopy {
+		lifetime := c.lifetimeOfExpr(s.Value, scope)
+		c.recordReturnLifetime(s.Value.Span(), lifetime)
+		if c.currentMethodSummary != nil &&
+			(lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) &&
+			lifetime.Scope < 0 {
+			return true
+		}
+		if lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy {
 			c.error(s.Value.Span(), diag.SEM0024, "frame value cannot escape")
 		}
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
@@ -1246,6 +1243,22 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
+	}
+	summary := c.ensureMethodLifetimeSummary(methodLifetimeKey(recvType, method.Name), expr.SpanV)
+	if !summary.Invalid {
+		if summary.ReturnFromParam >= 0 {
+			arg := callArgForParam(method, expr.Args, summary.ReturnFromParam)
+			argLifetime := c.lifetimeOfExpr(arg, scope)
+			if summary.ReturnKind == LifetimeCacheLookup || summary.ReturnKind == LifetimeCacheCopy {
+				c.rememberLifetime(expr, Lifetime{Kind: summary.ReturnKind, Scope: argLifetime.Scope})
+			} else {
+				c.rememberLifetime(expr, argLifetime)
+			}
+		} else if summary.ReturnStatic {
+			c.rememberLifetime(expr, Lifetime{Kind: LifetimeStatic})
+		} else {
+			c.rememberLifetime(expr, Lifetime{Kind: LifetimeExecutorRoot})
+		}
 	}
 	return method.Return
 }
