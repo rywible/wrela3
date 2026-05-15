@@ -300,6 +300,35 @@ type EntryAdapter struct {
 	OwnedHardwareType     string
 }
 
+type InterruptEvent struct {
+	Symbol         string
+	PathType       Type
+	EventType      Type
+	FunctionSymbol string
+}
+
+type OnHandler struct {
+	Symbol         string
+	ExecutorType   Type
+	PathField      string
+	EventType      Type
+	FunctionSymbol string
+}
+
+type InterruptBinding struct {
+	EventSymbol           string
+	HandlerSymbol         string
+	EventFunctionSymbol   string
+	HandlerFunctionSymbol string
+	ExecutorType          Type
+	PathField             string
+	PathFieldOffset       int
+	ContextSymbol         string
+	EventStorageSymbol    string
+	EventStorageSize      int
+	Vector                uint8
+}
+
 type AsmMethod struct {
 	Symbol       string
 	ReceiverType string
@@ -314,9 +343,12 @@ type AsmMethod struct {
 }
 
 type Program struct {
-	Functions  []Function
-	AsmMethods []AsmMethod
-	Data       []DataObject
-	Entry      EntryAdapter
-	Types      map[string]TypeInfo
+	Functions         []Function
+	AsmMethods        []AsmMethod
+	Data              []DataObject
+	Entry             EntryAdapter
+	Types             map[string]TypeInfo
+	InterruptEvents   []InterruptEvent
+	OnHandlers        []OnHandler
+	InterruptBindings []InterruptBinding
 }

@@ -246,7 +246,7 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 			Decls: []ast.Decl{&ast.ClassDecl{
 				Name: "OperatorSuite",
 				Methods: []ast.MethodDecl{{
-					Name: "run",
+					Name:   "run",
 					Return: "U64",
 					Params: []ast.Param{
 						{Name: "left", Type: "U64"},
@@ -256,7 +256,7 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 						&ast.LetStmt{
 							Name: "orValue",
 							Expr: &ast.BinaryExpr{
-								Op:   "|",
+								Op:    "|",
 								Left:  &ast.NameExpr{Name: "left"},
 								Right: &ast.NameExpr{Name: "right"},
 							},
@@ -264,13 +264,13 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 						&ast.LetStmt{
 							Name: "shiftedLeft",
 							Expr: &ast.BinaryExpr{
-								Op:   "<<",
-								Left: &ast.NameExpr{Name: "orValue"},
+								Op:    "<<",
+								Left:  &ast.NameExpr{Name: "orValue"},
 								Right: &ast.IntLiteral{Value: "11"},
 							},
 						},
 						&ast.ReturnStmt{Value: &ast.BinaryExpr{
-							Op:   ">>",
+							Op:    ">>",
 							Left:  &ast.NameExpr{Name: "shiftedLeft"},
 							Right: &ast.IntLiteral{Value: "3"},
 						}},
@@ -281,7 +281,7 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
 			"test.shift": {
 				"OperatorSuite": typeDecl,
-				"U64":          bitOpType,
+				"U64":           bitOpType,
 			},
 		}},
 	}
@@ -311,6 +311,100 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("binary ops[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestLowerInterruptEventsAndOnHandlers(t *testing.T) {
+	checked := checkedProgramForTest(t, `
+module machine.x86_64.serial
+
+data SerialInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+}
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {
+        let seen = event.vector
+    }
+}
+`)
+	eventType, ok := checked.Index.Lookup("machine.x86_64.serial", "SerialInterrupt")
+	if !ok {
+		t.Fatal("missing SerialInterrupt type")
+	}
+	checked.InterruptBindings = []sem.InterruptBinding{{
+		ExecutorModule: "machine.x86_64.serial",
+		ExecutorType:   "ConsoleExec",
+		PathField:      "serial",
+		PathType:       "machine.x86_64.serial.SerialConsolePath",
+		EventType:      eventType,
+		Vector:         0x40,
+	}}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+
+	eventSymbol := symbolName("event_fn", "machine.x86_64.serial", "SerialConsolePath", "interrupt")
+	handlerSymbol := symbolName("on_fn", "machine.x86_64.serial", "ConsoleExec", "serial", "interrupt")
+	eventFn := findFunction(program, eventSymbol)
+	if eventFn == nil {
+		t.Fatalf("missing lowered interrupt event function %q", eventSymbol)
+	}
+	if len(eventFn.Params) != 1 {
+		t.Fatalf("event params = %d, want self", len(eventFn.Params))
+	}
+	handlerFn := findFunction(program, handlerSymbol)
+	if handlerFn == nil {
+		t.Fatalf("missing lowered on handler function %q", handlerSymbol)
+	}
+	if len(handlerFn.Params) != 2 {
+		t.Fatalf("handler params = %d, want self and event", len(handlerFn.Params))
+	}
+
+	if len(program.InterruptEvents) != 1 {
+		t.Fatalf("interrupt events = %#v, want one", program.InterruptEvents)
+	}
+	if got := program.InterruptEvents[0].Symbol; got != "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt" {
+		t.Fatalf("event symbol = %q", got)
+	}
+	if program.InterruptEvents[0].FunctionSymbol != eventSymbol {
+		t.Fatalf("event function symbol = %q, want %q", program.InterruptEvents[0].FunctionSymbol, eventSymbol)
+	}
+
+	if len(program.OnHandlers) != 1 {
+		t.Fatalf("on handlers = %#v, want one", program.OnHandlers)
+	}
+	if got := program.OnHandlers[0].Symbol; got != "on_handler::machine.x86_64.serial::ConsoleExec::serial::interrupt" {
+		t.Fatalf("handler symbol = %q", got)
+	}
+	if program.OnHandlers[0].FunctionSymbol != handlerSymbol {
+		t.Fatalf("handler function symbol = %q, want %q", program.OnHandlers[0].FunctionSymbol, handlerSymbol)
+	}
+
+	if len(program.InterruptBindings) != 1 {
+		t.Fatalf("interrupt bindings = %#v, want one", program.InterruptBindings)
+	}
+	binding := program.InterruptBindings[0]
+	if binding.Vector != 0x40 {
+		t.Fatalf("binding vector = %#x, want 0x40", binding.Vector)
+	}
+	if binding.PathFieldOffset != 0 {
+		t.Fatalf("binding path offset = %d, want field offset 0", binding.PathFieldOffset)
+	}
+	wantEventStorageSize := program.Types["machine.x86_64.serial.SerialInterrupt"].StorageSize
+	if binding.EventStorageSize != wantEventStorageSize {
+		t.Fatalf("binding event storage size = %d, want %d", binding.EventStorageSize, wantEventStorageSize)
+	}
+	if binding.EventStorageSymbol != "_wrela_interrupt_event_40" {
+		t.Fatalf("binding event storage symbol = %q", binding.EventStorageSymbol)
 	}
 }
 

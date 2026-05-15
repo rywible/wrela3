@@ -98,6 +98,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	}
 
 	ctx.lowerSourceMethods()
+	ctx.lowerInterruptEventsAndHandlers()
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
 		return nil, ctx.diags
@@ -321,6 +322,118 @@ func (ctx *lowerContext) lowerSourceMethods() {
 			}
 		}
 	}
+}
+
+func (ctx *lowerContext) lowerInterruptEventsAndHandlers() {
+	for _, mod := range ctx.checked.Modules {
+		for _, decl := range mod.Decls {
+			switch d := decl.(type) {
+			case *ast.DriverPathDecl:
+				pathType := ctx.resolveType(mod.Name, d.Name)
+				for i := range d.InterruptEvents {
+					ctx.lowerInterruptEvent(mod.Name, pathType, &d.InterruptEvents[i])
+				}
+			case *ast.ExecutorDecl:
+				executorType := ctx.resolveType(mod.Name, d.Name)
+				for i := range d.OnHandlers {
+					ctx.lowerOnHandler(mod.Name, executorType, &d.OnHandlers[i])
+				}
+			}
+		}
+	}
+	ctx.lowerInterruptBindings()
+}
+
+func (ctx *lowerContext) lowerInterruptEvent(moduleName string, pathType *sem.Type, event *ast.InterruptEventDecl) {
+	scope := newLowerScope(nil)
+	self := &Param{Symbol: "self", Type: ctx.irType(pathType)}
+	scope.define("self", lowerBinding{value: self, typ: pathType})
+	retType := ctx.resolveType(moduleName, event.EventType)
+	ops := ctx.lowerStmtList(moduleName, pathType, scope, assignedNames(event.Body), event.Body)
+	fnSymbol := symbolName("event_fn", moduleName, pathType.Name, "interrupt")
+	ctx.program.Functions = append(ctx.program.Functions, Function{
+		Symbol: fnSymbol,
+		Return: ctx.irType(retType),
+		Params: []Value{self},
+		Blocks: []Block{{Label: "entry", Ops: ops}},
+	})
+	ctx.program.InterruptEvents = append(ctx.program.InterruptEvents, InterruptEvent{
+		Symbol:         logicalSymbol("interrupt_event", moduleName, pathType.Name, "interrupt"),
+		PathType:       ctx.irType(pathType),
+		EventType:      ctx.irType(retType),
+		FunctionSymbol: fnSymbol,
+	})
+}
+
+func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Type, handler *ast.OnHandlerDecl) {
+	scope := newLowerScope(nil)
+	self := &Param{Symbol: "self", Type: ctx.irType(executorType)}
+	scope.define("self", lowerBinding{value: self, typ: executorType})
+	eventType := ctx.resolveType(moduleName, handler.ParamType)
+	event := &Param{Symbol: handler.ParamName, Type: ctx.irType(eventType)}
+	scope.define(handler.ParamName, lowerBinding{value: event, typ: eventType})
+	ops := ctx.lowerStmtList(moduleName, executorType, scope, assignedNames(handler.Body), handler.Body)
+	fnSymbol := symbolName("on_fn", moduleName, executorType.Name, handler.PathField, "interrupt")
+	ctx.program.Functions = append(ctx.program.Functions, Function{
+		Symbol: fnSymbol,
+		Return: Type{Name: "void", Module: "builtin", Kind: TypeKindPrimitive},
+		Params: []Value{self, event},
+		Blocks: []Block{{Label: "entry", Ops: ops}},
+	})
+	ctx.program.OnHandlers = append(ctx.program.OnHandlers, OnHandler{
+		Symbol:         logicalSymbol("on_handler", moduleName, executorType.Name, handler.PathField, "interrupt"),
+		ExecutorType:   ctx.irType(executorType),
+		PathField:      handler.PathField,
+		EventType:      ctx.irType(eventType),
+		FunctionSymbol: fnSymbol,
+	})
+}
+
+func (ctx *lowerContext) lowerInterruptBindings() {
+	for _, binding := range ctx.checked.InterruptBindings {
+		eventType := ctx.irType(binding.EventType)
+		eventInfo, ok := typeInfoFor(ctx.program.Types, eventType)
+		if !ok {
+			ctx.errorf("missing type info for interrupt event %s.%s", eventType.Module, eventType.Name)
+			continue
+		}
+		eventStorageSize := eventInfo.StorageSize
+		if eventStorageSize == 0 {
+			eventStorageSize = eventInfo.Size
+		}
+		if eventStorageSize == 0 {
+			eventStorageSize = 8
+		}
+		executorType := Type{Name: binding.ExecutorType, Module: binding.ExecutorModule, Kind: TypeKindExecutor}
+		executorInfo, ok := typeInfoFor(ctx.program.Types, executorType)
+		if !ok {
+			ctx.errorf("missing type info for interrupt executor %s.%s", executorType.Module, executorType.Name)
+			continue
+		}
+		pathField, ok := executorInfo.Fields[binding.PathField]
+		if !ok {
+			ctx.errorf("missing interrupt path field %s on executor %s.%s", binding.PathField, executorType.Module, executorType.Name)
+			continue
+		}
+		ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, InterruptBinding{
+			EventSymbol:           logicalSymbol("interrupt_event", pathModule(binding.PathType), pathName(binding.PathType), "interrupt"),
+			HandlerSymbol:         logicalSymbol("on_handler", binding.ExecutorModule, binding.ExecutorType, binding.PathField, "interrupt"),
+			EventFunctionSymbol:   symbolName("event_fn", pathModule(binding.PathType), pathName(binding.PathType), "interrupt"),
+			HandlerFunctionSymbol: symbolName("on_fn", binding.ExecutorModule, binding.ExecutorType, binding.PathField, "interrupt"),
+			ExecutorType:          executorType,
+			PathField:             binding.PathField,
+			PathFieldOffset:       pathField.Offset,
+			EventStorageSymbol:    fmt.Sprintf("_wrela_interrupt_event_%02x", binding.Vector),
+			EventStorageSize:      eventStorageSize,
+			Vector:                binding.Vector,
+		})
+	}
+	sort.Slice(ctx.program.InterruptBindings, func(i, j int) bool {
+		if ctx.program.InterruptBindings[i].Vector != ctx.program.InterruptBindings[j].Vector {
+			return ctx.program.InterruptBindings[i].Vector < ctx.program.InterruptBindings[j].Vector
+		}
+		return ctx.program.InterruptBindings[i].HandlerSymbol < ctx.program.InterruptBindings[j].HandlerSymbol
+	})
 }
 
 func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, method *ast.MethodDecl) Function {
@@ -925,6 +1038,33 @@ func symbolName(parts ...string) string {
 		}
 	}
 	return b.String()
+}
+
+func logicalSymbol(parts ...string) string {
+	return strings.Join(parts, "::")
+}
+
+func pathModule(pathType string) string {
+	parts := strings.Split(pathType, ".")
+	if len(parts) <= 1 {
+		return ""
+	}
+	return strings.Join(parts[:len(parts)-1], ".")
+}
+
+func pathName(pathType string) string {
+	parts := strings.Split(pathType, ".")
+	return parts[len(parts)-1]
+}
+
+func typeInfoFor(types map[string]TypeInfo, typ Type) (TypeInfo, bool) {
+	if typ.Module != "" {
+		if info, ok := types[typ.Module+"."+typ.Name]; ok {
+			return info, true
+		}
+	}
+	info, ok := types[typ.Name]
+	return info, ok
 }
 
 func typeName(typ *sem.Type) string {
