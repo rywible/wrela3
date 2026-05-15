@@ -84,6 +84,8 @@ func valuesDefinedBy(op Operation) []Value {
 	switch v := op.(type) {
 	case *Call:
 		return []Value{v}
+	case *FrameBegin:
+		return []Value{v}
 	case *Binary:
 		return []Value{v}
 	case *ConstInt:
@@ -95,6 +97,10 @@ func valuesDefinedBy(op Operation) []Value {
 	case *StringLiteral:
 		return []Value{v}
 	case *Construct:
+		return []Value{v}
+	case *ArenaReserve:
+		return []Value{v}
+	case *ArenaPlace:
 		return []Value{v}
 	case *Copy:
 		return valuesFromValue(v.Target)
@@ -229,6 +235,45 @@ type Construct struct {
 
 func (Construct) isValue()     {}
 func (Construct) isOperation() {}
+
+type FrameBegin struct {
+	Symbol string
+	Parent Value
+	Length Value
+	Type   Type
+}
+
+func (*FrameBegin) isValue()     {}
+func (*FrameBegin) isOperation() {}
+
+type FrameEnd struct {
+	Frame *FrameBegin
+}
+
+func (*FrameEnd) isOperation() {}
+
+type ArenaReserve struct {
+	Arena  Value
+	Length Value
+	Align  Value
+	Type   Type
+}
+
+func (*ArenaReserve) isValue()     {}
+func (*ArenaReserve) isOperation() {}
+
+type ArenaPlace struct {
+	Arena  Value
+	Type   Type
+	Fields []FieldValue
+}
+
+func (*ArenaPlace) isValue()     {}
+func (*ArenaPlace) isOperation() {}
+
+type MemoryTrap struct{}
+
+func (*MemoryTrap) isOperation() {}
 
 type StringLiteral struct {
 	Symbol     string
