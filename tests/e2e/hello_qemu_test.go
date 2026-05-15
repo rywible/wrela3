@@ -11,6 +11,8 @@ import (
 	"github.com/ryanwible/wrela3/compiler/qemu"
 )
 
+var ivshmemServer = "ivshmem-server"
+
 func TestHelloQEMU(t *testing.T) {
 	qemuBin, err := exec.LookPath("qemu-system-x86_64")
 	if err != nil {
