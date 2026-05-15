@@ -205,6 +205,8 @@ The language should avoid:
 
 This is the first rough example of what we need to compile and run on QEMU.
 
+Wrela memory is physical-region authority first. Executor memory is a durable root arena. Temporary work is expressed with bounded `with` frames that claim child slices and rewind at block exit. Typed values are placed into arena storage with `place`; raw spans are reserved with `reserve`; cache memory is bounded and evicts by default. The x86_64 backend may emit identity paging because long mode requires it, but source-level Wrela code does not model virtual address spaces in this stage.
+
 ```wrela
 // below is illustrative of what an import should look like
 // obviously there would be many more imports in the real file
@@ -306,12 +308,6 @@ image HelloSerial {
             framebuffer_region = framebuffer.memory_region
         ).plan()
 
-        let virtual_memory_plan = VirtualMemoryPlanner(
-            kernel_regions = memory_plan.kernel_regions,
-            mmio_regions = memory_plan.mmio_regions,
-            framebuffer_region = memory_plan.framebuffer_region
-        ).plan()
-
         let interrupt_plan = InterruptPlanner(
             cpus = hardware_description.cpus,
             apic = hardware_description.apic,
@@ -333,7 +329,6 @@ image HelloSerial {
 
         let kernel_hardware = delegated_hardware.assume_kernel_ownership(
             memory_plan = memory_plan,
-            virtual_memory_plan = virtual_memory_plan,
             interrupt_plan = interrupt_plan,
             pci_plan = pci_plan,
             driver_plan = driver_plan,
