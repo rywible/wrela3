@@ -132,6 +132,36 @@ func (c *checker) rememberLifetime(expr ast.Expr, lifetime Lifetime) {
 	c.exprLifetimes[expr] = lifetime
 }
 
+func (c *checker) rememberLocalLifetime(scope *Scope, name string, lifetime Lifetime) {
+	if lifetime.Kind == LifetimeUnknown {
+		lifetime = Lifetime{Kind: LifetimeExecutorRoot}
+	}
+	scope.DefineLifetime(name, lifetime)
+}
+
+func (c *checker) assignmentTargetLifetime(expr ast.Expr, scope *Scope) Lifetime {
+	switch target := expr.(type) {
+	case *ast.NameExpr:
+		if lifetime, ok := scope.LookupLifetime(target.Name); ok {
+			return lifetime
+		}
+		return Lifetime{Kind: LifetimeExecutorRoot}
+	case *ast.FieldExpr:
+		if name, ok := target.Base.(*ast.NameExpr); ok && name.Name == "self" {
+			return Lifetime{Kind: LifetimeExecutorRoot}
+		}
+		return c.lifetimeOfExpr(target.Base, scope)
+	default:
+		return Lifetime{Kind: LifetimeExecutorRoot}
+	}
+}
+
+func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifetime) {
+	if c.lifetimeShorterThan(value, target) {
+		c.error(span, diag.SEM0025, "frame value cannot be stored")
+	}
+}
+
 func (c *checker) pushFrameLifetime(name string, span source.Span, parentLifetime Lifetime) int {
 	_ = name
 	_ = span
@@ -162,6 +192,33 @@ func (c *checker) currentFrameLifetime() Lifetime {
 		return Lifetime{Kind: LifetimeExecutorRoot}
 	}
 	return Lifetime{Kind: LifetimeFrame, Scope: c.frameLifetimeStack[len(c.frameLifetimeStack)-1]}
+}
+
+func (c *checker) frameIsAncestorOf(ancestor, descendant int) bool {
+	if ancestor == 0 || descendant == 0 {
+		return false
+	}
+	for current := descendant; current != 0; current = c.frameLifetimeParents[current] {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *checker) lifetimeShorterThan(value, target Lifetime) bool {
+	if value.Kind != LifetimeFrame && value.Kind != LifetimeCacheLookup && value.Kind != LifetimeCacheCopy {
+		return false
+	}
+	if target.Kind == LifetimeFrame {
+		if target.Scope == value.Scope {
+			return false
+		}
+		if c.frameIsAncestorOf(value.Scope, target.Scope) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {

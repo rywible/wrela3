@@ -1,0 +1,24 @@
+// expect: SEM0025: frame value cannot be stored
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame {
+        return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
+    }
+}
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    saved: Message
+    start fn run(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let msg = tick.place(Message(id = 1))
+            self.saved = msg
+        }
+        while true {}
+    }
+}

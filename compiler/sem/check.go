@@ -557,7 +557,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		valueLifetime := c.lifetimeOfExpr(s.Expr, scope)
 		scope.Define(s.Name, valueType)
+		c.rememberLocalLifetime(scope, s.Name, valueLifetime)
 		if ctx == ContextImagePhaseDirect && valueType != nil && valueType.Kind == KindDriverPath {
 			c.bindDriverPath(s.Name, s.Expr, scope)
 		}
@@ -570,6 +572,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		targetType := c.typeExpr(moduleName, s.Target, scope, ctx)
 		valueType := c.typeExpr(moduleName, s.Value, scope, ctx)
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
+		sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
+		targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
+		c.rejectIfLifetimeEscapes(s.Value.Span(), sourceLifetime, targetLifetime)
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), valueType)
 		return isNeverType(valueType)
 	case *ast.IfStmt:
@@ -654,6 +659,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			}
 		} else {
 			c.requireType(got, expectedReturn, s.Value.Span())
+		}
+		if lifetime := c.lifetimeOfExpr(s.Value, scope); lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheCopy {
+			c.error(s.Value.Span(), diag.SEM0024, "frame value cannot escape")
 		}
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
 		return true
