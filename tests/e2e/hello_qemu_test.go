@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,18 @@ import (
 )
 
 var ivshmemServer = "ivshmem-server"
+
+func qemuTimeout() time.Duration {
+	seconds := os.Getenv("WRELA_QEMU_TIMEOUT_SECONDS")
+	if seconds == "" {
+		return 20 * time.Second
+	}
+	n, err := strconv.Atoi(seconds)
+	if err != nil || n <= 0 {
+		return 20 * time.Second
+	}
+	return time.Duration(n) * time.Second
+}
 
 func TestHelloQEMU(t *testing.T) {
 	qemuBin, err := exec.LookPath("qemu-system-x86_64")
@@ -49,7 +62,7 @@ func TestHelloQEMU(t *testing.T) {
 		ESPDir:              filepath.Join(tmp, "esp"),
 		ImagePath:           image,
 		SuccessText:         "hello from wrela",
-		Timeout:             20 * time.Second,
+		Timeout:             qemuTimeout(),
 		EnableEdu:           true,
 		EnableIvshmemMsix:   true,
 		IvshmemServerBinary: ivshmemBin,
@@ -98,7 +111,7 @@ func TestHelloInterruptsQEMU(t *testing.T) {
 		ImagePath:           image,
 		InputText:           "!",
 		SuccessText:         "msix interrupt",
-		Timeout:             20 * time.Second,
+		Timeout:             qemuTimeout(),
 		EnableEdu:           true,
 		EnableIvshmemMsix:   true,
 		IvshmemServerBinary: ivshmemBin,

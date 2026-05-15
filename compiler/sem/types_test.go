@@ -795,7 +795,7 @@ executor BadCall {
 	}
 }
 
-func TestExplicitInterruptBindCallRejected(t *testing.T) {
+func TestOrdinaryInterruptsFieldBindCallAllowed(t *testing.T) {
 	_, diags := checkModuleForTest(t, `
 module index.interrupt_bind_call
 `+interruptPrelude+`
@@ -813,8 +813,8 @@ executor BadBind {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0019) {
-		t.Fatalf("expected SEM0019, got %#v", diags)
+	if hasCode(diags, diag.SEM0019) {
+		t.Fatalf("ordinary interrupts field bind() must remain legal, got %#v", diags)
 	}
 }
 

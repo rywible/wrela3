@@ -224,11 +224,12 @@ func TestInterruptDispatchUsesContextRelocation(t *testing.T) {
 			continue
 		}
 		locationRVA := img.Symbols[rel.Symbol] + rel.Offset
-		start := int(locationRVA - img.Sections[0].RVA)
-		if start < 0 || start+8 > len(img.Sections[0].Data) {
+		text := sectionByName(img, ".text")
+		start := int(locationRVA - text.RVA)
+		if start < 0 || start+8 > len(text.Data) {
 			t.Fatalf("relocation outside .text: %#v", rel)
 		}
-		got := binary.LittleEndian.Uint64(img.Sections[0].Data[start : start+8])
+		got := binary.LittleEndian.Uint64(text.Data[start : start+8])
 		for _, target := range []string{"_wrela_interrupt_context_0", "_wrela_interrupt_event_40"} {
 			if got == uint64(runtimeImageBase+img.Symbols[target]) {
 				found[target] = true

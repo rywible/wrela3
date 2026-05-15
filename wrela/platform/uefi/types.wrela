@@ -148,6 +148,49 @@ class DelegatedMemory {
         add rax, 3
         mov [rbx], rax
 
+        // Always identity-map low physical memory and the standard 32-bit MMIO
+        // aperture. The UEFI memory map describes RAM ownership, but owned
+        // hardware still needs the loaded image pages plus APIC/IOAPIC and PCI
+        // device MMIO ranges after CR3 is switched.
+        mov r15, 0
+        mov r13, 0
+    map_low_pdpt_loop:
+        cmp r15, 4
+        jge map_low_done
+
+        mov rdx, self.arena_base
+        add rdx, r14
+        add r14, 4096
+
+        mov r11, r15
+        mov r8, r12
+    map_low_pdpt_slot_loop:
+        cmp r11, 0
+        jle map_low_pdpt_slot_ready
+        add r8, 8
+        sub r11, 1
+        jmp map_low_pdpt_slot_loop
+
+    map_low_pdpt_slot_ready:
+        mov rax, rdx
+        add rax, 3
+        mov [r8], rax
+
+        mov rcx, 512
+    map_low_pd_loop:
+        mov rax, r13
+        add rax, 0x83
+        mov [rdx], rax
+        add rdx, 8
+        add r13, 0x200000
+        sub rcx, 1
+        jne map_low_pd_loop
+
+        add r15, 1
+        jmp map_low_pdpt_loop
+
+    map_low_done:
+
         // memory_map is the UefiMemoryMap handle in rsi; descriptor_size advances descriptors.
         mov r8, [rsi]
         mov r9, [rsi]
@@ -331,6 +374,8 @@ class DelegatedMemory {
 
         mov r12, r11
         add r12, 16
+        mov r14, vector41_handler
+        mov r15, vector42_handler
         mov rcx, 256
         mov r13, fatal_handler
     idt_gate_loop:
@@ -346,12 +391,12 @@ class DelegatedMemory {
 
         mov r12, r11
         add r12, 1056
-        mov r13, vector41_handler
+        mov r13, r14
         call write_idt_gate
 
         mov r12, r11
         add r12, 1072
-        mov r13, vector42_handler
+        mov r13, r15
         call write_idt_gate
 
         mov [r10 + 0], r11

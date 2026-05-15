@@ -27,7 +27,7 @@ driver path EduMsiPath {
     }
 
     fn raise_test_interrupt(self) {
-        self.write32(offset = 0x60, value = 0x100)
+        self.write32(offset = 0x60, value = 0x01)
     }
 
     fn ack_completed(self, event: EduInterrupt) {

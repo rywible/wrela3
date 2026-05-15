@@ -71,7 +71,7 @@ known machine model:
 - virtio devices
 - COM1 serial
 - debug-exit
-- APIC/MSI-X later
+- Local APIC/IOAPIC with QEMU lab MSI and MSI-X interrupt paths
 
 This keeps the compiler iteration local while keeping the kernel substrate
 familiar and testable.
@@ -211,56 +211,56 @@ This is the first rough example of what we need to compile and run on QEMU.
 use { DelegatedHardware } from drivers.interfaces
 
 driver SerialDriver {
-    device: SerialDeviceDescription
-    registers: IoPortRegisters
-    memory: DriverMemory
+    device = SerialDeviceDescription
+    registers = IoPortRegisters
+    memory = DriverMemory
 
     fn initialize(self) -> SerialDriver {
         self.device.verify_compatible()
 
-        self.registers.write8(offset: 1, value: 0x00)
-        self.registers.write8(offset: 3, value: 0x80)
-        self.registers.write8(offset: 0, value: 0x03)
-        self.registers.write8(offset: 1, value: 0x00)
-        self.registers.write8(offset: 3, value: 0x03)
-        self.registers.write8(offset: 2, value: 0xC7)
-        self.registers.write8(offset: 4, value: 0x03)
+        self.registers.write8(offset = 1, value = 0x00)
+        self.registers.write8(offset = 3, value = 0x80)
+        self.registers.write8(offset = 0, value = 0x03)
+        self.registers.write8(offset = 1, value = 0x00)
+        self.registers.write8(offset = 3, value = 0x03)
+        self.registers.write8(offset = 2, value = 0xC7)
+        self.registers.write8(offset = 4, value = 0x03)
 
         return self
     }
 
     fn create_write_path(self, owner: ExecutorPlacement) -> SerialWritePath {
         return SerialWritePath(
-            owner: owner,
-            registers: self.registers.writer_view(),
-            memory: self.memory.path_region("write")
+            owner = owner,
+            registers = self.registers.writer_view(),
+            memory = self.memory.path_region("write")
         )
     }
 }
 
 driver path SerialWritePath {
-    owner: ExecutorPlacement
-    registers: SerialWriterRegisters
-    memory: DriverPathMemory
+    owner = ExecutorPlacement
+    registers = SerialWriterRegisters
+    memory = DriverPathMemory
 
     fn write(self, bytes: String) {
         for byte in bytes {
             self.wait_until_ready()
-            self.registers.write8(offset: 0, value: byte)
+            self.registers.write8(offset = 0, value = byte)
         }
     }
 
     fn wait_until_ready(self) {
-        while (self.registers.read_status(offset: 5) & 0x20) == 0 {
+        while (self.registers.read_status(offset = 5) & 0x20) == 0 {
             cpu.pause()
         }
     }
 }
 
 executor HelloWorld {
-    execution: ExecutionContext
-    memory: ExecutorMemory
-    serial_path: SerialWritePath
+    execution = ExecutionContext
+    memory = ExecutorMemory
+    serial_path = SerialWritePath
 
     start fn run(self) -> never {
         self.serial_path.write("hello from wrela\n")
@@ -295,58 +295,58 @@ image HelloSerial {
         ).read()
 
         let hardware_description = HardwareDescriptionBuilder(
-            memory_map: memory_map,
-            acpi_tables: acpi_tables,
-            framebuffer_info: framebuffer.info,
-            boot_assets_manifest: boot_assets.manifest
+            memory_map = memory_map,
+            acpi_tables = acpi_tables,
+            framebuffer_info = framebuffer.info,
+            boot_assets_manifest = boot_assets.manifest
         ).build()
 
         let memory_plan = PhysicalMemoryPlanner(
-            memory: hardware_description.memory,
-            framebuffer_region: framebuffer.memory_region
+            memory = hardware_description.memory,
+            framebuffer_region = framebuffer.memory_region
         ).plan()
 
         let virtual_memory_plan = VirtualMemoryPlanner(
-            kernel_regions: memory_plan.kernel_regions,
-            mmio_regions: memory_plan.mmio_regions,
-            framebuffer_region: memory_plan.framebuffer_region
+            kernel_regions = memory_plan.kernel_regions,
+            mmio_regions = memory_plan.mmio_regions,
+            framebuffer_region = memory_plan.framebuffer_region
         ).plan()
 
         let interrupt_plan = InterruptPlanner(
-            cpus: hardware_description.cpus,
-            apic: hardware_description.apic,
-            devices: hardware_description.devices
+            cpus = hardware_description.cpus,
+            apic = hardware_description.apic,
+            devices = hardware_description.devices
         ).plan()
 
         let pci_plan = PciPlanner(
-            pci: hardware_description.pci,
-            mmio_regions: memory_plan.mmio_regions,
-            interrupts: interrupt_plan.device_interrupts
+            pci = hardware_description.pci,
+            mmio_regions = memory_plan.mmio_regions,
+            interrupts = interrupt_plan.device_interrupts
         ).plan()
 
         let driver_plan = DriverPlanner(
-            devices: hardware_description.devices,
-            pci: pci_plan,
-            interrupts: interrupt_plan,
-            dma_regions: memory_plan.dma_regions
+            devices = hardware_description.devices,
+            pci = pci_plan,
+            interrupts = interrupt_plan,
+            dma_regions = memory_plan.dma_regions
         ).plan()
 
         let kernel_hardware = delegated_hardware.assume_kernel_ownership(
-            memory_plan: memory_plan,
-            virtual_memory_plan: virtual_memory_plan,
-            interrupt_plan: interrupt_plan,
-            pci_plan: pci_plan,
-            driver_plan: driver_plan,
-            framebuffer: framebuffer,
-            boot_assets: boot_assets
+            memory_plan = memory_plan,
+            virtual_memory_plan = virtual_memory_plan,
+            interrupt_plan = interrupt_plan,
+            pci_plan = pci_plan,
+            driver_plan = driver_plan,
+            framebuffer = framebuffer,
+            boot_assets = boot_assets
         )
 
         let serial_driver = SerialDriver(
-            device: kernel_hardware.devices.serial.primary(),
-            registers: kernel_hardware.io_ports.claim(
+            device = kernel_hardware.devices.serial.primary(),
+            registers = kernel_hardware.io_ports.claim(
                 driver_plan.serial.primary.registers
             ),
-            memory: kernel_hardware.memory.driver_region(
+            memory = kernel_hardware.memory.driver_region(
                 driver_plan.serial.primary.memory
             )
         ).initialize()
@@ -354,13 +354,13 @@ image HelloSerial {
         let vcpu_0 = kernel_hardware.vcpus.next()
 
         let serial_path = serial_driver.create_write_path(
-            owner: vcpu_0
+            owner = vcpu_0
         )
 
         let hello_world = HelloWorld(
-            execution: vcpu_0.execution,
-            memory: vcpu_0.memory,
-            serial_path: serial_path
+            execution = vcpu_0.execution,
+            memory = vcpu_0.memory,
+            serial_path = serial_path
         )
 
         kernel_hardware.start(hello_world)

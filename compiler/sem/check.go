@@ -1141,7 +1141,7 @@ func (c *checker) canMintInContext(ctx ContextKind, typ *Type) bool {
 }
 
 func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
-	if c.isExplicitInterruptBindCall(expr) {
+	if c.isExplicitInterruptBindCall(moduleName, expr, scope) {
 		c.error(expr.SpanV, diag.SEM0019, "explicit interrupt binding calls are not allowed")
 		return nil
 	}
@@ -1170,12 +1170,15 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	return method.Return
 }
 
-func (c *checker) isExplicitInterruptBindCall(expr *ast.CallExpr) bool {
+func (c *checker) isExplicitInterruptBindCall(moduleName string, expr *ast.CallExpr, scope *Scope) bool {
 	if expr == nil || expr.Method != "bind" {
 		return false
 	}
-	field, ok := expr.Receiver.(*ast.FieldExpr)
-	return ok && field.Field == "interrupts"
+	recvType := c.exprStaticType(moduleName, expr.Receiver, scope)
+	if recvType == nil {
+		return false
+	}
+	return recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "ApicInterruptController"
 }
 
 func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {

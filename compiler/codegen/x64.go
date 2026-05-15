@@ -300,12 +300,17 @@ func interruptRuntimeData(program *ir.Program) []ir.DataObject {
 
 func buildDataSection(name string, objects []ir.DataObject, characteristics uint32) (Section, map[string]uint64) {
 	out := []byte{}
+	offsets := appendDataObjects(&out, objects)
+	return Section{Name: name, Data: out, Characteristics: characteristics}, offsets
+}
+
+func appendDataObjects(out *[]byte, objects []ir.DataObject) map[string]uint64 {
 	offsets := map[string]uint64{}
 	for _, obj := range objects {
-		offsets[obj.Symbol] = uint64(len(out))
-		out = append(out, obj.Bytes...)
+		offsets[obj.Symbol] = uint64(len(*out))
+		*out = append(*out, obj.Bytes...)
 	}
-	return Section{Name: name, Data: out, Characteristics: characteristics}, offsets
+	return offsets
 }
 
 func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
@@ -854,7 +859,8 @@ func emitCall(e *Emitter, call *ir.Call, frame Frame) {
 
 	for i, value := range values {
 		emitLoadValue(e, frame, value, scratchRegs[0])
-		emitRegRegMove(e, argRegs[i], scratchRegs[0])
+		width := valueWidthBits(e.ctx, value)
+		emitRegRegMove(e, registerForWidth(argRegs[i], width), registerForWidth(scratchRegs[0], width))
 	}
 
 	e.emit(0xE8, 0, 0, 0, 0)
@@ -1339,7 +1345,7 @@ func emitMovDataAddressToReg(e *Emitter, reg asm.Reg, symbol string) {
 
 func emitLoadMemToReg(e *Emitter, reg asm.Reg, base asm.Reg, disp int64, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: reg},
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
 		asm.MemOperand{Base: base, Disp: disp, Width: width},
 	}})
 }
@@ -1347,7 +1353,7 @@ func emitLoadMemToReg(e *Emitter, reg asm.Reg, base asm.Reg, disp int64, width i
 func emitStoreMemFromReg(e *Emitter, base asm.Reg, disp int64, reg asm.Reg, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: base, Disp: disp, Width: width},
-		asm.RegOperand{Reg: reg},
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
 	}})
 }
 
@@ -1402,14 +1408,14 @@ func isComparisonOp(op string) bool {
 
 func emitLoadSlotToReg(e *Emitter, reg asm.Reg, slot int, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: reg},
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
 	}})
 }
 
 func emitLoadSlotOffsetToReg(e *Emitter, reg asm.Reg, slot int, offset int, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: reg},
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot + offset), Width: width},
 	}})
 }
@@ -1417,7 +1423,7 @@ func emitLoadSlotOffsetToReg(e *Emitter, reg asm.Reg, slot int, offset int, widt
 func emitStoreSlotFromReg(e *Emitter, reg asm.Reg, slot int, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
-		asm.RegOperand{Reg: reg},
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
 	}})
 }
 
@@ -1445,6 +1451,24 @@ func emitRegRegMove(e *Emitter, dst asm.Reg, src asm.Reg) {
 		asm.RegOperand{Reg: dst},
 		asm.RegOperand{Reg: src},
 	}})
+}
+
+func registerForWidth(reg asm.Reg, width int) asm.Reg {
+	switch width {
+	case 8:
+		if alias, ok := asm.Lookup(registerAlias(reg.Name, 8)); ok {
+			return alias
+		}
+	case 16:
+		if alias, ok := asm.Lookup(registerAlias(reg.Name, 16)); ok {
+			return alias
+		}
+	case 32:
+		if alias, ok := asm.Lookup(registerAlias(reg.Name, 32)); ok {
+			return alias
+		}
+	}
+	return reg
 }
 
 func emitCmpRegReg(e *Emitter, left asm.Reg, right asm.Reg) {

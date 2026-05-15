@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -30,6 +31,7 @@ type Options struct {
 	EnableIvshmemMsix     bool
 	IvshmemSocketPath     string
 	IvshmemStartupTimeout time.Duration
+	InputDelay            time.Duration
 }
 
 type IvshmemServerOptions struct {
@@ -44,7 +46,9 @@ func IvshmemServerArgs(opts IvshmemServerOptions) []string {
 	return []string{
 		"-S", opts.SocketPath,
 		"-p", opts.PidPath,
-		"-m", opts.ShmName,
+		// QEMU's ivshmem-server uses -M for the POSIX shm object name;
+		// -m is the shm directory in current upstream/server builds.
+		"-M", opts.ShmName,
 		"-l", opts.Size,
 		"-n", strconv.Itoa(opts.Vectors),
 	}
@@ -92,7 +96,7 @@ func waitForUnixSocket(path string, timeout time.Duration) error {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("unix", path, 20*time.Millisecond)
+		conn, err := net.DialTimeout("unix", path, 50*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -146,6 +150,9 @@ func Run(opts Options) (string, error) {
 		if ivshmemServerBinary == "" {
 			ivshmemServerBinary = "ivshmem-server"
 		}
+		if err := os.Remove(ivshmemPath); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
 		ivshmemServerCmd := exec.CommandContext(ctx, ivshmemServerBinary, IvshmemServerArgs(IvshmemServerOptions{
 			SocketPath: ivshmemPath,
 			PidPath:    filepath.Join(filepath.Dir(ivshmemPath), "ivshmem.pid"),
@@ -169,10 +176,33 @@ func Run(opts Options) (string, error) {
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
+	var stdin io.WriteCloser
 	if opts.InputText != "" {
-		cmd.Stdin = strings.NewReader(opts.InputText)
+		pipe, err := cmd.StdinPipe()
+		if err != nil {
+			return "", err
+		}
+		stdin = pipe
 	}
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil && stdin != nil {
+		delay := opts.InputDelay
+		if delay == 0 {
+			delay = 2 * time.Second
+		}
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = stdin.Close()
+			case <-time.After(delay):
+				_, _ = stdin.Write([]byte(opts.InputText))
+				_ = stdin.Close()
+			}
+		}()
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
 	if ivshmemServer != nil {
 		stopIvshmemServer(ivshmemServer)
 	}

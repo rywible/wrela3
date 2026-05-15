@@ -237,15 +237,33 @@ func TestCompileDataRelocationOffsetIsRelativeToOwningSymbol(t *testing.T) {
 		t.Fatalf("reloc symbol = %q, want uses_data", reloc.Symbol)
 	}
 	locationRVA := image.Symbols[reloc.Symbol] + reloc.Offset
-	start := int(locationRVA - image.Sections[0].RVA)
-	if start < 0 || start+8 > len(image.Sections[0].Data) {
+	text := sectionByNameForControlTest(image, ".text")
+	start := int(locationRVA - text.RVA)
+	if start < 0 || start+8 > len(text.Data) {
 		t.Fatalf("reloc location RVA %#x outside .text", locationRVA)
 	}
-	got := binary.LittleEndian.Uint64(image.Sections[0].Data[start : start+8])
+	got := binary.LittleEndian.Uint64(text.Data[start : start+8])
 	want := uint64(runtimeImageBase + image.Symbols["hello_data"])
 	if got != want {
 		t.Fatalf("reloc points at %#x containing %#x, want data address %#x", locationRVA, got, want)
 	}
+	rdata := sectionByNameForControlTest(image, ".rdata")
+	dataRVA := image.Symbols["hello_data"]
+	if dataRVA < rdata.RVA || dataRVA+6 > rdata.RVA+uint64(len(rdata.Data)) {
+		t.Fatalf("hello_data RVA %#x outside .rdata %#x..%#x", dataRVA, rdata.RVA, rdata.RVA+uint64(len(rdata.Data)))
+	}
+	if !bytes.Contains(rdata.Data, []byte("hello\x00")) {
+		t.Fatalf(".rdata missing hello_data bytes: %#x", rdata.Data)
+	}
+}
+
+func sectionByNameForControlTest(image *Image, name string) *Section {
+	for i := range image.Sections {
+		if image.Sections[i].Name == name {
+			return &image.Sections[i]
+		}
+	}
+	return nil
 }
 
 func TestCompileRejectsTooManyCallArguments(t *testing.T) {

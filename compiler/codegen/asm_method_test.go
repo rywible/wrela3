@@ -63,3 +63,25 @@ func TestCompileAsmMethodUnknownReceiverFieldReturnsDiagnostic(t *testing.T) {
 		t.Fatalf("compileAsmMethodUnit() encoded %d bytes for unknown field: %#x", len(unit.Bytes), unit.Bytes)
 	}
 }
+
+func TestCompileU8ParameterStoreUsesLowByteArgumentRegister(t *testing.T) {
+	self := &ir.Param{Symbol: "self", Type: ir.Type{Name: "Receiver"}}
+	param := &ir.Param{Symbol: "value", Type: ir.Type{Name: "U8"}}
+	fn := ir.Function{
+		Symbol: "takes_u8",
+		Params: []ir.Value{self, param},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{&ir.Return{}},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := image.Sections[0].Data
+	if !bytes.Contains(code, []byte{0x40, 0x88, 0x75}) {
+		t.Fatalf("U8 param in rsi must be stored from sil with a REX prefix, got: %#x", code)
+	}
+}

@@ -227,6 +227,12 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 		t.Fatalf("lowerAndEncodeAsmMethod build_interrupt_idt diagnostics: %#v", ds)
 	}
 	assertInstructionOrder(t, idtInstructions, "push r12", "push r13", "push r14", "push r15", "pop r15", "pop r14", "pop r13", "pop r12", "ret")
+	assertInstructionOrder(t, idtInstructions,
+		"mov r14 rcx",
+		"mov rcx imm",
+		"mov r13 r14",
+		"mov r13 r15",
+	)
 }
 
 func TestInterruptIDTSourceShape(t *testing.T) {

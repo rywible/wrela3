@@ -2,11 +2,12 @@ module machine.x86_64.pci
 
 class PciConfigPorts {
     asm fn write32(self, address: U32, value: U32) {
+        mov r10d, value
         mov dx, 0x0CF8
         mov eax, address
         out dx, eax
         mov dx, 0x0CFC
-        mov eax, value
+        mov eax, r10d
         out dx, eax
         ret
     }
@@ -88,8 +89,11 @@ class Q35PciInterruptConfigurator {
     }
 
     fn configure_edu_msi_vector41(self) {
+        let command_status = self.read_config32(slot = 5, offset = 0x04)
+        self.write_config32(slot = 5, offset = 0x04, value = command_status | 0x00000006)
         let cap = self.find_capability(slot = 5, capability_id = 0x05)
         let header = self.read_config32(slot = 5, offset = cap)
+        let enabled_header = header | 0x00010000
         let control = (header >> 16) & 0xFFFF
         self.write_config32(slot = 5, offset = cap + 4, value = 0xFEE00000)
         if (control & 0x80) != 0 {
@@ -98,7 +102,7 @@ class Q35PciInterruptConfigurator {
         } else {
             self.write_config32(slot = 5, offset = cap + 8, value = 0x00000041)
         }
-        self.write_config32(slot = 5, offset = cap + 0, value = header | 0x00010000)
+        self.write_config32(slot = 5, offset = cap + 0, value = enabled_header)
     }
 
     fn configure_ivshmem_msix_vector42(self) {

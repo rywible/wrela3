@@ -121,7 +121,7 @@ func TestIvshmemServerArgs(t *testing.T) {
 		Size:       "1M",
 		Vectors:    1,
 	})
-	want := []string{"-S", "/tmp/ivshmem.sock", "-p", "/tmp/ivshmem.pid", "-m", "wrela-ivshmem", "-l", "1M", "-n", "1"}
+	want := []string{"-S", "/tmp/ivshmem.sock", "-p", "/tmp/ivshmem.pid", "-M", "wrela-ivshmem", "-l", "1M", "-n", "1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("IvshmemServerArgs() = %#v, want %#v", got, want)
 	}
@@ -208,6 +208,50 @@ func TestRunRemovesImplicitIvshmemTempDirOnStartupFailure(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("implicit ivshmem temp dirs still exist: %#v", matches)
+	}
+}
+
+func TestRunRemovesStaleIvshmemSocketBeforeStartingServer(t *testing.T) {
+	tmp := t.TempDir()
+	socketPath := filepath.Join(tmp, "ivshmem.sock")
+	if err := os.WriteFile(socketPath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale socket placeholder: %v", err)
+	}
+	observed := filepath.Join(tmp, "observed")
+	fakeServer := filepath.Join(tmp, "fake-ivshmem-server.sh")
+	serverScript := "#!/usr/bin/env sh\nif [ -e " + socketPath + " ]; then echo stale > " + observed + "; exit 1; fi\ntouch " + observed + "\nsleep 30\n"
+	if err := os.WriteFile(fakeServer, []byte(serverScript), 0o755); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	if err := os.WriteFile(fakeQEMU, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	_, err := Run(Options{
+		QEMUBinary:            fakeQEMU,
+		OVMFCode:              filepath.Join(tmp, "code.fd"),
+		OVMFVars:              filepath.Join(tmp, "vars.fd"),
+		ESPDir:                filepath.Join(tmp, "esp"),
+		ImagePath:             image,
+		EnableIvshmemMsix:     true,
+		IvshmemServerBinary:   fakeServer,
+		IvshmemSocketPath:     socketPath,
+		IvshmemStartupTimeout: 200 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatalf("expected ivshmem startup error")
+	}
+	data, readErr := os.ReadFile(observed)
+	if readErr != nil {
+		t.Fatalf("read observed marker: %v", readErr)
+	}
+	if strings.TrimSpace(string(data)) == "stale" {
+		t.Fatalf("server saw stale socket placeholder")
 	}
 }
 
