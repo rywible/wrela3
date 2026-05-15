@@ -16,13 +16,13 @@ class ExecutorMemory {
     next_offset: U64
 
     fn static_bytes(self, value: StringLiteral) -> Bytes {
-        return Bytes(address: value.address, length: value.length)
+        return Bytes(address = value.address, length = value.length)
     }
 
     fn allocate_bytes(self, length: U64) -> MutableBytes {
         let address = self.arena_base + self.next_offset
         self.next_offset = self.next_offset + length
-        return MutableBytes(address: address, length: length)
+        return MutableBytes(address = address, length = length)
     }
 
     asm fn halt_forever(self) -> never {

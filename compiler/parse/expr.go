@@ -45,7 +45,7 @@ func (p *Parser) parseExpr(minPrec int) (ast.Expr, []diag.Diagnostic) {
 
 		op := p.next()
 		if op.Kind == lex.Dot {
-			name, ds := p.expectIdentifier("expected field or method name")
+			name, ds := p.expectSelectorName("expected field or method name")
 			if len(ds) != 0 {
 				return nil, ds
 			}
@@ -129,4 +129,16 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 	default:
 		return nil, p.err(tok, diag.PAR0001, "unexpected token in expression")
 	}
+}
+
+func (p *Parser) expectSelectorName(msg string) (lex.Token, []diag.Diagnostic) {
+	tok := p.peek()
+	if isSelectorNameToken(tok) {
+		return p.next(), nil
+	}
+	return tok, p.err(tok, diag.PAR0001, msg)
+}
+
+func isSelectorNameToken(tok lex.Token) bool {
+	return isNameToken(tok) || tok.Kind == lex.KeywordInterrupt
 }

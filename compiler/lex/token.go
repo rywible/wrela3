@@ -49,6 +49,9 @@ const (
 	KeywordDriver
 	KeywordPath
 	KeywordExecutor
+	KeywordInterrupt
+	KeywordReceiver
+	KeywordOn
 	KeywordImage
 	KeywordTransitions
 	KeywordPhase
@@ -88,6 +91,9 @@ var keywordKinds = map[string]Kind{
 	"driver":      KeywordDriver,
 	"path":        KeywordPath,
 	"executor":    KeywordExecutor,
+	"interrupt":   KeywordInterrupt,
+	"receiver":    KeywordReceiver,
+	"on":          KeywordOn,
 	"image":       KeywordImage,
 	"transitions": KeywordTransitions,
 	"phase":       KeywordPhase,

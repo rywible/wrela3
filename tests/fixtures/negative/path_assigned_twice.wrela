@@ -27,9 +27,9 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 0))
-        let a = A(serial_path: serial_path)
-        let b = B(serial_path: serial_path)
+        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+        let a = A(serial_path = serial_path)
+        let b = B(serial_path = serial_path)
         a.run()
     }
 }

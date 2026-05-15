@@ -17,6 +17,15 @@ type Parser struct {
 	lexDiags []diag.Diagnostic
 }
 
+type compositeKind int
+
+const (
+	compositeClass compositeKind = iota
+	compositeDriver
+	compositeDriverPath
+	compositeExecutor
+)
+
 func ParseGraph(graph source.Graph) ([]*ast.Module, []diag.Diagnostic) {
 	var modules []*ast.Module
 	var out []diag.Diagnostic
@@ -189,7 +198,7 @@ func (p *Parser) parseClassDecl(unique bool) (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, methods, _, ds := p.parseCompositeMembers()
+	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeClass)
 	if len(ds) != 0 {
 		return nil, ds
 	}
@@ -208,7 +217,7 @@ func (p *Parser) parseDriverDecl(unique bool) (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, methods, _, ds := p.parseCompositeMembers()
+	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeDriver)
 	if len(ds) != 0 {
 		return nil, ds
 	}
@@ -227,15 +236,16 @@ func (p *Parser) parseDriverPathDecl() (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, methods, _, ds := p.parseCompositeMembers()
+	fields, methods, interruptEvents, _, _, ds := p.parseCompositeMembers(compositeDriverPath)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.DriverPathDecl{
-		Name:    name.Text,
-		Fields:  fields,
-		Methods: methods,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:            name.Text,
+		Fields:          fields,
+		Methods:         methods,
+		InterruptEvents: interruptEvents,
+		SpanV:           p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -245,15 +255,16 @@ func (p *Parser) parseExecutorDecl() (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, methods, _, ds := p.parseCompositeMembers()
+	fields, methods, _, onHandlers, _, ds := p.parseCompositeMembers(compositeExecutor)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.ExecutorDecl{
-		Name:    name.Text,
-		Fields:  fields,
-		Methods: methods,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:       name.Text,
+		Fields:     fields,
+		Methods:    methods,
+		OnHandlers: onHandlers,
+		SpanV:      p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -380,15 +391,17 @@ func (p *Parser) parsePhaseDecl() (*ast.PhaseDecl, []diag.Diagnostic) {
 	}, nil
 }
 
-func (p *Parser) parseCompositeMembers() ([]ast.Field, []ast.MethodDecl, source.Span, []diag.Diagnostic) {
+func (p *Parser) parseCompositeMembers(kind compositeKind) ([]ast.Field, []ast.MethodDecl, []ast.InterruptEventDecl, []ast.OnHandlerDecl, source.Span, []diag.Diagnostic) {
 	startTok, ds := p.consume(lex.LBrace)
 	if len(ds) != 0 {
-		return nil, nil, source.Span{}, ds
+		return nil, nil, nil, nil, source.Span{}, ds
 	}
 	bodyStart := startTok.Start
 
 	var fields []ast.Field
 	var methods []ast.MethodDecl
+	var interruptEvents []ast.InterruptEventDecl
+	var onHandlers []ast.OnHandlerDecl
 	prevEnd := -1
 	prevHasSeparator := true
 	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
@@ -397,7 +410,7 @@ func (p *Parser) parseCompositeMembers() ([]ast.Field, []ast.MethodDecl, source.
 			break
 		}
 		if prevEnd >= 0 && !prevHasSeparator && !sawSep && p.previous().Kind != lex.RBrace && p.lineOf(prevEnd) == p.lineOf(p.peek().Start) {
-			return nil, nil, source.Span{}, []diag.Diagnostic{{
+			return nil, nil, nil, nil, source.Span{}, []diag.Diagnostic{{
 				Phase:    "parse",
 				Code:     diag.PAR0002,
 				FilePath: p.path,
@@ -411,27 +424,112 @@ func (p *Parser) parseCompositeMembers() ([]ast.Field, []ast.MethodDecl, source.
 		case lex.KeywordAsm, lex.KeywordStart, lex.KeywordFn:
 			method, ds := p.parseMethodDecl()
 			if len(ds) != 0 {
-				return nil, nil, source.Span{}, ds
+				return nil, nil, nil, nil, source.Span{}, ds
 			}
 			methods = append(methods, method)
 			prevEnd = method.Span().End
+		case lex.KeywordInterrupt:
+			if kind != compositeDriverPath {
+				return nil, nil, nil, nil, source.Span{}, p.err(p.peek(), diag.PAR0001, "unexpected token in declaration body")
+			}
+			event, ds := p.parseInterruptEventDecl()
+			if len(ds) != 0 {
+				return nil, nil, nil, nil, source.Span{}, ds
+			}
+			interruptEvents = append(interruptEvents, event)
+			prevEnd = event.Span().End
+		case lex.KeywordOn:
+			if kind != compositeExecutor {
+				return nil, nil, nil, nil, source.Span{}, p.err(p.peek(), diag.PAR0001, "unexpected token in declaration body")
+			}
+			handler, ds := p.parseOnHandlerDecl()
+			if len(ds) != 0 {
+				return nil, nil, nil, nil, source.Span{}, ds
+			}
+			onHandlers = append(onHandlers, handler)
+			prevEnd = handler.Span().End
 		case lex.Identifier:
 			field, ds := p.parseFieldDecl()
 			if len(ds) != 0 {
-				return nil, nil, source.Span{}, ds
+				return nil, nil, nil, nil, source.Span{}, ds
 			}
 			fields = append(fields, field)
 			prevEnd = field.Span.End
 		default:
-			return nil, nil, source.Span{}, p.err(p.peek(), diag.PAR0001, "unexpected token in declaration body")
+			return nil, nil, nil, nil, source.Span{}, p.err(p.peek(), diag.PAR0001, "unexpected token in declaration body")
 		}
 		prevHasSeparator = false
 	}
 	endTok, ds := p.consume(lex.RBrace)
 	if len(ds) != 0 {
-		return nil, nil, source.Span{}, ds
+		return nil, nil, nil, nil, source.Span{}, ds
 	}
-	return fields, methods, p.span(bodyStart, endTok.End), nil
+	return fields, methods, interruptEvents, onHandlers, p.span(bodyStart, endTok.End), nil
+}
+
+func (p *Parser) parseInterruptEventDecl() (ast.InterruptEventDecl, []diag.Diagnostic) {
+	start := p.next()
+	if _, ds := p.consume(lex.KeywordReceiver); len(ds) != 0 {
+		return ast.InterruptEventDecl{}, ds
+	}
+	if _, ds := p.consume(lex.Arrow); len(ds) != 0 {
+		return ast.InterruptEventDecl{}, ds
+	}
+	eventType, ds := p.parseTypeName()
+	if len(ds) != 0 {
+		return ast.InterruptEventDecl{}, ds
+	}
+	body, ds := p.parseBlockStmts()
+	if len(ds) != 0 {
+		return ast.InterruptEventDecl{}, ds
+	}
+	return ast.InterruptEventDecl{
+		EventType: eventType,
+		Body:      body,
+		SpanV:     p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseOnHandlerDecl() (ast.OnHandlerDecl, []diag.Diagnostic) {
+	start := p.next()
+	pathField, ds := p.expectIdentifier("expected interrupt path field name")
+	if len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	if _, ds := p.consume(lex.Dot); len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	if _, ds := p.consume(lex.KeywordInterrupt); len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	if _, ds := p.consume(lex.LParen); len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	paramName, ds := p.expectIdentifier("expected interrupt event parameter name")
+	if len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	paramType, ds := p.parseTypeName()
+	if len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	body, ds := p.parseBlockStmts()
+	if len(ds) != 0 {
+		return ast.OnHandlerDecl{}, ds
+	}
+	return ast.OnHandlerDecl{
+		PathField: pathField.Text,
+		ParamName: paramName.Text,
+		ParamType: paramType,
+		Body:      body,
+		SpanV:     p.span(start.Start, p.previous().End),
+	}, nil
 }
 
 func (p *Parser) parseFieldContainer() ([]ast.Field, []diag.Diagnostic) {
@@ -807,7 +905,7 @@ func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {
 		p.skipSeparators()
 		name := ""
 		start := p.peek().Start
-		if isNameToken(p.peek()) && p.peekN(1).Kind == lex.Colon {
+		if isNameToken(p.peek()) && p.peekN(1).Kind == lex.Equal {
 			nameTok := p.next()
 			name = nameTok.Text
 			p.next()

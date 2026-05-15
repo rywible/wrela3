@@ -7,7 +7,7 @@ image Bad {
     transitions { delegated_hardware -> owned_hardware }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> DelegatedLeak {
-        return DelegatedLeak(hardware: hardware)
+        return DelegatedLeak(hardware = hardware)
     }
 
     phase owned_hardware(hardware: DelegatedLeak) -> never {

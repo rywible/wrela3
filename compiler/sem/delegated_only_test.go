@@ -18,7 +18,7 @@ data Bytes {
 unique class OwnedHardware {}
 unique class DelegatedHardware {
     fn exit_to_owned_hardware(self) -> DelegatedLeak {
-        return DelegatedLeak(hardware: self)
+        return DelegatedLeak(hardware = self)
     }
 }
 

@@ -65,7 +65,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let p = Pair(a: 1)
+        let p = Pair(a = 1)
         while true {}
     }
 }
@@ -98,7 +98,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let p = Pair(a: 1, a: 2)
+        let p = Pair(a = 1, a = 2)
         while true {}
     }
 }
@@ -161,7 +161,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        for byte in Bytes(address: 0, length: 1) {
+        for byte in Bytes(address = 0, length = 1) {
             let _ = byte
         }
         while true {}
@@ -262,9 +262,9 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let base = Narrow(a: 1, b: 2, c: 0x200000, d: 0x200000)
+        let base = Narrow(a = 1, b = 2, c = 0x200000, d = 0x200000)
         let next = base.d + 8
-        let alias = Narrow(a: 1, b: 2, c: next, d: base.c)
+        let alias = Narrow(a = 1, b = 2, c = next, d = base.c)
         while true {}
     }
 }
@@ -474,7 +474,7 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let bad = Bad(value: 1)
+        let bad = Bad(value = 1)
         while true {}
     }
 }
@@ -536,7 +536,7 @@ image Good {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let c = Callee()
-        let x = c.take(a: 1, 2)
+        let x = c.take(a = 1, 2)
         while true {}
     }
 }

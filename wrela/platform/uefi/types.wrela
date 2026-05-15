@@ -109,7 +109,7 @@ class DelegatedMemory {
     fn allocate(self, length: U64) -> DelegatedMutableBytes {
         let address = self.arena_base + self.next_offset
         self.next_offset = self.next_offset + length
-        return DelegatedMutableBytes(address: address, length: length)
+        return DelegatedMutableBytes(address = address, length = length)
     }
 
     fn final_memory_map(self) -> UefiMemoryMap {

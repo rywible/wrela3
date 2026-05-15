@@ -92,6 +92,18 @@ func TestLexUnicodeIdentifierAdvancesByRune(t *testing.T) {
 	}
 }
 
+func TestInterruptEventKeywords(t *testing.T) {
+	toks, ds := All("interrupt receiver on using interruptfoo receiverfoo oncall")
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	got := []Kind{toks[0].Kind, toks[1].Kind, toks[2].Kind, toks[3].Kind, toks[4].Kind, toks[5].Kind, toks[6].Kind}
+	want := []Kind{KeywordInterrupt, KeywordReceiver, KeywordOn, Identifier, Identifier, Identifier, Identifier}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("kinds = %#v, want %#v", got, want)
+	}
+}
+
 func TestLexInvalidUnicodeCharacterAdvancesByRune(t *testing.T) {
 	toks, ds := All("→")
 	if len(ds) != 1 {

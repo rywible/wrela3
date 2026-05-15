@@ -12,37 +12,37 @@ image HelloSerial {
     }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let arena = MutableBytes(address: 0x200000, length: 0x200000)
-        let executor_memory = ExecutorMemory(arena_base: arena.address, arena_length: arena.length, next_offset: 0)
+        let arena = MutableBytes(address = 0x200000, length = 0x200000)
+        let executor_memory = ExecutorMemory(arena_base = arena.address, arena_length = arena.length, next_offset = 0)
         let memory_plan = MemoryPlan(
-            owned_memory: OwnedMemory(arena: arena),
-            executor_arena: arena,
-            io_ports: IoPortAuthority()
+            owned_memory = OwnedMemory(arena = arena),
+            executor_arena = arena,
+            io_ports = IoPortAuthority()
         )
-        let virtual_memory_plan = VirtualMemoryPlan(pml4: arena.address)
+        let virtual_memory_plan = VirtualMemoryPlan(pml4 = arena.address)
         let cpu_plan = CpuPlan(
-            vcpu0: ExecutorPlacement(id: 0, memory: executor_memory),
-            owned_stack_top: arena.address + arena.length,
-            gdt_descriptor: Bytes(address: 0, length: 0),
-            idt_descriptor: Bytes(address: 0, length: 0),
-            cr3: virtual_memory_plan.pml4
+            vcpu0 = ExecutorPlacement(id = 0, memory = executor_memory),
+            owned_stack_top = arena.address + arena.length,
+            gdt_descriptor = Bytes(address = 0, length = 0),
+            idt_descriptor = Bytes(address = 0, length = 0),
+            cr3 = virtual_memory_plan.pml4
         )
         return hardware.exit_to_owned_hardware(
-            memory_plan: memory_plan,
-            virtual_memory_plan: virtual_memory_plan,
-            cpu_plan: cpu_plan
+            memory_plan = memory_plan,
+            virtual_memory_plan = virtual_memory_plan,
+            cpu_plan = cpu_plan
         )
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let com1 = hardware.io_ports.claim_com1()
-        let registers = SerialWriterRegisters(port_base: com1.port_base)
+        let registers = SerialWriterRegisters(port_base = com1.port_base)
         let serial_driver = SerialDriver(
-            registers: registers,
-            memory: DriverMemory(region: hardware.memory.arena)
+            registers = registers,
+            memory = DriverMemory(region = hardware.memory.arena)
         ).initialize()
-        let serial_path = SerialWritePath(owner: hardware.vcpu0, registers: serial_driver.registers)
-        let hello = HelloWorld(memory: hardware.vcpu0.memory, serial_path: serial_path)
+        let serial_path = SerialWritePath(owner = hardware.vcpu0, registers = serial_driver.registers)
+        let hello = HelloWorld(memory = hardware.vcpu0.memory, serial_path = serial_path)
         hello.run()
     }
 }

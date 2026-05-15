@@ -32,8 +32,8 @@ func TestSlashAndPercentUseMultiplyPrecedence(t *testing.T) {
 	}
 }
 
-func TestConstructorAndMethodExprParsing(t *testing.T) {
-	p := newParser("test", "Device(x: 1)")
+func TestParseNamedArgsUseEquals(t *testing.T) {
+	p := newParser("test", "Device(x = 1)")
 	expr, ds := p.parseExpr(0)
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics = %#v", ds)
@@ -46,7 +46,7 @@ func TestConstructorAndMethodExprParsing(t *testing.T) {
 		t.Fatalf("constructor = %#v", con)
 	}
 
-	p = newParser("test", "host.run(payload: Bytes)")
+	p = newParser("test", "host.run(payload = Bytes)")
 	expr, ds = p.parseExpr(0)
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics = %#v", ds)
@@ -58,9 +58,21 @@ func TestConstructorAndMethodExprParsing(t *testing.T) {
 	if call.Method != "run" || len(call.Args) != 1 {
 		t.Fatalf("call = %#v", call)
 	}
+}
 
-	p = newParser("test", "obj.field")
-	expr, ds = p.parseExpr(0)
+func TestParseNamedArgsRejectColon(t *testing.T) {
+	for _, src := range []string{"Device(x: 1)", "host.run(payload: Bytes)"} {
+		p := newParser("test", src)
+		_, ds := p.parseExpr(0)
+		if len(ds) == 0 {
+			t.Fatalf("expected diagnostic for %s", src)
+		}
+	}
+}
+
+func TestFieldExprParsing(t *testing.T) {
+	p := newParser("test", "obj.field")
+	expr, ds := p.parseExpr(0)
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics = %#v", ds)
 	}

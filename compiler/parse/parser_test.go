@@ -83,7 +83,7 @@ class Writer {
     byte = 2
     if true { return byte }
     while false { byte = 2 }
-    for b in bytes { self.write_byte(byte: b) }
+    for b in bytes { self.write_byte(byte = b) }
   }
 }`)
 	if len(ds) != 0 {
@@ -165,11 +165,11 @@ driver path SerialWritePath {
         ret
     }
 
-    fn write(self, bytes: Bytes) {
-        self.registers.write8(offset: 0, value: byte)
-        self.pause()
-    }
-}
+	    fn write(self, bytes: Bytes) {
+	        self.registers.write8(offset = 0, value = byte)
+	        self.pause()
+	    }
+	}
 
 executor HelloWorld {
     start fn run(self) -> never {
@@ -197,6 +197,102 @@ executor HelloWorld {
 	expr := exec.Methods[0].Body[0].(*ast.ExprStmt).Expr.(*ast.CallExpr)
 	if len(expr.Args) != 1 || expr.Args[0].Name != "" {
 		t.Fatalf("positional call args = %#v, want one unnamed arg", expr.Args)
+	}
+}
+
+func TestParseDriverPathInterruptEvent(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module test.interrupt_event
+data SerialPathInterrupt { byte: U8 }
+driver path SerialConsolePath {
+    interrupt receiver -> SerialPathInterrupt {
+        return SerialPathInterrupt(byte = 0)
+    }
+}`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	path := mod.Decls[1].(*ast.DriverPathDecl)
+	if len(path.InterruptEvents) != 1 {
+		t.Fatalf("events = %d, want 1", len(path.InterruptEvents))
+	}
+	ev := path.InterruptEvents[0]
+	if ev.EventType != "SerialPathInterrupt" || len(ev.Body) != 1 {
+		t.Fatalf("event = %#v", ev)
+	}
+}
+
+func TestInterruptEventRejectedOutsideDriverPath(t *testing.T) {
+	cases := []string{
+		"class C { interrupt receiver -> Event { return Event() } }",
+		"driver D { interrupt receiver -> Event { return Event() } }",
+		"executor E { interrupt receiver -> Event { return Event() } }",
+	}
+	for _, body := range cases {
+		_, ds := parseModuleForTest(t, "module test.bad_event\ndata Event {}\n"+body)
+		if len(ds) == 0 {
+			t.Fatalf("expected parse diagnostic for %s", body)
+		}
+	}
+}
+
+func TestParseExecutorOnHandler(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module test.on_handler
+executor HelloWorld {
+    serial_path: SerialConsolePath
+    on serial_path.interrupt(event: SerialPathInterrupt) {
+        self.serial_path.ack_receive(event = event)
+    }
+}`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	exec := mod.Decls[0].(*ast.ExecutorDecl)
+	if len(exec.OnHandlers) != 1 {
+		t.Fatalf("on handlers = %d, want 1", len(exec.OnHandlers))
+	}
+	got := exec.OnHandlers[0]
+	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType != "SerialPathInterrupt" {
+		t.Fatalf("on handler = %#v", got)
+	}
+}
+
+func TestOnHandlerRejectsMissingParamType(t *testing.T) {
+	_, ds := parseModuleForTest(t, `
+module test.bad_on
+executor HelloWorld {
+    serial_path: SerialConsolePath
+    on serial_path.interrupt(event) {
+    }
+}`)
+	if len(ds) == 0 {
+		t.Fatalf("expected parse diagnostic")
+	}
+}
+
+func TestOnHandlerRejectsNonInterruptSelector(t *testing.T) {
+	_, ds := parseModuleForTest(t, `
+module test.bad_on_selector
+executor HelloWorld {
+    serial_path: SerialConsolePath
+    on serial_path.receive(event: SerialPathInterrupt) {
+    }
+}`)
+	if len(ds) == 0 {
+		t.Fatalf("expected parse diagnostic")
+	}
+}
+
+func TestOnHandlerRejectedOutsideExecutor(t *testing.T) {
+	_, ds := parseModuleForTest(t, `
+module test.bad_on_placement
+class C {
+    on serial_path.interrupt(event: SerialPathInterrupt) {
+    }
+}`)
+	if len(ds) == 0 {
+		t.Fatalf("expected parse diagnostic")
 	}
 }
 

@@ -52,22 +52,42 @@ type DriverDecl struct {
 func (d *DriverDecl) Span() source.Span { return d.SpanV }
 
 type DriverPathDecl struct {
-	Name    string
-	Fields  []Field
-	Methods []MethodDecl
-	SpanV   source.Span
+	Name            string
+	Fields          []Field
+	Methods         []MethodDecl
+	InterruptEvents []InterruptEventDecl
+	SpanV           source.Span
 }
 
 func (d *DriverPathDecl) Span() source.Span { return d.SpanV }
 
+type InterruptEventDecl struct {
+	EventType string
+	Body      []Stmt
+	SpanV     source.Span
+}
+
+func (d *InterruptEventDecl) Span() source.Span { return d.SpanV }
+
 type ExecutorDecl struct {
-	Name    string
-	Fields  []Field
-	Methods []MethodDecl
-	SpanV   source.Span
+	Name       string
+	Fields     []Field
+	Methods    []MethodDecl
+	OnHandlers []OnHandlerDecl
+	SpanV      source.Span
 }
 
 func (d *ExecutorDecl) Span() source.Span { return d.SpanV }
+
+type OnHandlerDecl struct {
+	PathField string
+	ParamName string
+	ParamType string
+	Body      []Stmt
+	SpanV     source.Span
+}
+
+func (d *OnHandlerDecl) Span() source.Span { return d.SpanV }
 
 type ImageDecl struct {
 	Name        string
@@ -272,11 +292,11 @@ func DebugExpr(expr Expr) string {
 		}
 		return "false"
 	case *FieldExpr:
-		return ".(" + DebugExpr(e.Base) + " " + e.Field + ")"
+		return DebugExpr(e.Base) + "." + e.Field
 	case *ConstructorExpr:
-		return "(" + e.Type + " " + debugNamedArgs(e.Args) + ")"
+		return e.Type + "(" + debugNamedArgs(e.Args) + ")"
 	case *CallExpr:
-		return "(" + DebugExpr(e.Receiver) + "." + e.Method + " " + debugNamedArgs(e.Args) + ")"
+		return DebugExpr(e.Receiver) + "." + e.Method + "(" + debugNamedArgs(e.Args) + ")"
 	case *BinaryExpr:
 		return "(" + e.Op + " " + DebugExpr(e.Left) + " " + DebugExpr(e.Right) + ")"
 	default:
@@ -287,7 +307,11 @@ func DebugExpr(expr Expr) string {
 func debugNamedArgs(args []NamedArg) string {
 	out := make([]string, 0, len(args))
 	for _, arg := range args {
-		out = append(out, arg.Name+": "+DebugExpr(arg.Value))
+		if arg.Name == "" {
+			out = append(out, DebugExpr(arg.Value))
+			continue
+		}
+		out = append(out, arg.Name+" = "+DebugExpr(arg.Value))
 	}
-	return strings.Join(out, " ")
+	return strings.Join(out, ", ")
 }

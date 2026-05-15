@@ -63,7 +63,7 @@ data Com1IoPortClaim {
 
 class IoPortAuthority {
     fn claim_com1(self) -> Com1IoPortClaim {
-        return Com1IoPortClaim(port_base: 0x03f8)
+        return Com1IoPortClaim(port_base = 0x03f8)
     }
 }
 

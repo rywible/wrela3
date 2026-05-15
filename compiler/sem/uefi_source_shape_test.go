@@ -281,31 +281,31 @@ image UefiSourceHarness {
     transitions { delegated_hardware -> owned_hardware }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let arena = MutableBytes(address: 0, length: 0)
-        let owned_memory = OwnedMemory(arena: arena)
+        let arena = MutableBytes(address = 0, length = 0)
+        let owned_memory = OwnedMemory(arena = arena)
         let exec_memory = ExecutorMemory(
-            arena_base: 0,
-            arena_length: 0,
-            next_offset: 0
+            arena_base = 0,
+            arena_length = 0,
+            next_offset = 0
         )
-        let vcpu0 = ExecutorPlacement(id: 0, memory: exec_memory)
+        let vcpu0 = ExecutorPlacement(id = 0, memory = exec_memory)
         let memory_plan = MemoryPlan(
-            owned_memory: owned_memory,
-            executor_arena: MutableBytes(address: 0, length: 0),
-            io_ports: IoPortAuthority()
+            owned_memory = owned_memory,
+            executor_arena = MutableBytes(address = 0, length = 0),
+            io_ports = IoPortAuthority()
         )
-        let virtual_memory_plan = VirtualMemoryPlan(pml4: 0)
+        let virtual_memory_plan = VirtualMemoryPlan(pml4 = 0)
         let cpu_plan = CpuPlan(
-            vcpu0: vcpu0,
-            owned_stack_top: 0,
-            gdt_descriptor: Bytes(address: 0, length: 0),
-            idt_descriptor: Bytes(address: 0, length: 0),
-            cr3: 0
+            vcpu0 = vcpu0,
+            owned_stack_top = 0,
+            gdt_descriptor = Bytes(address = 0, length = 0),
+            idt_descriptor = Bytes(address = 0, length = 0),
+            cr3 = 0
         )
         return hardware.exit_to_owned_hardware(
-            memory_plan: memory_plan,
-            virtual_memory_plan: virtual_memory_plan,
-            cpu_plan: cpu_plan
+            memory_plan = memory_plan,
+            virtual_memory_plan = virtual_memory_plan,
+            cpu_plan = cpu_plan
         )
     }
 

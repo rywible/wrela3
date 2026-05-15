@@ -54,3 +54,38 @@ func TestDebugExprConstructorAndCall(t *testing.T) {
 		}
 	}
 }
+
+func TestDebugExprNamedArgsUseEquals(t *testing.T) {
+	expr := &CallExpr{
+		Receiver: &NameExpr{Name: "host"},
+		Method:   "run",
+		Args: []NamedArg{{
+			Name:  "payload",
+			Value: &NameExpr{Name: "Bytes"},
+		}},
+	}
+	if got, want := DebugExpr(expr), "host.run(payload = Bytes)"; got != want {
+		t.Fatalf("DebugExpr = %q, want %q", got, want)
+	}
+}
+
+func TestInterruptEventASTContracts(t *testing.T) {
+	path := &DriverPathDecl{
+		Name: "SerialConsolePath",
+		InterruptEvents: []InterruptEventDecl{
+			{EventType: "SerialPathInterrupt"},
+		},
+	}
+	exec := &ExecutorDecl{
+		Name: "HelloWorld",
+		OnHandlers: []OnHandlerDecl{
+			{PathField: "serial_path", ParamName: "event", ParamType: "SerialPathInterrupt"},
+		},
+	}
+	if path.InterruptEvents[0].EventType != "SerialPathInterrupt" {
+		t.Fatalf("interrupt event not stored")
+	}
+	if exec.OnHandlers[0].PathField != "serial_path" || exec.OnHandlers[0].ParamType != "SerialPathInterrupt" {
+		t.Fatalf("on handler not stored")
+	}
+}

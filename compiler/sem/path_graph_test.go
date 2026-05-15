@@ -38,7 +38,7 @@ image Bad {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let serial = SerialDriver()
-        let hello = HelloWorld(serial: serial)
+        let hello = HelloWorld(serial = serial)
         hello.run()
     }
 }
@@ -52,7 +52,7 @@ image Bad {
 		if !hasCode(diags, diag.SEM0010) {
 			t.Fatalf("expected SEM0010, got %#v", diags)
 		}
-		wantStart := strings.Index(src, "serial: serial")
+		wantStart := strings.Index(src, "serial = serial")
 		for _, d := range diags {
 			if d.Code == diag.SEM0010 && d.Start != wantStart {
 				t.Fatalf("SEM0010 start = %d, want field binding start %d: %#v", d.Start, wantStart, d)
@@ -108,9 +108,9 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 0))
-        let a = A(serial_path: serial_path)
-        let b = B(serial_path: serial_path)
+        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+        let a = A(serial_path = serial_path)
+        let b = B(serial_path = serial_path)
         a.run()
         b.run()
     }
@@ -125,7 +125,7 @@ image Bad {
 		if !hasCode(diags, diag.SEM0011) {
 			t.Fatalf("expected SEM0011, got %#v", diags)
 		}
-		wantStart := strings.LastIndex(src, "serial_path: serial_path")
+		wantStart := strings.LastIndex(src, "serial_path = serial_path")
 		for _, d := range diags {
 			if d.Code == diag.SEM0011 && d.Start != wantStart {
 				t.Fatalf("SEM0011 start = %d, want duplicate field binding start %d: %#v", d.Start, wantStart, d)
@@ -160,7 +160,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 0))
+        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
         while true {}
     }
 }
@@ -211,7 +211,7 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let a = A(serial_path: SerialWritePath(owner: ExecutorPlacement(id: 0)))
+        let a = A(serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0)))
         a.run()
     }
 }
@@ -262,9 +262,9 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let original = SerialWritePath(owner: ExecutorPlacement(id: 0))
+        let original = SerialWritePath(owner = ExecutorPlacement(id = 0))
         let serial_path = original
-        let a = A(serial_path: serial_path)
+        let a = A(serial_path = serial_path)
         a.run()
     }
 }
@@ -328,10 +328,10 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let registers = Registers(port: 0x3F8)
-        let serial_driver = SerialDriver(registers: registers).initialize()
-        let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 0), registers: serial_driver.registers)
-        let a = A(serial_path: serial_path)
+        let registers = Registers(port = 0x3F8)
+        let serial_driver = SerialDriver(registers = registers).initialize()
+        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0), registers = serial_driver.registers)
+        let a = A(serial_path = serial_path)
         a.run()
     }
 }
@@ -391,13 +391,13 @@ image Good {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         if true {
-            let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 0))
-            let a = A(serial_path: serial_path)
+            let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+            let a = A(serial_path = serial_path)
             a.run()
         }
         if true {
-            let serial_path = SerialWritePath(owner: ExecutorPlacement(id: 1))
-            let b = B(serial_path: serial_path)
+            let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 1))
+            let b = B(serial_path = serial_path)
             b.run()
         }
         while true {}

@@ -69,7 +69,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let b = Bytes(address: 0, length: 0)
+        let b = Bytes(address = 0, length = 0)
         while true {}
     }
 }
