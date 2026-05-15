@@ -9,9 +9,15 @@ import (
 )
 
 type branchFixup struct {
-	relPos int
-	target string
-	nextPC int
+	mnemonic string
+	relPos   int
+	target   string
+	nextPC   int
+}
+
+type ExternalCallReloc struct {
+	Offset uint64
+	Symbol string
 }
 
 var condOpcode = map[string]byte{
@@ -24,10 +30,20 @@ var condOpcode = map[string]byte{
 }
 
 func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
+	out, _, diags := encode(instructions, false)
+	return out, diags
+}
+
+func EncodeWithExternalCalls(instructions []Instruction) ([]byte, []ExternalCallReloc, []diag.Diagnostic) {
+	return encode(instructions, true)
+}
+
+func encode(instructions []Instruction, allowExternalCalls bool) ([]byte, []ExternalCallReloc, []diag.Diagnostic) {
 	var out []byte
 	var diags []diag.Diagnostic
 	labels := map[string]int{}
 	var fixups []branchFixup
+	var externalRelocs []ExternalCallReloc
 
 	for _, ins := range instructions {
 		if ins.Label != "" {
@@ -247,6 +263,13 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 	for _, fix := range fixups {
 		target, ok := labels[fix.target]
 		if !ok {
+			if allowExternalCalls && isExternalCallBranch(fix) {
+				externalRelocs = append(externalRelocs, ExternalCallReloc{
+					Offset: uint64(fix.relPos),
+					Symbol: fix.target,
+				})
+				continue
+			}
 			diags = append(diags, diag.Diagnostic{
 				Phase:   "asm",
 				Code:    diag.ASM0002,
@@ -266,7 +289,12 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 		binary.LittleEndian.PutUint32(out[fix.relPos:fix.relPos+4], uint32(int32(rel)))
 	}
 
-	return out, diags
+	return out, externalRelocs, diags
+}
+
+func isExternalCallBranch(fix branchFixup) bool {
+	mnemonic := strings.ToLower(fix.mnemonic)
+	return (mnemonic == "call" || mnemonic == "jmp") && strings.HasPrefix(fix.target, "_wrela_")
 }
 
 func encodeOut(ins Instruction) ([]byte, bool) {
@@ -646,16 +674,18 @@ func encodeNearBranch(ins Instruction, start int, size int, opcode byte, cond bo
 	case LabelRef:
 		if cond {
 			*fixups = append(*fixups, branchFixup{
-				relPos: start + 2,
-				target: target.Name,
-				nextPC: start + size,
+				mnemonic: ins.Mnemonic,
+				relPos:   start + 2,
+				target:   target.Name,
+				nextPC:   start + size,
 			})
 			return []byte{0x0F, opcode, 0, 0, 0, 0}, true
 		}
 		*fixups = append(*fixups, branchFixup{
-			relPos: start + 1,
-			target: target.Name,
-			nextPC: start + size,
+			mnemonic: ins.Mnemonic,
+			relPos:   start + 1,
+			target:   target.Name,
+			nextPC:   start + size,
 		})
 		return []byte{opcode, 0, 0, 0, 0}, true
 	case ImmOperand:

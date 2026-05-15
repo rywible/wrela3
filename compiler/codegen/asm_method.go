@@ -9,7 +9,7 @@ import (
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
-func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Diagnostic, []byte) {
+func lowerAsmMethodInstructions(method ir.AsmMethod) ([]asm.Instruction, []diag.Diagnostic) {
 	paramNames := make([]string, 0, len(method.Params)+1)
 	paramNames = append(paramNames, "self")
 	for _, p := range method.Params {
@@ -20,7 +20,7 @@ func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Dia
 
 	parsed, diags := asm.ParseBody(method.Body, paramNames)
 	if len(diags) != 0 {
-		return nil, diags, nil
+		return nil, diags
 	}
 
 	paramLoc := map[string]asm.Reg{
@@ -44,7 +44,7 @@ func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Dia
 		for _, operand := range in.Operands {
 			nextOp, mapErr := lowerBoundOperand(method, operand, paramLoc)
 			if mapErr != nil {
-				return nil, []diag.Diagnostic{*mapErr}, nil
+				return nil, []diag.Diagnostic{*mapErr}
 			}
 			if nextOp == nil {
 				nextOp = operand
@@ -52,6 +52,15 @@ func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Dia
 			next.Operands = append(next.Operands, nextOp)
 		}
 		lower = append(lower, next)
+	}
+
+	return lower, nil
+}
+
+func lowerAndEncodeAsmMethod(method ir.AsmMethod) ([]asm.Instruction, []diag.Diagnostic, []byte) {
+	lower, diags := lowerAsmMethodInstructions(method)
+	if len(diags) != 0 {
+		return nil, diags, nil
 	}
 
 	emitted, asDiags := asm.Encode(lower)

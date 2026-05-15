@@ -231,7 +231,7 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 }
 
 func compileAsmMethodUnit(method ir.AsmMethod) (compiledUnit, []diag.Diagnostic) {
-	_, diags, code := lowerAndEncodeAsmMethod(method)
+	instructions, diags := lowerAsmMethodInstructions(method)
 	if len(diags) != 0 {
 		for i := range diags {
 			if method.Symbol != "" {
@@ -240,7 +240,24 @@ func compileAsmMethodUnit(method ir.AsmMethod) (compiledUnit, []diag.Diagnostic)
 		}
 		return compiledUnit{}, diags
 	}
-	return compiledUnit{Symbol: method.Symbol, Bytes: code}, nil
+	code, externalRelocs, asDiags := asm.EncodeWithExternalCalls(instructions)
+	if len(asDiags) != 0 {
+		diags = convertAsmDiagnostics(asDiags)
+		for i := range diags {
+			if method.Symbol != "" {
+				diags[i].Message = method.Symbol + ": " + diags[i].Message
+			}
+		}
+		return compiledUnit{}, diags
+	}
+	callRelocs := make([]internalReloc, 0, len(externalRelocs))
+	for _, rel := range externalRelocs {
+		callRelocs = append(callRelocs, internalReloc{
+			Offset: rel.Offset,
+			Symbol: rel.Symbol,
+		})
+	}
+	return compiledUnit{Symbol: method.Symbol, Bytes: code, CallReloc: callRelocs}, nil
 }
 
 func compileEntryAdapterUnit(entry ir.EntryAdapter, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
