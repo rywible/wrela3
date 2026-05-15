@@ -735,7 +735,7 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
-		if !ok || constValue.Value < 0 || constValue.Value > 63 || valueWidthBits(e.ctx, op) != 64 {
+		if !ok || constValue.Value > 63 {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: " + op.Op})
 			return
 		}

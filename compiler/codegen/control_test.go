@@ -387,6 +387,30 @@ func TestCompileShiftAndBitOrOpcodes(t *testing.T) {
 	}
 }
 
+func TestCompileShiftAcceptsU32Operands(t *testing.T) {
+	u32 := ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}
+	value := &ir.Param{Symbol: "value", Type: u32}
+	shift := &ir.Binary{
+		Op:    "shl",
+		Left:  value,
+		Right: &ir.ConstInt{Symbol: "shift", Value: 11, Type: u32},
+		Type:  u32,
+	}
+	fn := ir.Function{
+		Symbol: "u32_shift",
+		Params: []ir.Value{value},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{shift, &ir.Return{Value: shift}},
+		}},
+	}
+
+	_, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+}
+
 func TestCompilePreserveStackReturnUsesSavedContinuation(t *testing.T) {
 	result := &ir.ConstInt{Symbol: "result", Value: 7, Type: ir.Type{Name: "U64"}}
 	fn := ir.Function{
