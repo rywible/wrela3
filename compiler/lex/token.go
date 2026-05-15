@@ -63,6 +63,7 @@ const (
 	KeywordIf
 	KeywordElse
 	KeywordWhile
+	KeywordWith
 	KeywordFor
 	KeywordIn
 	KeywordTrue
@@ -105,6 +106,7 @@ var keywordKinds = map[string]Kind{
 	"if":          KeywordIf,
 	"else":        KeywordElse,
 	"while":       KeywordWhile,
+	"with":        KeywordWith,
 	"for":         KeywordFor,
 	"in":          KeywordIn,
 	"true":        KeywordTrue,

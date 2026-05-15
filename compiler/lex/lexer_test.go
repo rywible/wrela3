@@ -104,6 +104,16 @@ func TestInterruptEventKeywords(t *testing.T) {
 	}
 }
 
+func TestWithKeyword(t *testing.T) {
+	toks, ds := All("with memory.frame(length = 64) as tick {}")
+	if len(ds) != 0 {
+		t.Fatalf("lex diagnostics: %#v", ds)
+	}
+	if toks[0].Kind != KeywordWith || toks[0].Text != "with" {
+		t.Fatalf("first token = %#v, want KeywordWith", toks[0])
+	}
+}
+
 func TestLexInvalidUnicodeCharacterAdvancesByRune(t *testing.T) {
 	toks, ds := All("→")
 	if len(ds) != 1 {
