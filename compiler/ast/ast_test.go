@@ -10,6 +10,7 @@ func TestASTContractAssertions(t *testing.T) {
 	var _ Decl = (*ImageDecl)(nil)
 	var _ Decl = (*DriverPathDecl)(nil)
 	var _ Stmt = (*ForStmt)(nil)
+	var _ Stmt = (*WithStmt)(nil)
 	var _ Expr = (*CallExpr)(nil)
 }
 
@@ -66,6 +67,29 @@ func TestDebugExprNamedArgsUseEquals(t *testing.T) {
 	}
 	if got, want := DebugExpr(expr), "host.run(payload = Bytes)"; got != want {
 		t.Fatalf("DebugExpr = %q, want %q", got, want)
+	}
+}
+
+func TestDebugWithStmt(t *testing.T) {
+	stmt := &WithStmt{
+		Expr: &CallExpr{
+			Receiver: &NameExpr{Name: "memory"},
+			Method:   "frame",
+			Args: []NamedArg{{
+				Name:  "length",
+				Value: &IntLiteral{Value: "64"},
+			}},
+		},
+		Name: "tick",
+		Body: []Stmt{&LetStmt{
+			Name: "x",
+			Expr: &NameExpr{Name: "tick"},
+		}},
+	}
+	got := DebugStmt(stmt)
+	want := "with memory.frame(length = 64) as tick { let x = tick }"
+	if got != want {
+		t.Fatalf("DebugStmt = %q, want %q", got, want)
 	}
 }
 

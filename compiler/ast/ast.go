@@ -182,6 +182,15 @@ type WhileStmt struct {
 
 func (s *WhileStmt) Span() source.Span { return s.SpanV }
 
+type WithStmt struct {
+	Expr  Expr
+	Name  string
+	Body  []Stmt
+	SpanV source.Span
+}
+
+func (s *WithStmt) Span() source.Span { return s.SpanV }
+
 type ForStmt struct {
 	Var    string
 	InExpr Expr
@@ -302,6 +311,40 @@ func DebugExpr(expr Expr) string {
 	default:
 		return "<expr>"
 	}
+}
+
+func DebugStmt(stmt Stmt) string {
+	switch s := stmt.(type) {
+	case *LetStmt:
+		return "let " + s.Name + " = " + DebugExpr(s.Expr)
+	case *ReturnStmt:
+		if s.Value == nil {
+			return "return"
+		}
+		return "return " + DebugExpr(s.Value)
+	case *AssignStmt:
+		return DebugExpr(s.Target) + " = " + DebugExpr(s.Value)
+	case *ExprStmt:
+		return DebugExpr(s.Expr)
+	case *IfStmt:
+		return "if " + DebugExpr(s.Cond) + " { " + debugStmtList(s.Then) + " }"
+	case *WhileStmt:
+		return "while " + DebugExpr(s.Cond) + " { " + debugStmtList(s.Body) + " }"
+	case *ForStmt:
+		return "for " + s.Var + " in " + DebugExpr(s.InExpr) + " { " + debugStmtList(s.Body) + " }"
+	case *WithStmt:
+		return "with " + DebugExpr(s.Expr) + " as " + s.Name + " { " + debugStmtList(s.Body) + " }"
+	default:
+		return "<stmt>"
+	}
+}
+
+func debugStmtList(stmts []Stmt) string {
+	parts := make([]string, 0, len(stmts))
+	for _, stmt := range stmts {
+		parts = append(parts, DebugStmt(stmt))
+	}
+	return strings.Join(parts, " ")
 }
 
 func debugNamedArgs(args []NamedArg) string {
