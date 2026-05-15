@@ -113,6 +113,8 @@ func valuesDefinedBy(op Operation) []Value {
 		values := valuesFromOps(v.ConditionOps)
 		values = append(values, valuesFromOps(v.Body)...)
 		return values
+	case *InterruptContextStore:
+		return nil
 	}
 	return nil
 }
@@ -292,6 +294,28 @@ type DataObject struct {
 	Bytes  []byte
 }
 
+type InterruptContextPathField struct {
+	FieldName string
+	Offset    int
+	Type      Type
+}
+
+type InterruptContext struct {
+	Symbol       string
+	ExecutorType Type
+	Size         int
+	PathFields   []InterruptContextPathField
+}
+
+type InterruptContextStore struct {
+	ContextSymbol string
+	Source        Value
+	SourceType    Type
+	Size          int
+}
+
+func (InterruptContextStore) isOperation() {}
+
 type EntryAdapter struct {
 	Symbol                string
 	DelegatedPhaseSymbol  string
@@ -346,9 +370,11 @@ type Program struct {
 	Functions         []Function
 	AsmMethods        []AsmMethod
 	Data              []DataObject
+	WritableData      []DataObject
 	Entry             EntryAdapter
 	Types             map[string]TypeInfo
 	InterruptEvents   []InterruptEvent
 	OnHandlers        []OnHandler
 	InterruptBindings []InterruptBinding
+	InterruptContexts []InterruptContext
 }

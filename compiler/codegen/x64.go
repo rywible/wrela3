@@ -101,11 +101,6 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	}
 
 	sections := []Section{{Name: ".text", Data: nil, Characteristics: 0x60000020}}
-	dataBytes, dataOffsets := buildRData(program)
-	if len(program.Data) > 0 {
-		sections = append(sections, Section{Name: ".rdata", Data: dataBytes, Characteristics: 0x40000040})
-	}
-
 	symbols := map[string]uint64{}
 	unitOffsets := map[string]uint64{}
 	for _, unit := range units {
@@ -118,12 +113,27 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	}
 	sections[0].RVA = 0x1000
 
-	if len(sections) > 1 {
-		alignedSize := alignUpLen(uint64(len(sections[0].Data)), 0x1000)
-		sections[0].Data = append(sections[0].Data, make([]byte, alignedSize-uint64(len(sections[0].Data)))...)
-		sections[1].RVA = 0x1000 + uint64(len(sections[0].Data))
-		for symbol, offset := range dataOffsets {
-			symbols[symbol] = sections[1].RVA + offset
+	var dataSections []builtDataSection
+	if len(program.Data) > 0 {
+		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
+		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
+	}
+	if len(program.WritableData) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 {
+		section, offsets := buildData(program)
+		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
+	}
+	if len(dataSections) > 0 {
+		alignedTextSize := alignUpLen(uint64(len(sections[0].Data)), 0x1000)
+		sections[0].Data = append(sections[0].Data, make([]byte, alignedTextSize-uint64(len(sections[0].Data)))...)
+		nextRVA := sections[0].RVA + alignedTextSize
+		for _, built := range dataSections {
+			section := built.Section
+			section.RVA = nextRVA
+			for symbol, offset := range built.Offsets {
+				symbols[symbol] = section.RVA + offset
+			}
+			sections = append(sections, section)
+			nextRVA += alignUpLen(uint64(len(section.Data)), 0x1000)
 		}
 	}
 
@@ -215,9 +225,24 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding) comp
 	for _, reg := range []string{"rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"} {
 		e.emitInstruction(asm.Instruction{Mnemonic: "push", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup(reg)}}})
 	}
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.ContextSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdi")},
+		asm.MemOperand{Base: asm.MustLookup("rax"), Disp: int64(binding.PathFieldOffset), Width: 64},
+	}})
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("r10")},
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+	}})
 	emitCallReloc(e, binding.EventFunctionSymbol)
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.RegOperand{Reg: asm.MustLookup("rsi")},
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+	}})
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.ContextSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdi")},
 		asm.RegOperand{Reg: asm.MustLookup("rax")},
 	}})
 	emitCallReloc(e, binding.HandlerFunctionSymbol)
@@ -237,7 +262,7 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding) comp
 		e.emitInstruction(asm.Instruction{Mnemonic: "pop", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup(reg)}}})
 	}
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
-	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc}
+	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}
 }
 
 func emitCallReloc(e *Emitter, symbol string) {
@@ -245,14 +270,42 @@ func emitCallReloc(e *Emitter, symbol string) {
 	e.CallReloc = append(e.CallReloc, internalReloc{Offset: uint64(len(e.Code) - 4), Symbol: symbol})
 }
 
-func buildRData(program *ir.Program) ([]byte, map[string]uint64) {
+type builtDataSection struct {
+	Section Section
+	Offsets map[string]uint64
+}
+
+func buildData(program *ir.Program) (Section, map[string]uint64) {
+	writable := append([]ir.DataObject{}, program.WritableData...)
+	writable = append(writable, interruptRuntimeData(program)...)
+	return buildDataSection(".data", writable, 0xC0000040)
+}
+
+func interruptRuntimeData(program *ir.Program) []ir.DataObject {
+	out := make([]ir.DataObject, 0, len(program.InterruptContexts)+len(program.InterruptBindings))
+	for _, context := range program.InterruptContexts {
+		out = append(out, ir.DataObject{
+			Symbol: context.Symbol,
+			Bytes:  make([]byte, context.Size),
+		})
+	}
+	for _, binding := range program.InterruptBindings {
+		out = append(out, ir.DataObject{
+			Symbol: binding.EventStorageSymbol,
+			Bytes:  make([]byte, binding.EventStorageSize),
+		})
+	}
+	return out
+}
+
+func buildDataSection(name string, objects []ir.DataObject, characteristics uint32) (Section, map[string]uint64) {
 	out := []byte{}
 	offsets := map[string]uint64{}
-	for _, obj := range program.Data {
+	for _, obj := range objects {
 		offsets[obj.Symbol] = uint64(len(out))
 		out = append(out, obj.Bytes...)
 	}
-	return out, offsets
+	return Section{Name: name, Data: out, Characteristics: characteristics}, offsets
 }
 
 func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
@@ -296,6 +349,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitFieldLoad(e, v, frame)
 			case *ir.FieldStore:
 				emitFieldStore(e, v, frame)
+			case *ir.InterruptContextStore:
+				emitInterruptContextStore(e, frame, v)
 			}
 		}
 	}
@@ -962,6 +1017,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitFieldLoad(e, v, frame)
 		case *ir.FieldStore:
 			emitFieldStore(e, v, frame)
+		case *ir.InterruptContextStore:
+			emitInterruptContextStore(e, frame, v)
 		}
 	}
 }
@@ -1076,6 +1133,51 @@ func emitFieldStore(e *Emitter, op *ir.FieldStore, frame Frame) {
 	}
 	size := e.ctx.representationSize(op.Type.Name)
 	emitCopyValueToMemoryRange(e, frame, op.Value, base, disp, size)
+}
+
+func emitInterruptContextStore(e *Emitter, frame Frame, store *ir.InterruptContextStore) {
+	srcBase, srcDisp, ok := emitValueAddress(e, frame, store.Source)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "cannot address interrupt context source"})
+		return
+	}
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), store.ContextSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdi")},
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+	}})
+	emitCopyBytes(e, asm.MustLookup("rdi"), 0, srcBase, srcDisp, store.Size)
+}
+
+func emitCopyBytes(e *Emitter, dstBase asm.Reg, dstDisp int64, srcBase asm.Reg, srcDisp int64, size int) {
+	offset := 0
+	for size-offset >= 8 {
+		emitCopyWidth(e, dstBase, dstDisp+int64(offset), srcBase, srcDisp+int64(offset), 64, "rax")
+		offset += 8
+	}
+	if size-offset >= 4 {
+		emitCopyWidth(e, dstBase, dstDisp+int64(offset), srcBase, srcDisp+int64(offset), 32, "eax")
+		offset += 4
+	}
+	if size-offset >= 2 {
+		emitCopyWidth(e, dstBase, dstDisp+int64(offset), srcBase, srcDisp+int64(offset), 16, "ax")
+		offset += 2
+	}
+	if size-offset == 1 {
+		emitCopyWidth(e, dstBase, dstDisp+int64(offset), srcBase, srcDisp+int64(offset), 8, "al")
+	}
+}
+
+func emitCopyWidth(e *Emitter, dstBase asm.Reg, dstDisp int64, srcBase asm.Reg, srcDisp int64, width int, regName string) {
+	reg := asm.MustLookup(regName)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: reg},
+		asm.MemOperand{Base: srcBase, Disp: srcDisp, Width: width},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: dstBase, Disp: dstDisp, Width: width},
+		asm.RegOperand{Reg: reg},
+	}})
 }
 
 func emitZeroSlotRange(e *Emitter, slot int, size int) {

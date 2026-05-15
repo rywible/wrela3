@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ir"
@@ -86,6 +87,7 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				ExecutorType:          executorType,
 				PathField:             "serial_path",
 				PathFieldOffset:       16,
+				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_40",
 				EventStorageSize:      8,
 				Vector:                0x40,
@@ -98,6 +100,7 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				ExecutorType:          executorType,
 				PathField:             "edu_path",
 				PathFieldOffset:       16,
+				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_41",
 				EventStorageSize:      8,
 				Vector:                0x41,
@@ -110,11 +113,22 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				ExecutorType:          executorType,
 				PathField:             "ivshmem_rx",
 				PathFieldOffset:       16,
+				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_42",
 				EventStorageSize:      8,
 				Vector:                0x42,
 			},
 		},
+		InterruptContexts: []ir.InterruptContext{{
+			Symbol:       "_wrela_interrupt_context_0",
+			ExecutorType: executorType,
+			Size:         32,
+			PathFields: []ir.InterruptContextPathField{{
+				FieldName: "serial_path",
+				Offset:    16,
+				Type:      ir.Type{Name: "SerialConsolePath", Module: "machine.x86_64.serial", Kind: ir.TypeKindDriverPath},
+			}},
+		}},
 	}
 }
 
@@ -170,4 +184,67 @@ func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
 			t.Fatalf("%s missing iretq", symbol)
 		}
 	}
+}
+
+func TestInterruptContextSymbolStoresActiveExecutor(t *testing.T) {
+	program := interruptProgramForCodegenTest(t)
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if _, ok := img.Symbols["_wrela_interrupt_context_0"]; !ok {
+		t.Fatalf("missing interrupt context symbol")
+	}
+	data := sectionByName(img, ".data")
+	if data == nil || data.Characteristics&0x80000000 == 0 || data.Characteristics&0x40000000 == 0 {
+		t.Fatalf("interrupt context must live in writable .data section: %#v", data)
+	}
+
+	img2, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("second Compile() diagnostics = %#v", diags)
+	}
+	data2 := sectionByName(img2, ".data")
+	if len(program.WritableData) != 0 {
+		t.Fatalf("Compile() must not mutate Program.WritableData: %#v", program.WritableData)
+	}
+	if data2 == nil || len(data2.Data) != len(data.Data) {
+		t.Fatalf("Compile() must be idempotent for interrupt runtime data: first %d second %d", len(data.Data), len(data2.Data))
+	}
+}
+
+func TestInterruptDispatchUsesContextRelocation(t *testing.T) {
+	img, diags := Compile(interruptProgramForCodegenTest(t))
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	found := map[string]bool{}
+	for _, rel := range img.Relocs {
+		if rel.Symbol != "_wrela_interrupt_vector40_serial" {
+			continue
+		}
+		locationRVA := img.Symbols[rel.Symbol] + rel.Offset
+		start := int(locationRVA - img.Sections[0].RVA)
+		if start < 0 || start+8 > len(img.Sections[0].Data) {
+			t.Fatalf("relocation outside .text: %#v", rel)
+		}
+		got := binary.LittleEndian.Uint64(img.Sections[0].Data[start : start+8])
+		for _, target := range []string{"_wrela_interrupt_context_0", "_wrela_interrupt_event_40"} {
+			if got == uint64(runtimeImageBase+img.Symbols[target]) {
+				found[target] = true
+			}
+		}
+	}
+	if !found["_wrela_interrupt_context_0"] || !found["_wrela_interrupt_event_40"] {
+		t.Fatalf("missing context/event relocation: found %#v relocs %#v", found, img.Relocs)
+	}
+}
+
+func sectionByName(img *Image, name string) *Section {
+	for i := range img.Sections {
+		if img.Sections[i].Name == name {
+			return &img.Sections[i]
+		}
+	}
+	return nil
 }

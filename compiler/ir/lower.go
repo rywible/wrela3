@@ -85,20 +85,10 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 		ctx.program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
 
-	if imageDecl != nil {
-		for i := range imageDecl.Phases {
-			phase := &imageDecl.Phases[i]
-			switch phase.Name {
-			case "delegated_hardware":
-				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(imageModule, imageName, delegatedSymbol, phase))
-			case "owned_hardware":
-				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(imageModule, imageName, ownedSymbol, phase))
-			}
-		}
-	}
-
 	ctx.lowerSourceMethods()
 	ctx.lowerInterruptEventsAndHandlers()
+	ctx.lowerInterruptContexts()
+	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
 		return nil, ctx.diags
@@ -305,6 +295,21 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	}
 }
 
+func (ctx *lowerContext) lowerImagePhases(moduleName, imageName string, imageDecl *ast.ImageDecl, delegatedSymbol, ownedSymbol string) {
+	if imageDecl == nil {
+		return
+	}
+	for i := range imageDecl.Phases {
+		phase := &imageDecl.Phases[i]
+		switch phase.Name {
+		case "delegated_hardware":
+			ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(moduleName, imageName, delegatedSymbol, phase))
+		case "owned_hardware":
+			ctx.program.Functions = append(ctx.program.Functions, ctx.lowerPhase(moduleName, imageName, ownedSymbol, phase))
+		}
+	}
+}
+
 func (ctx *lowerContext) lowerSourceMethods() {
 	for _, mod := range ctx.checked.Modules {
 		for _, decl := range mod.Decls {
@@ -434,6 +439,48 @@ func (ctx *lowerContext) lowerInterruptBindings() {
 		}
 		return ctx.program.InterruptBindings[i].HandlerSymbol < ctx.program.InterruptBindings[j].HandlerSymbol
 	})
+}
+
+func (ctx *lowerContext) lowerInterruptContexts() {
+	byExecutor := map[string][]int{}
+	for i, binding := range ctx.program.InterruptBindings {
+		key := binding.ExecutorType.Module + "." + binding.ExecutorType.Name
+		byExecutor[key] = append(byExecutor[key], i)
+	}
+	keys := make([]string, 0, len(byExecutor))
+	for key := range byExecutor {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for seq, key := range keys {
+		bindingIndexes := byExecutor[key]
+		executorType := ctx.program.InterruptBindings[bindingIndexes[0]].ExecutorType
+		info, ok := typeInfoFor(ctx.program.Types, executorType)
+		if !ok {
+			ctx.errorf("missing type info for interrupt executor %s.%s", executorType.Module, executorType.Name)
+			continue
+		}
+		context := InterruptContext{
+			Symbol:       fmt.Sprintf("_wrela_interrupt_context_%d", seq),
+			ExecutorType: executorType,
+			Size:         info.StorageSize,
+		}
+		for _, index := range bindingIndexes {
+			binding := ctx.program.InterruptBindings[index]
+			ctx.program.InterruptBindings[index].ContextSymbol = context.Symbol
+			field, ok := info.Fields[binding.PathField]
+			if !ok {
+				ctx.errorf("missing interrupt path field %s on executor %s.%s", binding.PathField, executorType.Module, executorType.Name)
+				continue
+			}
+			context.PathFields = append(context.PathFields, InterruptContextPathField{
+				FieldName: binding.PathField,
+				Offset:    field.Offset,
+				Type:      field.Type,
+			})
+		}
+		ctx.program.InterruptContexts = append(ctx.program.InterruptContexts, context)
+	}
 }
 
 func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, method *ast.MethodDecl) Function {
@@ -638,6 +685,16 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			Type:     ctx.irType(ret),
 		}
 		ops := append(receiverOps, argOps...)
+		if recvType.Kind == sem.KindExecutor && method != nil && method.IsStart {
+			if context := ctx.interruptContextForExecutor(recvType); context != nil {
+				ops = append(ops, &InterruptContextStore{
+					ContextSymbol: context.Symbol,
+					Source:        receiver,
+					SourceType:    ctx.irType(recvType),
+					Size:          context.Size,
+				})
+			}
+		}
 		ops = append(ops, call)
 		return call, ops, ret
 	case *ast.BinaryExpr:
@@ -712,6 +769,16 @@ func (ctx *lowerContext) lookupMethod(typ *sem.Type, methodName string) *sem.Met
 	for i := range typ.Methods {
 		if typ.Methods[i].Name == methodName {
 			return &typ.Methods[i]
+		}
+	}
+	return nil
+}
+
+func (ctx *lowerContext) interruptContextForExecutor(executorType *sem.Type) *InterruptContext {
+	for i := range ctx.program.InterruptContexts {
+		candidate := &ctx.program.InterruptContexts[i]
+		if candidate.ExecutorType.Module == executorType.Module && candidate.ExecutorType.Name == executorType.Name {
+			return candidate
 		}
 	}
 	return nil

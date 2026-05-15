@@ -65,12 +65,17 @@ func TestCompilePreservesInterruptBindings(t *testing.T) {
 	}
 	program := &ir.Program{
 		Functions: []ir.Function{eventFn, handlerFn},
+		InterruptContexts: []ir.InterruptContext{{
+			Symbol: "_wrela_test_interrupt_context",
+			Size:   8,
+		}},
 		InterruptBindings: []ir.InterruptBinding{{
 			EventSymbol:           "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt",
 			HandlerSymbol:         "on_handler::examples.hello.program::HelloWorld::serial_path::interrupt",
 			EventFunctionSymbol:   eventFn.Symbol,
 			HandlerFunctionSymbol: handlerFn.Symbol,
 			PathFieldOffset:       8,
+			ContextSymbol:         "_wrela_test_interrupt_context",
 			EventStorageSize:      1,
 			EventStorageSymbol:    "_wrela_interrupt_event_40",
 			Vector:                0x40,

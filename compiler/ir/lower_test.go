@@ -408,6 +408,76 @@ executor ConsoleExec {
 	}
 }
 
+func TestLowerInsertsInterruptContextStoreBeforeExecutorStart(t *testing.T) {
+	checked := checkedProgramForTest(t, `
+module machine.x86_64.serial
+
+data SerialPathInterrupt { byte: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialPathInterrupt {
+        return SerialPathInterrupt(byte = 0)
+    }
+}
+
+executor HelloWorld {
+    serial_path: SerialConsolePath
+
+    on serial_path.interrupt(event: SerialPathInterrupt) { }
+
+    start fn run(self) -> never {
+        while true {
+        }
+    }
+}
+
+unique class DelegatedHardware {
+    fn claim(self) -> OwnedHardware {
+        return OwnedHardware()
+    }
+}
+
+unique class OwnedHardware {}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.claim()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let hello = HelloWorld(serial_path = SerialConsolePath())
+        hello.run()
+    }
+}
+`)
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+	phase := findFunction(program, "_wrela_phase_machine_x86_64_serial_Img_owned_hardware")
+	if phase == nil {
+		t.Fatal("missing owned phase")
+	}
+	storeIndex, callIndex := -1, -1
+	seq := 0
+	for _, block := range phase.Blocks {
+		for _, op := range block.Ops {
+			if _, ok := op.(*InterruptContextStore); ok && storeIndex < 0 {
+				storeIndex = seq
+			}
+			if call, ok := op.(*Call); ok && call.Symbol == "_wrela_method_machine_x86_64_serial_HelloWorld_run" && callIndex < 0 {
+				callIndex = seq
+			}
+			seq++
+		}
+	}
+	if storeIndex < 0 || callIndex < 0 || storeIndex > callIndex {
+		t.Fatalf("context store index %d must precede start call index %d in %#v", storeIndex, callIndex, phase.Blocks)
+	}
+}
+
 func asmTestType(module, name string, methods ...string) *sem.Type {
 	typ := &sem.Type{Module: module, Name: name, Kind: sem.KindClass}
 	for _, method := range methods {
