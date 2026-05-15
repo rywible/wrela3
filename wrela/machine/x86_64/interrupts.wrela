@@ -1,0 +1,56 @@
+module machine.x86_64.interrupts
+
+class LocalApic {
+    base: VirtualAddress
+
+    asm fn enable(self) {
+        mov r11, self.base
+        mov eax, 0x1FF
+        mov [r11 + 0xF0], eax
+        ret
+    }
+
+    asm fn eoi(self) {
+        mov r11, self.base
+        mov eax, 0
+        mov [r11 + 0xB0], eax
+        ret
+    }
+}
+
+class IoApic {
+    base: VirtualAddress
+
+    asm fn route_gsi4_to_vector40(self) {
+        mov r11, self.base
+        mov eax, 0x18
+        mov [r11], eax
+        mov eax, 0x40
+        mov [r11 + 0x10], eax
+
+        mov eax, 0x19
+        mov [r11], eax
+        mov eax, 0
+        mov [r11 + 0x10], eax
+        ret
+    }
+}
+
+class ApicInterruptController {
+    local_apic: LocalApic
+    io_apic: IoApic
+
+    asm fn enable_cpu_interrupts(self) {
+        sti
+        ret
+    }
+
+    fn initialize_for_com1_receive(self) {
+        self.local_apic.enable()
+        self.io_apic.route_gsi4_to_vector40()
+    }
+
+    fn eoi(self) {
+        self.local_apic.eoi()
+    }
+}

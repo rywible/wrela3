@@ -248,6 +248,19 @@ func TestUEFIMemoryMapFieldOrderMatchesPlan(t *testing.T) {
 	}
 }
 
+func TestMachineX64InterruptSupportAsmIsAllowed(t *testing.T) {
+	_, ds := checkModuleForTest(t, `
+module machine.x86_64.interrupts
+class ApicInterruptController {
+    asm fn enable_cpu_interrupts(self) {
+        sti
+    }
+}`)
+	if len(ds) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", ds)
+	}
+}
+
 func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 	t.Helper()
 	workdir, err := os.Getwd()
@@ -261,6 +274,11 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/edu.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/ivshmem.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)
 	for i, path := range paths {

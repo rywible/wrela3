@@ -493,6 +493,7 @@ func (c *checker) isAsmAllowedHere(typ *Type) bool {
 		}
 		if strings.HasPrefix(typ.Module, "arch.") ||
 			strings.HasPrefix(typ.Module, "platform.") ||
+			strings.HasPrefix(typ.Module, "machine.x86_64.") ||
 			typ.Module == "machine.x86_64.serial" ||
 			strings.HasPrefix(typ.Module, "machine.x86_64.serial.") {
 			return true

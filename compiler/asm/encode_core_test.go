@@ -9,6 +9,8 @@ func TestEncodeExactInstructions(t *testing.T) {
 	r := must(Lookup("rax"))
 	dx := must(Lookup("dx"))
 	al := must(Lookup("al"))
+	eax := must(Lookup("eax"))
+	r11 := must(Lookup("r11"))
 
 	tests := []struct {
 		name string
@@ -49,6 +51,32 @@ func TestEncodeExactInstructions(t *testing.T) {
 			name: "in al, dx",
 			code: []Instruction{{Mnemonic: "in", Operands: []Operand{RegOperand{al}, RegOperand{dx}}}},
 			want: []byte{0xEC},
+		},
+		{
+			name: "out dx, eax",
+			code: []Instruction{{Mnemonic: "out", Operands: []Operand{RegOperand{dx}, RegOperand{eax}}}},
+			want: []byte{0xEF},
+		},
+		{
+			name: "in eax, dx",
+			code: []Instruction{{Mnemonic: "in", Operands: []Operand{RegOperand{eax}, RegOperand{dx}}}},
+			want: []byte{0xED},
+		},
+		{
+			name: "mov mem32 eax",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				MemOperand{Base: r11, Disp: 0x10, Width: 32},
+				RegOperand{eax},
+			}}},
+			want: []byte{0x41, 0x89, 0x43, 0x10},
+		},
+		{
+			name: "mov eax mem32",
+			code: []Instruction{{Mnemonic: "mov", Operands: []Operand{
+				RegOperand{eax},
+				MemOperand{Base: r11, Disp: 0x10, Width: 32},
+			}}},
+			want: []byte{0x41, 0x8B, 0x43, 0x10},
 		},
 		{
 			name: "mov cr3, rax",

@@ -1,0 +1,110 @@
+module machine.x86_64.pci
+
+class PciConfigPorts {
+    asm fn write32(self, address: U32, value: U32) {
+        mov dx, 0x0CF8
+        mov eax, address
+        out dx, eax
+        mov dx, 0x0CFC
+        mov eax, value
+        out dx, eax
+        ret
+    }
+
+    asm fn read32(self, address: U32) -> U32 {
+        mov dx, 0x0CF8
+        mov eax, address
+        out dx, eax
+        mov dx, 0x0CFC
+        in eax, dx
+        ret
+    }
+}
+
+class MsixTable {
+    base: VirtualAddress
+
+    asm fn write_entry0(self, message_address: U32, message_data: U32) {
+        mov r11, self.base
+        mov eax, message_address
+        mov [r11 + 0], eax
+        mov eax, 0
+        mov [r11 + 4], eax
+        mov eax, message_data
+        mov [r11 + 8], eax
+        mov eax, 0
+        mov [r11 + 12], eax
+        ret
+    }
+}
+
+class Q35PciInterruptConfigurator {
+    config: PciConfigPorts
+    ivshmem_msix_table: MsixTable
+
+    fn config_address(self, slot: U32, offset: U32) -> U32 {
+        return 0x80000000 | (slot << 11) | (offset & 0xFC)
+    }
+
+    fn read_config32(self, slot: U32, offset: U32) -> U32 {
+        return self.config.read32(address = self.config_address(slot = slot, offset = offset))
+    }
+
+    fn write_config32(self, slot: U32, offset: U32, value: U32) {
+        self.config.write32(address = self.config_address(slot = slot, offset = offset), value = value)
+    }
+
+    fn find_capability(self, slot: U32, capability_id: U32) -> U32 {
+        let ptr = self.read_config32(slot = slot, offset = 0x34) & 0xFC
+        let remaining = 48
+        while remaining != 0 {
+            if ptr == 0 {
+                return 0
+            }
+            let header = self.read_config32(slot = slot, offset = ptr)
+            if (header & 0xFF) == capability_id {
+                return ptr
+            }
+            ptr = (header >> 8) & 0xFC
+            remaining = remaining - 1
+        }
+        return 0
+    }
+
+    fn edu_bar0(self) -> VirtualAddress {
+        return self.read_config32(slot = 5, offset = 0x10) & 0xFFFFFFF0
+    }
+
+    fn ivshmem_rx_bar0(self) -> VirtualAddress {
+        return self.read_config32(slot = 6, offset = 0x10) & 0xFFFFFFF0
+    }
+
+    fn ivshmem_rx_bar1(self) -> VirtualAddress {
+        return self.read_config32(slot = 6, offset = 0x14) & 0xFFFFFFF0
+    }
+
+    fn ivshmem_tx_bar0(self) -> VirtualAddress {
+        return self.read_config32(slot = 7, offset = 0x10) & 0xFFFFFFF0
+    }
+
+    fn configure_edu_msi_vector41(self) {
+        let cap = self.find_capability(slot = 5, capability_id = 0x05)
+        let header = self.read_config32(slot = 5, offset = cap)
+        let control = (header >> 16) & 0xFFFF
+        self.write_config32(slot = 5, offset = cap + 4, value = 0xFEE00000)
+        if (control & 0x80) != 0 {
+            self.write_config32(slot = 5, offset = cap + 8, value = 0)
+            self.write_config32(slot = 5, offset = cap + 12, value = 0x00000041)
+        } else {
+            self.write_config32(slot = 5, offset = cap + 8, value = 0x00000041)
+        }
+        self.write_config32(slot = 5, offset = cap + 0, value = header | 0x00010000)
+    }
+
+    fn configure_ivshmem_msix_vector42(self) {
+        let cap = self.find_capability(slot = 6, capability_id = 0x11)
+        let header = self.read_config32(slot = 6, offset = cap)
+        self.ivshmem_msix_table.write_entry0(message_address = 0xFEE00000, message_data = 0x42)
+        self.write_config32(slot = 6, offset = cap + 0, value = header | 0x80000000)
+    }
+}

@@ -1,0 +1,36 @@
+module machine.x86_64.edu
+
+data EduInterrupt {
+    status: U32
+}
+
+driver path EduMsiPath {
+    mmio_base: VirtualAddress
+
+    interrupt receiver -> EduInterrupt {
+        return EduInterrupt(status = self.read32(offset = 0x24))
+    }
+
+    asm fn read32(self, offset: U64) -> U32 {
+        mov r11, self.mmio_base
+        add r11, offset
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn write32(self, offset: U64, value: U32) {
+        mov r11, self.mmio_base
+        add r11, offset
+        mov eax, value
+        mov [r11], eax
+        ret
+    }
+
+    fn raise_test_interrupt(self) {
+        self.write32(offset = 0x60, value = 0x100)
+    }
+
+    fn ack_completed(self, event: EduInterrupt) {
+        self.write32(offset = 0x64, value = event.status)
+    }
+}

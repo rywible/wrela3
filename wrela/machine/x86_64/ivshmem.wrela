@@ -1,0 +1,44 @@
+module machine.x86_64.ivshmem
+
+data IvshmemDoorbellInterrupt {
+    vector: U32
+}
+
+driver path IvshmemMsixPath {
+    registers_base: VirtualAddress
+
+    interrupt receiver -> IvshmemDoorbellInterrupt {
+        return IvshmemDoorbellInterrupt(vector = 0)
+    }
+
+    asm fn read32(self, offset: U64) -> U32 {
+        mov r11, self.registers_base
+        add r11, offset
+        mov eax, [r11]
+        ret
+    }
+
+    fn position(self) -> U32 {
+        return self.read32(offset = 8)
+    }
+
+    fn ack_doorbell(self, event: IvshmemDoorbellInterrupt) {
+    }
+}
+
+driver path IvshmemDoorbellPeerPath {
+    registers_base: VirtualAddress
+
+    asm fn write32(self, offset: U64, value: U32) {
+        mov r11, self.registers_base
+        add r11, offset
+        mov eax, value
+        mov [r11], eax
+        ret
+    }
+
+    fn ring_peer(self, peer_id: U32, vector: U32) {
+        let value = (peer_id << 16) | vector
+        self.write32(offset = 12, value = value)
+    }
+}

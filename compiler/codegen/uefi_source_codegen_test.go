@@ -229,10 +229,144 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 	assertInstructionOrder(t, idtInstructions, "push r12", "push r13", "push r14", "pop r14", "pop r13", "pop r12", "ret")
 }
 
+func TestInterruptPlatformSourceCodegen(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	methods := []ir.AsmMethod{
+		asmMethodFromSem(t, checked, "machine.x86_64.interrupts", "ApicInterruptController", "enable_cpu_interrupts"),
+		asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "write32"),
+		asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "read32"),
+	}
+	var allText []byte
+	for _, method := range methods {
+		unit, ds := compileAsmMethodUnit(method)
+		if len(ds) != 0 {
+			t.Fatalf("compileAsmMethodUnit %q diagnostics: %#v", method.Symbol, ds)
+		}
+		allText = append(allText, unit.Bytes...)
+	}
+	for _, want := range [][]byte{{0xFB}, {0xEF}, {0xED}} {
+		if !containsBytes(allText, want) {
+			t.Fatalf("compiled platform source asm missing bytes %#x", want)
+		}
+	}
+}
+
+func TestPciInterruptConfiguratorWalksCapabilities(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	_ = asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "read32")
+	program, ds := ir.Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", ds)
+	}
+	findCap := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability")
+	if findCap == nil {
+		t.Fatalf("missing find_capability lowering")
+	}
+	edu := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_edu_msi_vector41")
+	if !functionCalls(edu, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability") {
+		t.Fatalf("configure_edu_msi_vector41 must call find_capability")
+	}
+	for _, want := range []uint64{0xFEE00000, 0x41, 0x80, 0x00010000} {
+		if !functionHasConstInt(edu, want) {
+			t.Fatalf("configure_edu_msi_vector41 missing constant %#x", want)
+		}
+	}
+	msix := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_ivshmem_msix_vector42")
+	if !functionCalls(msix, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability") {
+		t.Fatalf("configure_ivshmem_msix_vector42 must call find_capability")
+	}
+	for _, want := range []uint64{0xFEE00000, 0x42, 0x80000000} {
+		if !functionHasConstInt(msix, want) {
+			t.Fatalf("configure_ivshmem_msix_vector42 missing constant %#x", want)
+		}
+	}
+}
+
 func hasAsmLabel(instructions []asm.Instruction, label string) bool {
 	for _, in := range instructions {
 		if in.Label == label {
 			return true
+		}
+	}
+	return false
+}
+
+func findIRFunction(program *ir.Program, symbol string) *ir.Function {
+	for i := range program.Functions {
+		if program.Functions[i].Symbol == symbol {
+			return &program.Functions[i]
+		}
+	}
+	return nil
+}
+
+func functionHasConstInt(fn *ir.Function, value uint64) bool {
+	if fn == nil {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		if opsHaveConstInt(block.Ops, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func functionCalls(fn *ir.Function, symbol string) bool {
+	if fn == nil {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		if opsCall(block.Ops, symbol) {
+			return true
+		}
+	}
+	return false
+}
+
+func opsHaveConstInt(ops []ir.Operation, value uint64) bool {
+	for _, op := range ops {
+		switch v := op.(type) {
+		case *ir.ConstInt:
+			if v.Value == value {
+				return true
+			}
+		case *ir.If:
+			if opsHaveConstInt(v.ConditionOps, value) || opsHaveConstInt(v.Then, value) || opsHaveConstInt(v.Else, value) {
+				return true
+			}
+		case *ir.While:
+			if opsHaveConstInt(v.ConditionOps, value) || opsHaveConstInt(v.Body, value) {
+				return true
+			}
+		case *ir.ForBytes:
+			if opsHaveConstInt(v.IterableOps, value) || opsHaveConstInt(v.Body, value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func opsCall(ops []ir.Operation, symbol string) bool {
+	for _, op := range ops {
+		switch v := op.(type) {
+		case *ir.Call:
+			if v.Symbol == symbol {
+				return true
+			}
+		case *ir.If:
+			if opsCall(v.ConditionOps, symbol) || opsCall(v.Then, symbol) || opsCall(v.Else, symbol) {
+				return true
+			}
+		case *ir.While:
+			if opsCall(v.ConditionOps, symbol) || opsCall(v.Body, symbol) {
+				return true
+			}
+		case *ir.ForBytes:
+			if opsCall(v.IterableOps, symbol) || opsCall(v.Body, symbol) {
+				return true
+			}
 		}
 	}
 	return false
@@ -386,6 +520,10 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/edu.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/ivshmem.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)
 	for i, path := range paths {
