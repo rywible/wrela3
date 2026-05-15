@@ -623,15 +623,32 @@ func emitConst(e *Emitter, c *ir.ConstInt, frame Frame) {
 
 func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	emitLoadValue(e, frame, op.Left, scratchRegs[0])
-	emitLoadValue(e, frame, op.Right, scratchRegs[1])
 	switch op.Op {
+	case "or":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegOp(e, 0x09, scratchRegs[0], scratchRegs[1])
 	case "add":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x01, scratchRegs[0], scratchRegs[1])
 	case "sub":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x29, scratchRegs[0], scratchRegs[1])
 	case "and":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
+	case "shl", "shr":
+		constValue, ok := op.Right.(*ir.ConstInt)
+		if !ok || constValue.Value < 0 || constValue.Value > 63 || valueWidthBits(e.ctx, op) != 64 {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: " + op.Op})
+			return
+		}
+		opcode := byte(0x05)
+		if op.Op == "shl" {
+			opcode = 0x04
+		}
+		emitShiftImm(e, opcode, scratchRegs[0], byte(constValue.Value))
 	case "eq", "ne", "lt", "le", "gt", "ge":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
 		emitMovImmToReg(e, scratchRegs[0], 0)
 		emitSetccAl(e, setccOpcode(op.Op))
@@ -645,6 +662,14 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 		return
 	}
 	emitStoreSlotFromReg(e, scratchRegs[0], slot, valueWidthBits(e.ctx, op))
+}
+
+func emitShiftImm(e *Emitter, opcode byte, reg asm.Reg, amount byte) {
+	rex := byte(0x48)
+	if reg.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0xC1, 0xC0|(opcode<<3)|byte(reg.Low3), amount)
 }
 
 func emitCall(e *Emitter, call *ir.Call, frame Frame) {

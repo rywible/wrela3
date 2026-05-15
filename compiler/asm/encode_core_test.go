@@ -94,6 +94,11 @@ func TestEncodeExactInstructions(t *testing.T) {
 			want: []byte{0x48, 0xCB},
 		},
 		{
+			name: "iretq",
+			code: []Instruction{{Mnemonic: "iretq"}},
+			want: []byte{0x48, 0xCF},
+		},
+		{
 			name: "mov segment registers",
 			code: []Instruction{
 				{Mnemonic: "mov", Operands: []Operand{RegOperand{must(Lookup("ds"))}, RegOperand{must(Lookup("ax"))}}},

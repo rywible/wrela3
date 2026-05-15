@@ -45,6 +45,8 @@ func Encode(instructions []Instruction) ([]byte, []diag.Diagnostic) {
 			out = append(out, 0xC3)
 		case "retfq":
 			out = append(out, 0x48, 0xCB)
+		case "iretq":
+			out = append(out, 0x48, 0xCF)
 		case "cli":
 			out = append(out, 0xFA)
 		case "sti":

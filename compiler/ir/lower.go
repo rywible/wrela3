@@ -718,6 +718,12 @@ func lowerBinaryOp(op string) string {
 		return "sub"
 	case "&":
 		return "and"
+	case "|":
+		return "or"
+	case "<<":
+		return "shl"
+	case ">>":
+		return "shr"
 	case "==":
 		return "eq"
 	case "!=":

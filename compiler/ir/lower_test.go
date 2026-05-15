@@ -228,6 +228,92 @@ func TestLowerFieldAssignmentEvaluatesTargetObjectBeforeValue(t *testing.T) {
 	)
 }
 
+func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
+	bitOpType := &sem.Type{Name: "U64", Kind: sem.KindPrimitive}
+	typeDecl := &sem.Type{
+		Module: "test.shift",
+		Name:   "OperatorSuite",
+		Kind:   sem.KindClass,
+		Methods: []sem.Method{{
+			Name:   "run",
+			Return: bitOpType,
+		}},
+	}
+
+	checked := &sem.CheckedProgram{
+		Modules: []*ast.Module{{
+			Name: "test.shift",
+			Decls: []ast.Decl{&ast.ClassDecl{
+				Name: "OperatorSuite",
+				Methods: []ast.MethodDecl{{
+					Name: "run",
+					Return: "U64",
+					Params: []ast.Param{
+						{Name: "left", Type: "U64"},
+						{Name: "right", Type: "U64"},
+					},
+					Body: []ast.Stmt{
+						&ast.LetStmt{
+							Name: "orValue",
+							Expr: &ast.BinaryExpr{
+								Op:   "|",
+								Left:  &ast.NameExpr{Name: "left"},
+								Right: &ast.NameExpr{Name: "right"},
+							},
+						},
+						&ast.LetStmt{
+							Name: "shiftedLeft",
+							Expr: &ast.BinaryExpr{
+								Op:   "<<",
+								Left: &ast.NameExpr{Name: "orValue"},
+								Right: &ast.IntLiteral{Value: "11"},
+							},
+						},
+						&ast.ReturnStmt{Value: &ast.BinaryExpr{
+							Op:   ">>",
+							Left:  &ast.NameExpr{Name: "shiftedLeft"},
+							Right: &ast.IntLiteral{Value: "3"},
+						}},
+					},
+				}},
+			}},
+		}},
+		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
+			"test.shift": {
+				"OperatorSuite": typeDecl,
+				"U64":          bitOpType,
+			},
+		}},
+	}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+
+	fn := findFunction(program, symbolName("method", "test.shift", "OperatorSuite", "run"))
+	if fn == nil {
+		t.Fatal("missing lowered run method")
+	}
+
+	var got []string
+	for _, op := range fn.Blocks[0].Ops {
+		if b, ok := op.(*Binary); ok {
+			got = append(got, b.Op)
+		}
+	}
+
+	want := []string{"or", "shl", "shr"}
+	if len(got) != len(want) {
+		t.Fatalf("binary ops = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("binary ops[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func asmTestType(module, name string, methods ...string) *sem.Type {
 	typ := &sem.Type{Module: module, Name: name, Kind: sem.KindClass}
 	for _, method := range methods {

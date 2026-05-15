@@ -13,6 +13,7 @@ var validInstructions = map[string]struct{}{
 	"pause": {},
 	"ret":   {},
 	"retfq": {},
+	"iretq": {},
 	"cli":   {},
 	"sti":   {},
 	"out":   {},

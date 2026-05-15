@@ -344,6 +344,49 @@ func TestCompileBinaryAddWithHighScratchRegister(t *testing.T) {
 	}
 }
 
+func TestCompileShiftAndBitOrOpcodes(t *testing.T) {
+	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
+	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}
+	or := &ir.Binary{Op: "or", Left: left, Right: right, Type: ir.Type{Name: "U64"}}
+	shiftLeft := &ir.Binary{
+		Op:    "shl",
+		Left:  or,
+		Right: &ir.ConstInt{Symbol: "shift_left", Value: 5, Type: ir.Type{Name: "U64"}},
+		Type:  ir.Type{Name: "U64"},
+	}
+	shiftRight := &ir.Binary{
+		Op:    "shr",
+		Left:  shiftLeft,
+		Right: &ir.ConstInt{Symbol: "shift_right", Value: 2, Type: ir.Type{Name: "U64"}},
+		Type:  ir.Type{Name: "U64"},
+	}
+
+	fn := ir.Function{
+		Symbol: "shift_and_or",
+		Params: []ir.Value{left, right},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{or, shiftLeft, shiftRight, &ir.Return{Value: shiftRight}},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := image.Sections[0].Data
+	if !bytes.Contains(code, []byte{0x4C, 0x09, 0xD0}) {
+		t.Fatalf("expected or rax, r10 encoding, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x48, 0xC1, 0xE0, 0x05}) {
+		t.Fatalf("expected shl rax, 5 encoding, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x48, 0xC1, 0xE8, 0x02}) {
+		t.Fatalf("expected shr rax, 2 encoding, got %#x", code)
+	}
+}
+
 func TestCompilePreserveStackReturnUsesSavedContinuation(t *testing.T) {
 	result := &ir.ConstInt{Symbol: "result", Value: 7, Type: ir.Type{Name: "U64"}}
 	fn := ir.Function{
