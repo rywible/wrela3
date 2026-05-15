@@ -228,6 +228,43 @@ func TestLowerFieldAssignmentEvaluatesTargetObjectBeforeValue(t *testing.T) {
 	)
 }
 
+func TestLowerWithFrameReserveAndPlace(t *testing.T) {
+	checked := checkedProgramForTest(t, `
+module machine.x86_64.executor_memory
+
+data Message { id: U64 }
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let msg = tick.place(Message(id = 1))
+            let raw = tick.reserve(length = 32, align = 8)
+        }
+        while true {}
+    }
+}
+`)
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("lower diagnostics: %#v", diags)
+	}
+	fn := findFunction(program, "_wrela_method_machine_x86_64_executor_memory_Worker_run")
+	if fn == nil {
+		t.Fatal("missing Worker.run")
+	}
+	if !containsOp[*FrameBegin](*fn) || !containsOp[*ArenaPlace](*fn) || !containsOp[*ArenaReserve](*fn) || !containsOp[*FrameEnd](*fn) {
+		t.Fatalf("lowered function missing arena ops: %#v", fn.Blocks)
+	}
+}
+
 func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 	bitOpType := &sem.Type{Name: "U64", Kind: sem.KindPrimitive}
 	typeDecl := &sem.Type{
@@ -497,6 +534,17 @@ func findFunction(program *Program, symbol string) *Function {
 		}
 	}
 	return nil
+}
+
+func containsOp[T any](fn Function) bool {
+	for _, block := range fn.Blocks {
+		for _, op := range block.Ops {
+			if _, ok := any(op).(T); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func functionCalls(fn Function, symbol string) bool {

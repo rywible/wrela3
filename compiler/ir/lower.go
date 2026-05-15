@@ -55,6 +55,8 @@ type lowerContext struct {
 
 	stringSeq int
 	diags     []diag.Diagnostic
+
+	activeFrames []*FrameBegin
 }
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
@@ -573,10 +575,10 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		return ops
 	case *ast.ReturnStmt:
 		if s.Value == nil {
-			return []Operation{&Return{}}
+			return ctx.lowerReturn(nil, nil)
 		}
 		value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
-		return append(valueOps, &Return{Value: value})
+		return ctx.lowerReturn(value, valueOps)
 	case *ast.ExprStmt:
 		call, ok := s.Expr.(*ast.CallExpr)
 		if !ok {
@@ -603,10 +605,70 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		thenOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Then)
 		elseOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Else)
 		return []Operation{&If{ConditionOps: conditionOps, Condition: condition, Then: thenOps, Else: elseOps}}
+	case *ast.WithStmt:
+		parent, frameOps, length := ctx.lowerFrameCall(moduleName, receiverType, scope, s.Expr)
+		frameType := ctx.resolveType("machine.x86_64.executor_memory", "ArenaFrame")
+		frame := &FrameBegin{
+			Symbol: s.Name,
+			Parent: parent,
+			Length: length,
+			Type:   ctx.irType(frameType),
+		}
+
+		child := newLowerScope(scope)
+		child.define(s.Name, lowerBinding{value: frame, typ: frameType})
+
+		ctx.activeFrames = append(ctx.activeFrames, frame)
+		body := ctx.lowerStmtList(moduleName, receiverType, child, assigned, s.Body)
+		ctx.activeFrames = ctx.activeFrames[:len(ctx.activeFrames)-1]
+
+		ops := append([]Operation{}, frameOps...)
+		ops = append(ops, frame)
+		ops = append(ops, body...)
+		ops = append(ops, &FrameEnd{Frame: frame})
+		return ops
 	default:
 		ctx.errorf("unsupported statement %T", stmt)
 		return nil
 	}
+}
+
+func (ctx *lowerContext) lowerReturn(value Value, prefix []Operation) []Operation {
+	ops := append([]Operation{}, prefix...)
+	for i := len(ctx.activeFrames) - 1; i >= 0; i-- {
+		ops = append(ops, &FrameEnd{Frame: ctx.activeFrames[i]})
+	}
+	if value == nil {
+		ops = append(ops, &Return{})
+	} else {
+		ops = append(ops, &Return{Value: value})
+	}
+	return ops
+}
+
+func (ctx *lowerContext) lowerFrameCall(moduleName string, receiverType *sem.Type, scope *lowerScope, expr ast.Expr) (Value, []Operation, Value) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.Method != "frame" {
+		ctx.errorf("with expression was not a frame call")
+		zero := &ConstInt{Value: 0, Type: Type{Name: "U64", Kind: TypeKindPrimitive}}
+		return zero, []Operation{zero}, zero
+	}
+
+	parent, parentOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, call.Receiver)
+	lengthExpr := namedArgExpr(call.Args, "length")
+	length, lengthOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, lengthExpr)
+	ops := append([]Operation{}, parentOps...)
+	ops = append(ops, lengthOps...)
+	return parent, ops, length
+}
+
+func namedArgExpr(args []ast.NamedArg, name string) ast.Expr {
+	for _, arg := range args {
+		if arg.Name == name {
+			return arg.Value
+		}
+	}
+	return nil
 }
 
 func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, scope *lowerScope, expr ast.Expr) (Value, []Operation, *sem.Type) {
@@ -675,6 +737,37 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		return construct, ops, typ
 	case *ast.CallExpr:
 		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		if sem.IsArenaType(recvType) {
+			switch e.Method {
+			case "reserve":
+				length, lengthOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "length"))
+				align, alignOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "align"))
+				mutableType := ctx.resolveType("machine.x86_64.executor_memory", "MutableBytes")
+				reserve := &ArenaReserve{Arena: receiver, Length: length, Align: align, Type: ctx.irType(mutableType)}
+				ops := append([]Operation{}, receiverOps...)
+				ops = append(ops, lengthOps...)
+				ops = append(ops, alignOps...)
+				ops = append(ops, reserve)
+				return reserve, ops, mutableType
+			case "place":
+				cons, ok := e.Args[0].Value.(*ast.ConstructorExpr)
+				if !ok {
+					ctx.errorf("place argument was not a constructor")
+					return receiver, receiverOps, recvType
+				}
+				placedType := ctx.resolveType(moduleName, cons.Type)
+				fields := make([]FieldValue, 0, len(cons.Args))
+				ops := append([]Operation{}, receiverOps...)
+				for _, arg := range cons.Args {
+					value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, arg.Value)
+					ops = append(ops, valueOps...)
+					fields = append(fields, FieldValue{Name: arg.Name, Value: value})
+				}
+				place := &ArenaPlace{Arena: receiver, Type: ctx.irType(placedType), Fields: fields}
+				ops = append(ops, place)
+				return place, ops, placedType
+			}
+		}
 		method := ctx.lookupMethod(recvType, e.Method)
 		args, argOps := ctx.lowerCallArgs(moduleName, receiverType, scope, method, e.Args)
 		ret := ctx.methodReturn(moduleName, method)
@@ -867,6 +960,8 @@ func assignedNames(stmts []ast.Stmt) map[string]bool {
 			case *ast.WhileStmt:
 				walk(s.Body)
 			case *ast.ForStmt:
+				walk(s.Body)
+			case *ast.WithStmt:
 				walk(s.Body)
 			}
 		}
