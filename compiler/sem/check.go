@@ -475,9 +475,9 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		if explicitParamCount(method.Params) > 5 {
 			c.error(method.SpanV, diag.SEM0013, "too many explicit parameters")
 		}
-		if method.IsAsm && !c.isAsmAllowedHere(typ) {
-			c.error(method.SpanV, diag.SEM0012, "asm methods are only allowed on edge-capability declarations")
-		}
+	if method.IsAsm && !c.isAsmAllowedHere(typ) {
+		c.error(method.SpanV, diag.SEM0032, "asm raw memory access requires edge-capability module")
+	}
 		if isCanonicalFrameIntrinsic(moduleName, typ, method) {
 			continue
 		}
@@ -1191,6 +1191,12 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "ArenaFrame" {
 		c.error(expr.SpanV, diag.SEM0029, "ArenaFrame can only be created by with arena.frame(length = ...)")
 		return
+	}
+	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "MutableBytes" {
+		if ctx != ContextImagePhaseDirect || c.currentPhase != "delegated_hardware" || !constructorArgsAreIntegerLiterals(expr, "address", "length") {
+			c.error(expr.SpanV, diag.SEM0028, "raw physical byte authority can only be created directly in delegated_hardware phase")
+			return
+		}
 	}
 	if typ.Kind == KindData {
 		return

@@ -1,0 +1,10 @@
+// expect: SEM0028: raw physical byte authority can only be created directly in delegated_hardware phase
+module machine.x86_64.executor_memory
+
+data MutableBytes { address: PhysicalAddress; length: U64 }
+
+class Bad {
+    fn mint(self) -> MutableBytes {
+        return MutableBytes(address = 0x200000, length = 4096)
+    }
+}

@@ -1,0 +1,9 @@
+// expect: SEM0032: asm raw memory access requires edge-capability module
+module negative.user_raw_memory_asm
+
+class Bad {
+    asm fn write_raw(self) {
+        mov rax, 0x200000
+        mov [rax], rax
+    }
+}

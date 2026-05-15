@@ -1,10 +1,35 @@
 package sem
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
 )
+
+func TestUserRawMemoryAuthorityRejected(t *testing.T) {
+	cases := []struct {
+		fixture string
+		code    string
+	}{
+		{"user_raw_memory_asm.wrela", diag.SEM0032},
+		{"user_raw_memory_authority.wrela", diag.SEM0028},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			modules := parseFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", tc.fixture))
+			index, ds := BuildIndex(modules)
+			ds = filterMissingImageDiagnostic(ds)
+			if len(ds) != 0 {
+				t.Fatalf("index diagnostics: %#v", ds)
+			}
+			_, diags := Check(index, modules)
+			if !hasCode(diags, tc.code) {
+				t.Fatalf("expected %s, got %#v", tc.code, diags)
+			}
+		})
+	}
+}
 
 func TestMemoryKindClassification(t *testing.T) {
 	modules := parseModulesForTest(t, `

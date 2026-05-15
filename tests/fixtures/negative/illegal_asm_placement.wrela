@@ -1,4 +1,4 @@
-// expect: SEM0012: asm methods are only allowed on edge-capability declarations
+// expect: SEM0032: asm raw memory access requires edge-capability module
 module negative.illegal_asm_placement
 
 class Plain {

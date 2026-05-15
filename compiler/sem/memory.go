@@ -275,6 +275,28 @@ func callArgForParam(method *Method, args []ast.NamedArg, paramIndex int) ast.Ex
 	return nil
 }
 
+func constructorArgsAreIntegerLiterals(expr *ast.ConstructorExpr, names ...string) bool {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		wanted[name] = false
+	}
+	for _, arg := range expr.Args {
+		if _, ok := wanted[arg.Name]; !ok {
+			continue
+		}
+		if _, ok := arg.Value.(*ast.IntLiteral); !ok {
+			return false
+		}
+		wanted[arg.Name] = true
+	}
+	for _, seen := range wanted {
+		if !seen {
+			return false
+		}
+	}
+	return true
+}
+
 func explicitParamIndex(method *Method, name string) int {
 	if method == nil {
 		return -1
