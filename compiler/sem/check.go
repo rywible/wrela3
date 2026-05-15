@@ -22,12 +22,19 @@ const (
 type Scope struct {
 	parent           *Scope
 	types            map[string]*Type
+	lifetimes        map[string]Lifetime
 	driverPathKeys   map[string]string
 	driverPathFields map[string]map[string]string
 }
 
 func NewScope(parent *Scope) *Scope {
-	return &Scope{parent: parent, types: map[string]*Type{}, driverPathKeys: map[string]string{}, driverPathFields: map[string]map[string]string{}}
+	return &Scope{
+		parent:           parent,
+		types:            map[string]*Type{},
+		lifetimes:        map[string]Lifetime{},
+		driverPathKeys:   map[string]string{},
+		driverPathFields: map[string]map[string]string{},
+	}
 }
 
 func (s *Scope) Define(name string, typ *Type) {
@@ -48,6 +55,26 @@ func (s *Scope) Lookup(name string) (*Type, bool) {
 		return s.parent.Lookup(name)
 	}
 	return nil, false
+}
+
+func (s *Scope) DefineLifetime(name string, lifetime Lifetime) {
+	if s == nil {
+		return
+	}
+	s.lifetimes[name] = lifetime
+}
+
+func (s *Scope) LookupLifetime(name string) (Lifetime, bool) {
+	if s == nil {
+		return Lifetime{}, false
+	}
+	if lifetime, ok := s.lifetimes[name]; ok {
+		return lifetime, true
+	}
+	if s.parent != nil {
+		return s.parent.LookupLifetime(name)
+	}
+	return Lifetime{}, false
 }
 
 func (s *Scope) DefineDriverPath(name, key string) {
@@ -114,15 +141,19 @@ func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
 }
 
 type checker struct {
-	index           *Index
-	modules         []*ast.Module
-	currentType     *Type
-	currentPhase    string
-	diags           []diag.Diagnostic
-	ownedRoot       *Type
-	graph           ImageGraph
-	bindings        []InterruptBinding
-	runtimeBindings []InterruptBinding
+	index                *Index
+	modules              []*ast.Module
+	currentType          *Type
+	currentPhase         string
+	diags                []diag.Diagnostic
+	ownedRoot            *Type
+	graph                ImageGraph
+	bindings             []InterruptBinding
+	runtimeBindings      []InterruptBinding
+	allowFrameCallExpr   bool
+	frameLifetimeStack   []int
+	frameLifetimeParents map[int]int
+	nextFrameScope       int
 }
 
 type driverPathOwner struct {
@@ -441,6 +472,9 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		if method.IsAsm && !c.isAsmAllowedHere(typ) {
 			c.error(method.SpanV, diag.SEM0012, "asm methods are only allowed on edge-capability declarations")
 		}
+		if isCanonicalFrameIntrinsic(moduleName, typ, method) {
+			continue
+		}
 
 		marker := ContextNormalMethod
 		returnType := c.mustType(moduleName, method.Return)
@@ -562,6 +596,28 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		loopScope := NewScope(scope)
 		loopScope.Define(s.Var, c.mustType(moduleName, "U8"))
 		c.checkStmtList(moduleName, s.Body, loopScope, expectedReturn, ctx)
+	case *ast.WithStmt:
+		prevAllowFrameCall := c.allowFrameCallExpr
+		c.allowFrameCallExpr = true
+		frameType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		c.allowFrameCallExpr = prevAllowFrameCall
+		if frameType == nil {
+			c.checkStmtList(moduleName, s.Body, NewScope(scope), expectedReturn, ctx)
+			return false
+		}
+		if ClassifyMemoryType(frameType) != MemoryKindFrameArena {
+			c.error(s.Expr.Span(), diag.SEM0022, "with expression must be arena.frame(length = ...)")
+		} else if !c.isFrameCall(moduleName, s.Expr, scope, ctx) {
+			c.error(s.Expr.Span(), diag.SEM0022, "with expression must be arena.frame(length = ...)")
+		}
+		child := NewScope(scope)
+		child.Define(s.Name, frameType)
+		parentLifetime := c.frameReceiverLifetime(s.Expr, scope)
+		childScopeID := c.pushFrameLifetime(s.Name, s.SpanV, parentLifetime)
+		child.DefineLifetime(s.Name, Lifetime{Kind: LifetimeFrame, Scope: childScopeID})
+		terminates := c.checkStmtList(moduleName, s.Body, child, expectedReturn, ctx)
+		c.popFrameLifetime(childScopeID)
+		return terminates
 	case *ast.ReturnStmt:
 		if expectedReturn == nil {
 			if s.Value != nil {
@@ -1121,6 +1177,10 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope, ctx ContextKind) {
 	_ = moduleName
 	_ = scope
+	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "ArenaFrame" {
+		c.error(expr.SpanV, diag.SEM0029, "ArenaFrame can only be created by with arena.frame(length = ...)")
+		return
+	}
 	if typ.Kind == KindData {
 		return
 	}
@@ -1161,6 +1221,14 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	if method == nil {
 		c.error(errSpan, diag.CG0001, "unknown method "+expr.Method+" on "+recvType.Name)
 		return nil
+	}
+
+	if expr.Method == "frame" && IsArenaType(recvType) && method.Return != nil && ClassifyMemoryType(method.Return) == MemoryKindFrameArena {
+		if !c.allowFrameCallExpr {
+			c.error(expr.SpanV, diag.SEM0022, "arena.frame(length = ...) can only appear as a with expression")
+		}
+		c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
+		return method.Return
 	}
 
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
