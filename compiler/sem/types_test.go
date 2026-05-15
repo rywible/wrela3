@@ -709,9 +709,14 @@ executor BadBody {
 func TestOnHandlerRejectsAllocationAndInterruptReconfigurationCalls(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module machine.x86_64.executor_memory
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
 class ExecutorMemory {
-    fn allocate_bytes(self, length: U64) -> U64 {
-        return length
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame {
+        return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
     }
 }
 `, `
@@ -759,7 +764,9 @@ executor BadHandler {
     interrupts: ApicInterruptController
 
     on serial.interrupt(event: SerialInterrupt) {
-        self.memory.allocate_bytes(length = 8)
+        with self.memory.frame(length = 64) as tick {
+            let raw = tick.reserve(length = 8, align = 8)
+        }
         self.serial.enable_receive_interrupts()
         self.interrupts.local_apic.enable()
         self.interrupts.io_apic.route_gsi4_to_vector40()

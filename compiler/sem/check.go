@@ -151,6 +151,7 @@ type checker struct {
 	bindings             []InterruptBinding
 	runtimeBindings      []InterruptBinding
 	allowFrameCallExpr   bool
+	exprLifetimes        map[ast.Expr]Lifetime
 	frameLifetimeStack   []int
 	frameLifetimeParents map[int]int
 	nextFrameScope       int
@@ -1217,6 +1218,9 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 		c.error(expr.SpanV, diag.SEM0016, "on handler cannot call runtime platform APIs")
 		return nil
 	}
+	if IsArenaType(recvType) && (expr.Method == "place" || expr.Method == "reserve") {
+		return c.typeArenaIntrinsicCall(moduleName, expr, scope, ctx)
+	}
 	method, errSpan := c.lookupMethod(recvType, expr.Method, expr.SpanV)
 	if method == nil {
 		c.error(errSpan, diag.CG0001, "unknown method "+expr.Method+" on "+recvType.Name)
@@ -1268,7 +1272,6 @@ func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
 		"machine.x86_64.ivshmem.IvshmemDoorbellPeerPath::ring_peer",
 		"machine.x86_64.ivshmem.IvshmemDoorbellPeerPath::write32",
 		"machine.x86_64.serial.SerialConsolePath::enable_receive_interrupts",
-		"machine.x86_64.executor_memory.ExecutorMemory::allocate_bytes",
 		"machine.x86_64.executor_memory.ExecutorMemory::halt_forever",
 		"arch.x86_64.cpu.CpuControl::halt_forever":
 		return true

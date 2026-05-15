@@ -105,6 +105,11 @@ func (c *checker) lifetimeOfExpr(expr ast.Expr, scope *Scope) Lifetime {
 	if expr == nil {
 		return Lifetime{Kind: LifetimeUnknown}
 	}
+	if c.exprLifetimes != nil {
+		if lifetime, ok := c.exprLifetimes[expr]; ok {
+			return lifetime
+		}
+	}
 	switch e := expr.(type) {
 	case *ast.NameExpr:
 		if lifetime, ok := scope.LookupLifetime(e.Name); ok {
@@ -118,6 +123,13 @@ func (c *checker) lifetimeOfExpr(expr ast.Expr, scope *Scope) Lifetime {
 		return Lifetime{Kind: LifetimeStatic}
 	}
 	return Lifetime{Kind: LifetimeUnknown}
+}
+
+func (c *checker) rememberLifetime(expr ast.Expr, lifetime Lifetime) {
+	if c.exprLifetimes == nil {
+		c.exprLifetimes = map[ast.Expr]Lifetime{}
+	}
+	c.exprLifetimes[expr] = lifetime
 }
 
 func (c *checker) pushFrameLifetime(name string, span source.Span, parentLifetime Lifetime) int {
@@ -143,4 +155,59 @@ func (c *checker) popFrameLifetime(id int) {
 		return
 	}
 	c.frameLifetimeStack = c.frameLifetimeStack[:len(c.frameLifetimeStack)-1]
+}
+
+func (c *checker) currentFrameLifetime() Lifetime {
+	if len(c.frameLifetimeStack) == 0 {
+		return Lifetime{Kind: LifetimeExecutorRoot}
+	}
+	return Lifetime{Kind: LifetimeFrame, Scope: c.frameLifetimeStack[len(c.frameLifetimeStack)-1]}
+}
+
+func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
+	recvType := c.typeExpr(moduleName, expr.Receiver, scope, ctx)
+	if !IsArenaType(recvType) {
+		return nil
+	}
+	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve") {
+		c.error(expr.SpanV, diag.SEM0016, "on handler cannot place or reserve arena memory")
+		return nil
+	}
+	switch expr.Method {
+	case "place":
+		if len(expr.Args) != 1 || expr.Args[0].Name != "" {
+			c.error(expr.SpanV, diag.SEM0026, "place expects one constructor argument")
+			return nil
+		}
+		cons, ok := expr.Args[0].Value.(*ast.ConstructorExpr)
+		if !ok {
+			c.error(expr.Args[0].Value.Span(), diag.SEM0026, "place argument must be a constructor expression")
+			return nil
+		}
+		typ := c.typeConstructorExpr(moduleName, cons, scope, ctx)
+		c.rememberLifetime(expr, c.currentFrameLifetime())
+		return typ
+	case "reserve":
+		c.requireReserveArgs(moduleName, expr, scope, ctx)
+		c.rememberLifetime(expr, c.currentFrameLifetime())
+		return c.resolveType("machine.x86_64.executor_memory", "MutableBytes")
+	default:
+		return nil
+	}
+}
+
+func (c *checker) requireReserveArgs(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) {
+	if len(expr.Args) != 2 || expr.Args[0].Name != "length" || expr.Args[1].Name != "align" {
+		c.error(expr.SpanV, diag.SEM0027, "reserve expects length and align")
+		return
+	}
+	u64 := c.mustType(moduleName, "U64")
+	lengthType := c.typeExpr(moduleName, expr.Args[0].Value, scope, ctx)
+	if lengthType != nil && !typesCompatible(u64, lengthType) {
+		c.error(expr.Args[0].Value.Span(), diag.SEM0027, "reserve length and align must be U64")
+	}
+	alignType := c.typeExpr(moduleName, expr.Args[1].Value, scope, ctx)
+	if alignType != nil && !typesCompatible(u64, alignType) {
+		c.error(expr.Args[1].Value.Span(), diag.SEM0027, "reserve length and align must be U64")
+	}
 }
