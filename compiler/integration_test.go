@@ -82,8 +82,10 @@ func TestBuildHelloImageContainsRuntimeSignals(t *testing.T) {
 		t.Fatalf("read output: %v", err)
 	}
 	for name, pattern := range map[string][]byte{
-		"PE MZ header":       []byte{'M', 'Z'},
-		"hello newline data": []byte("hello from wrela\n\x00"),
+		"PE MZ header":            []byte{'M', 'Z'},
+		"hello newline data":      []byte("hello from wrela\n\x00"),
+		"serial interrupt prefix": []byte("serial interrupt: \x00"),
+		"msi interrupt data":      []byte("msi interrupt\n\x00"),
 	} {
 		if !containsBytes(imageBytes, pattern) {
 			t.Fatalf("image missing %s pattern %s", name, strings.ToUpper(hexBytes(pattern)))
@@ -146,17 +148,20 @@ func TestBuildHelloContainsInterruptBinding(t *testing.T) {
 	if result.Image == nil {
 		t.Fatalf("BuildResult.Image is nil")
 	}
-	if got := len(result.Image.InterruptBindings); got != 3 {
-		t.Fatalf("interrupt bindings = %d, want 3", got)
+	if got := len(result.Image.InterruptBindings); got != 2 {
+		t.Fatalf("interrupt bindings = %d, want 2", got)
 	}
 	gotVectors := map[uint8]bool{}
 	for _, binding := range result.Image.InterruptBindings {
 		gotVectors[binding.Vector] = true
 	}
-	for _, want := range []uint8{0x40, 0x41, 0x42} {
+	for _, want := range []uint8{0x40, 0x41} {
 		if !gotVectors[want] {
 			t.Fatalf("missing vector %#x in bindings %#v", want, result.Image.InterruptBindings)
 		}
+	}
+	if gotVectors[0x42] {
+		t.Fatalf("normal hello image must not bind ivshmem vector 0x42: %#v", result.Image.InterruptBindings)
 	}
 }
 
@@ -186,6 +191,11 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 	assertFunctionCalls(t, program,
 		"_wrela_method_examples_hello_program_HelloWorld_run",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_bytes",
+		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_initialize_for_com1_receive",
+		"_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_edu_msi_vector41",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_enable_receive_interrupts",
+		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_enable_cpu_interrupts",
+		"_wrela_method_machine_x86_64_edu_EduMsiPath_raise_test_interrupt",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever",
 	)

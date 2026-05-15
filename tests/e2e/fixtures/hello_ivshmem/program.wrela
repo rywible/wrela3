@@ -1,8 +1,9 @@
-module examples.hello.program
+module tests.e2e.fixtures.hello_ivshmem.program
 
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
+use { IvshmemDoorbellInterrupt, IvshmemDoorbellPeerPath, IvshmemMsixPath } from machine.x86_64.ivshmem
 use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
 use { SerialConsolePath, SerialPathInterrupt } from machine.x86_64.serial
 
@@ -16,6 +17,8 @@ executor HelloWorld {
     pci_interrupts: Q35PciInterruptConfigurator
     serial_path: SerialConsolePath
     edu_path: EduMsiPath
+    ivshmem_rx: IvshmemMsixPath
+    ivshmem_tx: IvshmemDoorbellPeerPath
 
     on serial_path.interrupt(event: SerialPathInterrupt) {
         self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
@@ -29,6 +32,11 @@ executor HelloWorld {
         self.edu_path.ack_completed(event = event)
     }
 
+    on ivshmem_rx.interrupt(event: IvshmemDoorbellInterrupt) {
+        self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
+        self.ivshmem_rx.ack_doorbell(event = event)
+    }
+
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick {
             let scratch = tick.place(RunScratch(hello = self.memory.bytes(value = "hello from wrela\n")))
@@ -36,9 +44,11 @@ executor HelloWorld {
         }
         self.interrupts.initialize_for_com1_receive()
         self.pci_interrupts.configure_edu_msi_vector41()
+        self.pci_interrupts.configure_ivshmem_msix_vector42()
         self.serial_path.enable_receive_interrupts()
         self.interrupts.enable_cpu_interrupts()
         self.edu_path.raise_test_interrupt()
+        self.ivshmem_tx.ring_peer(peer_id = self.ivshmem_rx.position(), vector = 0)
         self.memory.halt_forever()
     }
 }

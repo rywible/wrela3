@@ -1,11 +1,12 @@
-module examples.hello.main
+module tests.e2e.fixtures.hello_ivshmem.main
 
-use { HelloWorld } from examples.hello.program
+use { HelloWorld } from tests.e2e.fixtures.hello_ivshmem.program
 use { DelegatedHardware } from platform.uefi.transition
 use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
+use { IvshmemDoorbellPeerPath, IvshmemMsixPath } from machine.x86_64.ivshmem
 use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
 use { SerialConsolePath, SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
 
@@ -44,9 +45,13 @@ image HelloSerial {
             ).initialize()
         let serial_path = SerialConsolePath(owner = hardware.vcpu0, registers = serial_driver.registers)
         let pci_config = PciConfigPorts()
-        let pci_interrupts = Q35PciInterruptConfigurator(
+        let pci_probe = Q35PciInterruptConfigurator(
             config = pci_config,
             ivshmem_msix_table = MsixTable(base = 0)
+        )
+        let pci_interrupts = Q35PciInterruptConfigurator(
+            config = pci_config,
+            ivshmem_msix_table = MsixTable(base = pci_probe.ivshmem_rx_bar1())
         )
         let hello = HelloWorld(
             memory = hardware.vcpu0.memory,
@@ -56,7 +61,9 @@ image HelloSerial {
             ),
             pci_interrupts = pci_interrupts,
             serial_path = serial_path,
-            edu_path = EduMsiPath(mmio_base = pci_interrupts.edu_bar0())
+            edu_path = EduMsiPath(mmio_base = pci_probe.edu_bar0()),
+            ivshmem_rx = IvshmemMsixPath(registers_base = pci_probe.ivshmem_rx_bar0()),
+            ivshmem_tx = IvshmemDoorbellPeerPath(registers_base = pci_probe.ivshmem_tx_bar0())
         )
         hello.run()
     }

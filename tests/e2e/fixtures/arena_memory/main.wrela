@@ -1,15 +1,47 @@
-module examples.hello.main
+module tests.e2e.arena_memory
 
-use { HelloWorld } from examples.hello.program
 use { DelegatedHardware } from platform.uefi.transition
 use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
-use { EduMsiPath } from machine.x86_64.edu
-use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
-use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
-use { SerialConsolePath, SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
 
-image HelloSerial {
+data OutputLine {
+    bytes: Bytes
+    skip: SliceOffset
+}
+
+data SliceOffset {
+    amount: U64
+}
+
+executor ArenaMemoryProbe {
+    memory: ExecutorMemory
+    serial_path: SerialWritePath
+
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as outer {
+            let prefix = outer.place(OutputLine(
+                bytes = self.memory.bytes(value = "xxarena memory "),
+                skip = SliceOffset(amount = 2)
+            ))
+            let scratch = outer.reserve(length = 64, align = 8)
+            with outer.frame(length = scratch.length + 256) as inner {
+                let suffix = inner.place(OutputLine(
+                    bytes = self.memory.bytes(value = "ok\n"),
+                    skip = SliceOffset(amount = 0)
+                ))
+                self.serial_path.write(Bytes(
+                    address = prefix.bytes.address + prefix.skip.amount,
+                    length = prefix.bytes.length - prefix.skip.amount
+                ))
+                self.serial_path.write(suffix.bytes)
+            }
+        }
+        self.memory.halt_forever()
+    }
+}
+
+image ArenaMemorySmoke {
     transitions {
         delegated_hardware -> owned_hardware
     }
@@ -42,22 +74,11 @@ image HelloSerial {
             registers = registers,
             memory = DriverMemory(region = hardware.memory.arena)
             ).initialize()
-        let serial_path = SerialConsolePath(owner = hardware.vcpu0, registers = serial_driver.registers)
-        let pci_config = PciConfigPorts()
-        let pci_interrupts = Q35PciInterruptConfigurator(
-            config = pci_config,
-            ivshmem_msix_table = MsixTable(base = 0)
-        )
-        let hello = HelloWorld(
+        let serial_path = SerialWritePath(owner = hardware.vcpu0, registers = serial_driver.registers)
+        let probe = ArenaMemoryProbe(
             memory = hardware.vcpu0.memory,
-            interrupts = ApicInterruptController(
-                local_apic = LocalApic(base = 0xFEE00000),
-                io_apic = IoApic(base = 0xFEC00000)
-            ),
-            pci_interrupts = pci_interrupts,
-            serial_path = serial_path,
-            edu_path = EduMsiPath(mmio_base = pci_interrupts.edu_bar0())
+            serial_path = serial_path
         )
-        hello.run()
+        probe.run()
     }
 }

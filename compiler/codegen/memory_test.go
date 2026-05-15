@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -58,6 +59,36 @@ func TestArenaPlaceWritesConstructedFields(t *testing.T) {
 	}
 	if !containsBytes(code, []byte{0x10, 0x00, 0x00, 0x00}) {
 		t.Fatalf("place must reserve Message storage size 16: %x", code)
+	}
+}
+
+func TestArenaPlaceStoresNestedDataFieldHandle(t *testing.T) {
+	program := testProgramWithArenaPlaceNestedBytes(t)
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("compile diagnostics: %#v", diags)
+	}
+	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
+	want := []byte{0x48, 0x8B, 0xC6, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x89, 0x06}
+	if !bytes.Contains(code, want) {
+		t.Fatalf("place must store nested Bytes handle into arena record field: want %x in %x", want, code)
+	}
+}
+
+func TestArenaPlaceCopiesNestedDataFieldWithEightByteStorage(t *testing.T) {
+	program := testProgramWithArenaPlaceNestedEightByteData(t)
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("compile diagnostics: %#v", diags)
+	}
+	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
+	wantHandle := []byte{0x48, 0x8B, 0xC6, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x89, 0x06}
+	if !bytes.Contains(code, wantHandle) {
+		t.Fatalf("place must store nested Message handle into arena record field: want %x in %x", wantHandle, code)
+	}
+	wantStorageCopy := []byte{0x49, 0x8B, 0x03, 0x48, 0x89, 0x46, 0x08}
+	if !bytes.Contains(code, wantStorageCopy) {
+		t.Fatalf("place must copy nested Message storage, not its handle: want %x in %x", wantStorageCopy, code)
 	}
 }
 
@@ -143,6 +174,122 @@ func testProgramWithArenaPlace(t *testing.T) *ir.Program {
 		program.Functions[0].Blocks[0].Ops[0],
 		program.Functions[0].Blocks[0].Ops[1],
 		id,
+		frame,
+		place,
+		&ir.FrameEnd{Frame: frame},
+		&ir.Return{},
+	}
+	program.Functions[0].Blocks[0].Ops = ops
+	return program
+}
+
+func testProgramWithArenaPlaceNestedBytes(t *testing.T) *ir.Program {
+	t.Helper()
+	program := testProgramWithArenaReserve(t)
+	bytesType := ir.Type{Name: "Bytes", Module: "machine.x86_64.executor_memory", Kind: ir.TypeKindData}
+	outputType := ir.Type{Name: "OutputLine", Module: "test", Kind: ir.TypeKindData}
+	program.Types["machine.x86_64.executor_memory.Bytes"] = ir.TypeInfo{
+		Name: "Bytes", Module: "machine.x86_64.executor_memory", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16,
+		Fields: map[string]ir.FieldInfo{
+			"address": {Name: "address", Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8, Type: ir.Type{Name: "PhysicalAddress"}},
+			"length":  {Name: "length", Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8, Type: ir.Type{Name: "U64"}},
+		},
+		FieldOrder: []string{"address", "length"},
+	}
+	program.Types["test.OutputLine"] = ir.TypeInfo{
+		Name: "OutputLine", Module: "test", Kind: ir.TypeKindData, Size: 8, Align: 8, StorageSize: 24,
+		Fields: map[string]ir.FieldInfo{
+			"bytes": {
+				Name:          "bytes",
+				Offset:        0,
+				Size:          8,
+				Align:         8,
+				StorageOffset: 8,
+				StorageSize:   16,
+				Type:          bytesType,
+			},
+		},
+		FieldOrder: []string{"bytes"},
+	}
+	frame := program.Functions[0].Blocks[0].Ops[4].(*ir.FrameBegin)
+	reserve := program.Functions[0].Blocks[0].Ops[5].(*ir.ArenaReserve)
+	place := &ir.ArenaPlace{
+		Arena: frame,
+		Type:  outputType,
+		Fields: []ir.FieldValue{{
+			Name:  "bytes",
+			Value: reserve,
+		}},
+	}
+	ops := []ir.Operation{
+		program.Functions[0].Blocks[0].Ops[0],
+		program.Functions[0].Blocks[0].Ops[1],
+		program.Functions[0].Blocks[0].Ops[2],
+		program.Functions[0].Blocks[0].Ops[3],
+		frame,
+		reserve,
+		place,
+		&ir.FrameEnd{Frame: frame},
+		&ir.Return{},
+	}
+	program.Functions[0].Blocks[0].Ops = ops
+	return program
+}
+
+func testProgramWithArenaPlaceNestedEightByteData(t *testing.T) *ir.Program {
+	t.Helper()
+	program := testProgramWithArenaReserve(t)
+	messageType := ir.Type{Name: "Message", Module: "test", Kind: ir.TypeKindData}
+	boxType := ir.Type{Name: "Box", Module: "test", Kind: ir.TypeKindData}
+	messageInfo := ir.TypeInfo{
+		Name: "Message", Module: "test", Kind: ir.TypeKindData, Size: 8, Align: 8, StorageSize: 8,
+		Fields: map[string]ir.FieldInfo{
+			"id": {Name: "id", Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8, Type: ir.Type{Name: "U64"}},
+		},
+		FieldOrder: []string{"id"},
+	}
+	program.Types["Message"] = messageInfo
+	program.Types["test.Message"] = messageInfo
+	boxInfo := ir.TypeInfo{
+		Name: "Box", Module: "test", Kind: ir.TypeKindData, Size: 8, Align: 8, StorageSize: 16,
+		Fields: map[string]ir.FieldInfo{
+			"message": {
+				Name:          "message",
+				Offset:        0,
+				Size:          8,
+				Align:         8,
+				StorageOffset: 8,
+				StorageSize:   8,
+				Type:          messageType,
+			},
+		},
+		FieldOrder: []string{"message"},
+	}
+	program.Types["Box"] = boxInfo
+	program.Types["test.Box"] = boxInfo
+	id := &ir.ConstInt{Symbol: "message_id", Value: 12345, Type: ir.Type{Name: "U64"}}
+	message := &ir.Construct{
+		Symbol: "message",
+		Type:   messageType,
+		Fields: []ir.FieldValue{{
+			Name:  "id",
+			Value: id,
+		}},
+	}
+	frame := program.Functions[0].Blocks[0].Ops[4].(*ir.FrameBegin)
+	place := &ir.ArenaPlace{
+		Arena: frame,
+		Type:  boxType,
+		Fields: []ir.FieldValue{{
+			Name:  "message",
+			Value: message,
+		}},
+	}
+	ops := []ir.Operation{
+		program.Functions[0].Blocks[0].Ops[0],
+		program.Functions[0].Blocks[0].Ops[1],
+		id,
+		message,
 		frame,
 		place,
 		&ir.FrameEnd{Frame: frame},

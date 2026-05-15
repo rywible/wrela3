@@ -203,14 +203,22 @@ func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding
 }
 
 func compileInterruptDispatchUnits(program *ir.Program) []compiledUnit {
-	units := make([]compiledUnit, 0, len(program.InterruptBindings))
+	bindings := map[uint8]ir.InterruptBinding{}
 	for _, binding := range program.InterruptBindings {
-		symbol := interruptVectorSymbol(binding.Vector)
-		if symbol == "" {
+		bindings[binding.Vector] = binding
+	}
+
+	known := []uint8{0x40, 0x41, 0x42}
+	units := make([]compiledUnit, 0, len(known))
+	for _, vector := range known {
+		symbol := interruptVectorSymbol(vector)
+		if binding, ok := bindings[vector]; ok {
+			units = append(units, buildInterruptDispatchUnit(symbol, binding))
 			continue
 		}
-		units = append(units, buildInterruptDispatchUnit(symbol, binding))
+		units = append(units, buildInterruptTrapUnit(symbol))
 	}
+
 	return units
 }
 
@@ -270,6 +278,17 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding) comp
 	}
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
 	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}
+}
+
+func buildInterruptTrapUnit(symbol string) compiledUnit {
+	return compiledUnit{
+		Symbol: symbol,
+		Bytes: []byte{
+			0xFA,
+			0xF4,
+			0xEB, 0xFD,
+		},
+	}
 }
 
 func emitCallReloc(e *Emitter, symbol string) {
@@ -637,6 +656,26 @@ func (ctx compileContext) storageSize(name string) int {
 		}
 	}
 	return ctx.objectSize(name)
+}
+
+func (ctx compileContext) storageSizeForType(typ ir.Type) int {
+	if info, ok := ctx.typeInfo(typ); ok {
+		if info.StorageSize > 0 {
+			return info.StorageSize
+		}
+		if info.Size > 0 {
+			return info.Size
+		}
+	}
+	return ctx.storageSize(typ.Name)
+}
+
+func (ctx compileContext) isDataType(typ ir.Type) bool {
+	if typ.Kind == ir.TypeKindData {
+		return true
+	}
+	info, ok := ctx.typeInfo(typ)
+	return ok && info.Kind == ir.TypeKindData
 }
 
 func (ctx compileContext) isHandleType(name string) bool {
@@ -1281,6 +1320,11 @@ func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown arena place field: " + field.Name})
 			continue
 		}
+		if e.ctx.isDataType(fieldInfo.Type) && fieldInfo.StorageOffset >= 0 {
+			emitStoreNestedDestinationHandle(e, address, int64(fieldInfo.Offset), int64(fieldInfo.StorageOffset))
+			emitDeepCopyValueToTypedStorage(e, frame, field.Value, fieldInfo.Type, address, int64(fieldInfo.StorageOffset))
+			continue
+		}
 		offset := fieldInfo.StorageOffset
 		if offset < 0 {
 			offset = fieldInfo.Offset
@@ -1516,8 +1560,20 @@ func emitCopyValueToAddressAsType(e *Emitter, frame Frame, value ir.Value, dstBa
 }
 
 func emitDeepCopyObjectToAddress(e *Emitter, typeName string, srcBase asm.Reg, srcDisp int64, dstBase asm.Reg, dstDisp int64) {
-	emitCopyMemoryToMemoryRange(e, srcBase, srcDisp, dstBase, dstDisp, e.ctx.objectSize(typeName))
-	info, ok := e.ctx.types[typeName]
+	emitDeepCopyObjectToAddressAsType(e, ir.Type{Name: typeName}, srcBase, srcDisp, dstBase, dstDisp)
+}
+
+func emitDeepCopyValueToTypedStorage(e *Emitter, frame Frame, value ir.Value, typ ir.Type, dstBase asm.Reg, dstDisp int64) {
+	srcBase, srcDisp, ok := emitValueAddress(e, frame, value)
+	if !ok {
+		return
+	}
+	emitDeepCopyObjectToAddressAsType(e, typ, srcBase, srcDisp, dstBase, dstDisp)
+}
+
+func emitDeepCopyObjectToAddressAsType(e *Emitter, typ ir.Type, srcBase asm.Reg, srcDisp int64, dstBase asm.Reg, dstDisp int64) {
+	emitCopyMemoryToMemoryRange(e, srcBase, srcDisp, dstBase, dstDisp, e.ctx.storageSizeForType(typ))
+	info, ok := e.ctx.typeInfo(typ)
 	if !ok {
 		return
 	}
@@ -1537,7 +1593,7 @@ func emitDeepCopyObjectToAddress(e *Emitter, typeName string, srcBase asm.Reg, s
 				asm.ImmOperand{Value: childDisp},
 			}})
 		}
-		emitDeepCopyObjectToAddress(e, field.Type.Name, asm.MustLookup("r11"), 0, asm.MustLookup("r10"), 0)
+		emitDeepCopyObjectToAddressAsType(e, field.Type, asm.MustLookup("r11"), 0, asm.MustLookup("r10"), 0)
 		emitPopReg(e, dstBase)
 		emitPopReg(e, srcBase)
 	}

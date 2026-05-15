@@ -186,6 +186,32 @@ func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
 	}
 }
 
+func TestCompileGeneratesTrapForUnboundKnownInterruptVector(t *testing.T) {
+	program := interruptProgramForCodegenTest(t)
+	program.InterruptBindings = program.InterruptBindings[:1]
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	bound := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+	if !containsBytes(bound, []byte{0x48, 0xCF}) {
+		t.Fatalf("bound vector missing iretq: %#x", bound)
+	}
+	for _, symbol := range []string{
+		"_wrela_interrupt_vector41_edu_msi",
+		"_wrela_interrupt_vector42_ivshmem_msix",
+	} {
+		code := symbolBytes(t, img, symbol)
+		if !containsBytes(code, []byte{0xFA, 0xF4, 0xEB, 0xFD}) {
+			t.Fatalf("%s missing fatal fallback trap: %#x", symbol, code)
+		}
+	}
+	if got := len(img.InterruptBindings); got != 1 {
+		t.Fatalf("image interrupt bindings = %d, want 1", got)
+	}
+}
+
 func TestInterruptContextSymbolStoresActiveExecutor(t *testing.T) {
 	program := interruptProgramForCodegenTest(t)
 	img, diags := Compile(program)
