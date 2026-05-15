@@ -31,6 +31,21 @@ func TestArenaReserveEmitsBoundsTrapAndBump(t *testing.T) {
 	}
 }
 
+func TestArenaPlaceWritesConstructedFields(t *testing.T) {
+	program := testProgramWithArenaPlace(t)
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("compile diagnostics: %#v", diags)
+	}
+	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
+	if !containsBytes(code, []byte{0x39, 0x30, 0x00, 0x00}) {
+		t.Fatalf("place must store Message.id immediate 12345 into arena storage: %x", code)
+	}
+	if !containsBytes(code, []byte{0x10, 0x00, 0x00, 0x00}) {
+		t.Fatalf("place must reserve Message storage size 16: %x", code)
+	}
+}
+
 func codeCallsSymbol(t *testing.T, image *Image, caller, target string) bool {
 	t.Helper()
 	callerRVA := image.Symbols[caller]
@@ -76,6 +91,40 @@ func testProgramWithArenaReserve(t *testing.T) *ir.Program {
 			}}},
 		}},
 	}
+}
+
+func testProgramWithArenaPlace(t *testing.T) *ir.Program {
+	t.Helper()
+	program := testProgramWithArenaReserve(t)
+	messageType := ir.Type{Name: "Message", Module: "test", Kind: ir.TypeKindData}
+	program.Types["test.Message"] = ir.TypeInfo{
+		Name: "Message", Module: "test", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16,
+		Fields: map[string]ir.FieldInfo{
+			"id": {Name: "id", Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8, Type: ir.Type{Name: "U64"}},
+		},
+		FieldOrder: []string{"id"},
+	}
+	id := &ir.ConstInt{Symbol: "message_id", Value: 12345, Type: ir.Type{Name: "U64"}}
+	frame := program.Functions[0].Blocks[0].Ops[4].(*ir.FrameBegin)
+	place := &ir.ArenaPlace{
+		Arena: frame,
+		Type:  messageType,
+		Fields: []ir.FieldValue{{
+			Name:  "id",
+			Value: id,
+		}},
+	}
+	ops := []ir.Operation{
+		program.Functions[0].Blocks[0].Ops[0],
+		program.Functions[0].Blocks[0].Ops[1],
+		id,
+		frame,
+		place,
+		&ir.FrameEnd{Frame: frame},
+		&ir.Return{},
+	}
+	program.Functions[0].Blocks[0].Ops = ops
+	return program
 }
 
 func arenaTestTypes() map[string]ir.TypeInfo {

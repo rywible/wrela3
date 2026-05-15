@@ -356,6 +356,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitFrameBegin(e, v, frame)
 			case *ir.ArenaReserve:
 				emitArenaReserve(e, v, frame)
+			case *ir.ArenaPlace:
+				emitArenaPlace(e, v, frame)
 			case *ir.FrameEnd:
 				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
@@ -1059,6 +1061,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitFrameBegin(e, v, frame)
 		case *ir.ArenaReserve:
 			emitArenaReserve(e, v, frame)
+		case *ir.ArenaPlace:
+			emitArenaPlace(e, v, frame)
 		case *ir.FrameEnd:
 			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
@@ -1222,18 +1226,85 @@ func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
 	}
 
 	arena := asm.MustLookup("rdi")
-	next := asm.MustLookup("rax")
 	length := asm.MustLookup("r10")
-	end := asm.MustLookup("r11")
-	limit := asm.MustLookup("rcx")
 	align := asm.MustLookup("r9")
-	base := asm.MustLookup("rsi")
 
-	if !emitValueAddressToReg(e, frame, op.Arena, arena) {
+	emitLoadValue(e, frame, op.Align, align)
+	emitLoadValue(e, frame, op.Length, length)
+	address, ok := emitArenaBump(e, frame, op.Arena, length, align)
+	if !ok {
 		return
 	}
+	emitStoreSlotFromReg(e, address, objectSlot, 64)
+	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
+	emitSlotFromBase(e, arena, asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, arena, slot, 64)
+}
+
+func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown arena place type: " + op.Type.Name})
+		return
+	}
+	size := info.StorageSize
+	if size <= 0 {
+		size = info.Size
+	}
+	if size <= 0 {
+		size = e.ctx.storageSize(op.Type.Name)
+	}
+	align := info.Align
+	if align <= 0 {
+		align = 8
+	}
+
+	lengthReg := asm.MustLookup("r10")
+	alignReg := asm.MustLookup("r9")
+	emitMovImmToReg(e, lengthReg, int64(size))
+	emitMovImmToReg(e, alignReg, int64(align))
+	address, ok := emitArenaBump(e, frame, op.Arena, lengthReg, alignReg)
+	if !ok {
+		return
+	}
+	emitStoreSlotFromReg(e, address, slot, 64)
+
+	for _, field := range op.Fields {
+		fieldInfo, ok := info.Fields[field.Name]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown arena place field: " + field.Name})
+			continue
+		}
+		offset := fieldInfo.StorageOffset
+		if offset < 0 {
+			offset = fieldInfo.Offset
+		}
+		fieldSize := fieldInfo.StorageSize
+		if fieldSize <= 0 {
+			fieldSize = fieldInfo.Size
+		}
+		if fieldSize <= 0 {
+			fieldSize = e.ctx.representationSize(fieldInfo.Type.Name)
+		}
+		emitCopyValueToMemoryRange(e, frame, field.Value, address, int64(offset), fieldSize)
+	}
+}
+
+func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg, align asm.Reg) (asm.Reg, bool) {
+	arena := asm.MustLookup("rdi")
+	next := asm.MustLookup("rax")
+	end := asm.MustLookup("r11")
+	limit := asm.MustLookup("rcx")
+	base := asm.MustLookup("rsi")
+
+	if !emitValueAddressToReg(e, frame, arenaValue, arena) {
+		return asm.Reg{}, false
+	}
 	emitLoadMemToReg(e, next, arena, 16, 64)
-	emitLoadValue(e, frame, op.Align, align)
 	emitTrapIfZero(e, align)
 	emitRegRegMove(e, end, align)
 	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
@@ -1243,7 +1314,6 @@ func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
 	emitRegRegOp(e, 0x01, next, end)
 	emitNegReg(e, align)
 	emitRegRegOp(e, 0x21, next, align)
-	emitLoadValue(e, frame, op.Length, length)
 	emitRegRegMove(e, end, next)
 	emitRegRegOp(e, 0x01, end, length)
 	emitLoadMemToReg(e, limit, arena, 8, 64)
@@ -1251,11 +1321,8 @@ func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
 
 	emitLoadMemToReg(e, base, arena, 0, 64)
 	emitRegRegOp(e, 0x01, base, next)
-	emitStoreSlotFromReg(e, base, objectSlot, 64)
-	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
 	emitStoreMemFromReg(e, arena, 16, end, 64)
-	emitSlotFromBase(e, next, asm.MustLookup("rbp"), objectSlot)
-	emitStoreSlotFromReg(e, next, slot, 64)
+	return base, true
 }
 
 func emitFrameEnd(e *Emitter, op *ir.FrameEnd, frame Frame) {
