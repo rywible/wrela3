@@ -717,6 +717,8 @@ func (p *Parser) parseStmt() (ast.Stmt, []diag.Diagnostic) {
 		return p.parseWhileStmt()
 	case lex.KeywordFor:
 		return p.parseForStmt()
+	case lex.KeywordWith:
+		return p.parseWithStmt()
 	case lex.KeywordAsm:
 		return nil, p.err(p.peek(), diag.PAR0001, "inline asm blocks are not allowed in v0")
 	default:
@@ -805,6 +807,35 @@ func (p *Parser) parseForStmt() (ast.Stmt, []diag.Diagnostic) {
 		return nil, ds
 	}
 	return &ast.ForStmt{Var: name.Text, InExpr: expr, Body: body, SpanV: p.span(start.Start, p.previous().End)}, nil
+}
+
+func (p *Parser) parseWithStmt() (ast.Stmt, []diag.Diagnostic) {
+	start := p.next()
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	asTok, ds := p.expectIdentifier("expected as")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if asTok.Text != "as" {
+		return nil, p.err(asTok, diag.PAR0001, "expected as")
+	}
+	nameTok, ds := p.expectIdentifier("expected frame name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	body, ds := p.parseBlockStmts()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.WithStmt{
+		Expr:  expr,
+		Name:  nameTok.Text,
+		Body:  body,
+		SpanV: p.span(start.Start, p.previous().End),
+	}, nil
 }
 
 func (p *Parser) parseExprOrAssignStmt() (ast.Stmt, []diag.Diagnostic) {

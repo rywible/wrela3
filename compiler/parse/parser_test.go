@@ -118,6 +118,38 @@ class Writer {
 	}
 }
 
+func TestParseWithStatement(t *testing.T) {
+	src := `
+module parser.with_stmt
+
+class Memory {}
+
+executor Worker {
+    memory: Memory
+
+    start fn run(self) -> never {
+        with self.memory.frame(length = 65536) as tick {
+            let raw = tick.reserve(length = 32, align = 8)
+        }
+        while true {}
+    }
+}
+`
+	mod, ds := parseModuleForTest(t, src)
+	if len(ds) != 0 {
+		t.Fatalf("parse diagnostics: %#v", ds)
+	}
+	exec := mod.Decls[1].(*ast.ExecutorDecl)
+	stmt := exec.Methods[0].Body[0]
+	with, ok := stmt.(*ast.WithStmt)
+	if !ok {
+		t.Fatalf("first statement = %T, want *ast.WithStmt", stmt)
+	}
+	if with.Name != "tick" || len(with.Body) != 1 {
+		t.Fatalf("with = %#v, want bound tick with one body statement", with)
+	}
+}
+
 func TestParseStmtAsmAndCapture(t *testing.T) {
 	mod, ds := parseModuleForTest(t, `
 module m
