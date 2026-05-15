@@ -185,7 +185,7 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 	program := compileHelloProgram(t)
 	assertFunctionCalls(t, program,
 		"_wrela_method_examples_hello_program_HelloWorld_run",
-		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_static_bytes",
+		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_bytes",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever",
 	)
@@ -204,6 +204,22 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 		"_wrela_method_machine_x86_64_serial_SerialWriterRegisters_read8",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_pause",
 	)
+}
+
+func TestHelloSourceUsesArenaFrames(t *testing.T) {
+	source := readRepoFile(t, "examples/hello/program.wrela")
+	for _, want := range []string{
+		"with self.memory.frame(length =",
+		".place(",
+		".bytes(",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("hello program missing %q", want)
+		}
+	}
+	if strings.Contains(source, "allocate_bytes") || strings.Contains(source, "static_bytes") {
+		t.Fatalf("hello program must not use old memory vocabulary")
+	}
 }
 
 func TestHelloTransitionCompiledBytesUseSavedContinuation(t *testing.T) {
@@ -365,4 +381,18 @@ func hexBytes(bytes []byte) string {
 		b.WriteByte(digits[by&0xf])
 	}
 	return b.String()
+}
+
+func readRepoFile(t *testing.T, path string) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	root := filepath.Clean(filepath.Join(wd, ".."))
+	data, err := os.ReadFile(filepath.Join(root, path))
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
