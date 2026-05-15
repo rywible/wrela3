@@ -127,7 +127,7 @@ module index.stringliteral
 		if len(st.Fields) != 2 || st.Fields[0].Name != "address" || st.Fields[1].Name != "length" {
 			t.Fatalf("unexpected StringLiteral fields %#v", st.Fields)
 		}
-		if st.Fields[0].Type.Name != "VirtualAddress" || st.Fields[1].Type.Name != "U64" {
+		if st.Fields[0].Type.Name != "PhysicalAddress" || st.Fields[1].Type.Name != "U64" {
 			t.Fatalf("unexpected StringLiteral field types %#v", st.Fields)
 		}
 	})

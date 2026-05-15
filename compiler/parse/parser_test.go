@@ -205,7 +205,7 @@ driver path SerialWritePath {
 
 executor HelloWorld {
     start fn run(self) -> never {
-        self.serial_path.write(self.memory.static_bytes("hello"))
+        self.serial_path.write(self.memory.bytes(value = "hello"))
     }
 }`
 	mod, ds := parseModuleForTest(t, src)

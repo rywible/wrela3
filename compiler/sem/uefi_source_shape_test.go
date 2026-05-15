@@ -260,6 +260,36 @@ func TestUEFIMemoryMapFieldOrderMatchesPlan(t *testing.T) {
 	}
 }
 
+func TestExecutorMemoryPhysicalArenaShape(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+
+	memory := moduleType(t, index, "machine.x86_64.executor_memory", "ExecutorMemory")
+	arenaFrame := moduleType(t, index, "machine.x86_64.executor_memory", "ArenaFrame")
+	bytes := moduleType(t, index, "machine.x86_64.executor_memory", "Bytes")
+	mutable := moduleType(t, index, "machine.x86_64.executor_memory", "MutableBytes")
+
+	if fieldTypeName(t, bytes, "address") != "PhysicalAddress" {
+		t.Fatalf("Bytes.address must be PhysicalAddress")
+	}
+	if fieldTypeName(t, mutable, "address") != "PhysicalAddress" {
+		t.Fatalf("MutableBytes.address must be PhysicalAddress")
+	}
+	if methodByName(t, memory, "bytes") == nil || methodByName(t, memory, "frame") == nil {
+		t.Fatalf("ExecutorMemory must expose bytes and frame methods")
+	}
+	forbidden := "allocate" + "_" + "bytes"
+	if optionalMethodByName(memory, forbidden) != nil {
+		t.Fatalf("ExecutorMemory must not expose allocator method")
+	}
+	if arenaFrame == nil || methodByName(t, arenaFrame, "frame") == nil {
+		t.Fatalf("ArenaFrame must expose nested frame method")
+	}
+}
+
 func TestMachineX64InterruptSupportAsmIsAllowed(t *testing.T) {
 	_, ds := checkModuleForTest(t, `
 module machine.x86_64.interrupts
@@ -368,5 +398,25 @@ func methodByName(t *testing.T, typ *Type, name string) *Method {
 		}
 	}
 	t.Fatalf("missing %s.%s method", typ.Name, name)
+	return nil
+}
+
+func fieldTypeName(t *testing.T, typ *Type, field string) string {
+	t.Helper()
+	for _, f := range typ.Fields {
+		if f.Name == field {
+			return f.Type.Name
+		}
+	}
+	t.Fatalf("missing field %s on %s", field, typ.Name)
+	return ""
+}
+
+func optionalMethodByName(typ *Type, name string) *Method {
+	for i := range typ.Methods {
+		if typ.Methods[i].Name == name {
+			return &typ.Methods[i]
+		}
+	}
 	return nil
 }

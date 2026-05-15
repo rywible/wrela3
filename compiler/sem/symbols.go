@@ -434,7 +434,7 @@ func buildPrimitives(idx *Index) {
 		Name:   "StringLiteral",
 		Kind:   KindPrimitive,
 		Fields: []Field{
-			{Name: "address", Type: idx.primitives["VirtualAddress"], Span: source.Span{}},
+			{Name: "address", Type: idx.primitives["PhysicalAddress"], Span: source.Span{}},
 			{Name: "length", Type: idx.primitives["U64"], Span: source.Span{}},
 		},
 	}
