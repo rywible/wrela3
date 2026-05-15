@@ -13,10 +13,6 @@ data MemoryPlan {
     io_ports: IoPortAuthority
 }
 
-data VirtualMemoryPlan {
-    pml4: PhysicalAddress
-}
-
 data CpuPlan {
     vcpu0: ExecutorPlacement
     owned_stack_top: VirtualAddress
@@ -30,14 +26,6 @@ class PhysicalMemoryPlanner {
 
     fn plan(self) -> MemoryPlan {
         return self.memory_plan
-    }
-}
-
-class VirtualMemoryPlanner {
-    virtual_memory_plan: VirtualMemoryPlan
-
-    fn identity_map(self) -> VirtualMemoryPlan {
-        return self.virtual_memory_plan
     }
 }
 

@@ -235,6 +235,19 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 	)
 }
 
+func TestIdentityPagingUsesTwoMiBPagesAsTargetGlue(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	identity := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_identity_paging")
+	if identity.Body == "" {
+		t.Fatalf("build_identity_paging is not an asm method")
+	}
+	for _, want := range []string{"add rax, 0x83", "add r13, 0x200000", "add r15, 0x200000"} {
+		if !strings.Contains(identity.Body, want) {
+			t.Fatalf("build_identity_paging must contain %q", want)
+		}
+	}
+}
+
 func TestInterruptIDTSourceShape(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	build := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_interrupt_idt")
@@ -594,7 +607,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 module codegen.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, ExecutorPlacement, IoPortAuthority } from machine.x86_64.cpu_state
-use { MemoryPlan, VirtualMemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
 use { MutableBytes, ExecutorMemory, Bytes } from machine.x86_64.executor_memory
 
 image UefiCodegenHarness {
@@ -614,7 +627,6 @@ image UefiCodegenHarness {
             executor_arena = MutableBytes(address = 0, length = 0),
             io_ports = IoPortAuthority()
         )
-        let virtual_memory_plan = VirtualMemoryPlan(pml4 = 0)
         let cpu_plan = CpuPlan(
             vcpu0 = vcpu0,
             owned_stack_top = 0,
@@ -624,7 +636,6 @@ image UefiCodegenHarness {
         )
         return hardware.exit_to_owned_hardware(
             memory_plan = memory_plan,
-            virtual_memory_plan = virtual_memory_plan,
             cpu_plan = cpu_plan
         )
     }
