@@ -385,12 +385,19 @@ func TestCacheArenaGetBytesCopiesIntoFrame(t *testing.T) {
 		"mov r8 [r8]",
 		"mov [rdx+16] r15",
 		"mov [r10] imm",
-		"mov [r10+8] r11",
-		"mov [r10+16] r14",
+		"add r12 imm",
+		"mov [r10+8] r12",
+		"mov [r10+16] r11",
+		"mov [r10+24] r14",
+		"mov [r10+16] imm",
+		"mov [r10+24] imm",
 	} {
 		if !strings.Contains(signatures, want) {
 			t.Fatalf("cache get missing lowered instruction %q in:\n%s", want, signatures)
 		}
+	}
+	if got := strings.Count(signatures, "mov [r10+8] r12"); got < 2 {
+		t.Fatalf("cache get must install nested Bytes handles on hit and miss paths, got %d in:\n%s", got, signatures)
 	}
 }
 

@@ -113,6 +113,50 @@ func TestArenaMemoryQEMU(t *testing.T) {
 	}
 }
 
+func TestCacheMemoryQEMU(t *testing.T) {
+	qemuBin, err := exec.LookPath("qemu-system-x86_64")
+	if err != nil {
+		t.Fatalf("qemu-system-x86_64 not found in PATH: %v", err)
+	}
+	firmware, err := qemu.ResolveFirmware(qemuBin)
+	if err != nil {
+		t.Fatalf("resolve QEMU firmware: %v", err)
+	}
+
+	tmp := t.TempDir()
+	vars := filepath.Join(tmp, "OVMF_VARS.fd")
+	copyFile(t, firmware.Vars, vars)
+	image := filepath.Join(tmp, "cache-memory.efi")
+	_, err = compiler.Build(compiler.BuildOptions{
+		Mode:       compiler.ModeDev,
+		RootPath:   "tests/e2e/fixtures/cache_memory/main.wrela",
+		OutputPath: image,
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("build cache memory image: %v", err)
+	}
+
+	out, err := qemu.Run(qemu.Options{
+		QEMUBinary:  qemuBin,
+		OVMFCode:    firmware.Code,
+		OVMFVars:    vars,
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		SuccessText: "cache memory ok",
+		Timeout:     qemuTimeout(),
+	})
+	if err != nil {
+		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "cache memory ok") {
+		t.Fatalf("serial output missing cache memory line:\n%s", out)
+	}
+	if strings.Contains(out, "stale cache") {
+		t.Fatalf("cache lookup returned evicted entry:\n%s", out)
+	}
+}
+
 func TestHelloInterruptsQEMU(t *testing.T) {
 	tmp := t.TempDir()
 	image := filepath.Join(tmp, "hello-interrupt.efi")

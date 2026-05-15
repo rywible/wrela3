@@ -128,15 +128,21 @@ get_copy_loop:
 
 get_copy_done:
         mov [r10], 1
-        mov [r10 + 8], r11
-        mov [r10 + 16], r14
+        mov r12, r10
+        add r12, 16
+        mov [r10 + 8], r12
+        mov [r10 + 16], r11
+        mov [r10 + 24], r14
         mov rax, r10
         ret
 
 get_miss:
         mov [r10], 0
-        mov [r10 + 8], 0
+        mov r12, r10
+        add r12, 16
+        mov [r10 + 8], r12
         mov [r10 + 16], 0
+        mov [r10 + 24], 0
         mov rax, r10
         ret
     }
