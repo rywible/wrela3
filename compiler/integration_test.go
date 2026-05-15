@@ -131,6 +131,35 @@ func TestBuildHelloImageContainsRuntimeSignals(t *testing.T) {
 	}
 }
 
+func TestBuildHelloContainsInterruptBinding(t *testing.T) {
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "hello.efi")
+	result, err := Build(BuildOptions{
+		Mode:       ModeDev,
+		RootPath:   "examples/hello/main.wrela",
+		OutputPath: out,
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("Build hello: %v", err)
+	}
+	if result.Image == nil {
+		t.Fatalf("BuildResult.Image is nil")
+	}
+	if got := len(result.Image.InterruptBindings); got != 3 {
+		t.Fatalf("interrupt bindings = %d, want 3", got)
+	}
+	gotVectors := map[uint8]bool{}
+	for _, binding := range result.Image.InterruptBindings {
+		gotVectors[binding.Vector] = true
+	}
+	for _, want := range []uint8{0x40, 0x41, 0x42} {
+		if !gotVectors[want] {
+			t.Fatalf("missing vector %#x in bindings %#v", want, result.Image.InterruptBindings)
+		}
+	}
+}
+
 func TestHelloTransitionFunctionsPreserveOwnedStackReturn(t *testing.T) {
 	program := compileHelloProgram(t)
 	for _, symbol := range []string{
@@ -157,18 +186,23 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 	assertFunctionCalls(t, program,
 		"_wrela_method_examples_hello_program_HelloWorld_run",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_static_bytes",
-		"_wrela_method_machine_x86_64_serial_SerialWritePath_write",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever",
 	)
 	assertFunctionCalls(t, program,
-		"_wrela_method_machine_x86_64_serial_SerialWritePath_write",
-		"_wrela_method_machine_x86_64_serial_SerialWritePath_wait_until_ready",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_wait_until_ready",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write_byte",
+	)
+	assertFunctionCalls(t, program,
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write_byte",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_wait_until_ready",
 		"_wrela_method_machine_x86_64_serial_SerialWriterRegisters_write8",
 	)
 	assertFunctionCalls(t, program,
-		"_wrela_method_machine_x86_64_serial_SerialWritePath_wait_until_ready",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_wait_until_ready",
 		"_wrela_method_machine_x86_64_serial_SerialWriterRegisters_read8",
-		"_wrela_method_machine_x86_64_serial_SerialWritePath_pause",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_pause",
 	)
 }
 
