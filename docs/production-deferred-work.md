@@ -7,8 +7,9 @@
 
 ## CPU and interrupts
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.
-- v0 exclusion reason: this release intentionally limits execution to one owned core and a minimal, owned-hardware bootstrap to keep the surface area stable.
-- v0 must not block: richer interrupt routing, AP initialization, and timer/IRQ models should slot in as independent modules on top of existing CPU section/relocation plumbing.
+- v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, and ivshmem-doorbell via MSI-X on QEMU lab hardware.
+- v0 still exposes no CPU traps.
+- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and multiprocessor routing.
 
 ## Hardware discovery
 - This is required for production and not optional because ACPI, PCIe, and framebuffer discovery are expected for realistic boots and platform integration.

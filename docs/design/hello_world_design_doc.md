@@ -266,6 +266,10 @@ executor HelloWorld {
         self.serial_path.write("hello from wrela\n")
         self.execution.halt_forever()
     }
+
+    on serial_path.interrupt(event: SerialPathInterrupt) {
+        self.serial_path.write_byte(value = event.byte)
+    }
 }
 
 image HelloSerial {
