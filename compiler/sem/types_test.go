@@ -551,3 +551,258 @@ image Good {
 		}
 	})
 }
+
+const interruptPrelude = `
+unique class OwnedHardware {}
+unique class DelegatedHardware {
+    fn exit_to_owned_hardware(self) -> OwnedHardware {
+        return OwnedHardware()
+    }
+}
+
+data SerialInterrupt { vector: U8 }
+data OtherInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+}
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {}
+}
+`
+
+func TestInterruptEventBodyContracts(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_event_contracts
+`+typePrelude+`
+
+data SerialInterrupt { vector: U8 }
+data OtherInterrupt { vector: U8 }
+
+driver path MissingEvent {
+    interrupt receiver -> MissingInterrupt {
+        return MissingInterrupt()
+    }
+}
+
+driver path WrongReturn {
+    interrupt receiver -> SerialInterrupt {
+        return OtherInterrupt(vector = 1)
+    }
+}
+
+driver path MissingReturn {
+    interrupt receiver -> SerialInterrupt {}
+}
+`)
+	if !hasCode(diags, diag.SEM0002) {
+		t.Fatalf("expected SEM0002, got %#v", diags)
+	}
+	if !hasCode(diags, diag.SEM0015) {
+		t.Fatalf("expected SEM0015, got %#v", diags)
+	}
+}
+
+func TestExecutorMustHandleInterruptPathFields(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_missing_on
+`+interruptPrelude+`
+
+executor MissingHandler {
+    serial: SerialConsolePath
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let serial = SerialConsolePath()
+        let exec = MissingHandler(serial = serial)
+        while true {}
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0017) {
+		t.Fatalf("expected SEM0017, got %#v", diags)
+	}
+}
+
+func TestOnHandlerMustReferenceDirectInterruptPathField(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_bad_on_field
+`+interruptPrelude+`
+
+executor BadField {
+    serial: SerialConsolePath
+
+    on missing.interrupt(event: SerialInterrupt) {}
+}
+`)
+	if !hasCode(diags, diag.SEM0018) {
+		t.Fatalf("expected SEM0018, got %#v", diags)
+	}
+}
+
+func TestOnHandlerParamTypeMustMatchInterruptEvent(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_param_type
+`+interruptPrelude+`
+
+executor BadParam {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: OtherInterrupt) {}
+}
+`)
+	if !hasCode(diags, diag.SEM0016) {
+		t.Fatalf("expected SEM0016, got %#v", diags)
+	}
+}
+
+func TestOnHandlerRejectsForbiddenBodyShapes(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_forbidden_body
+`+interruptPrelude+`
+
+class RuntimeThing {}
+
+executor BadBody {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {
+        while true {}
+        return event
+        let thing = RuntimeThing()
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0016) {
+		t.Fatalf("expected SEM0016, got %#v", diags)
+	}
+}
+
+func TestInterruptEventCannotBeCalledNormally(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_call
+`+interruptPrelude+`
+
+executor BadCall {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {
+        self.serial.interrupt()
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0019) {
+		t.Fatalf("expected SEM0019, got %#v", diags)
+	}
+}
+
+func TestExplicitInterruptBindCallRejected(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_bind_call
+`+interruptPrelude+`
+
+class Interrupts {
+    fn bind(self) {}
+}
+
+executor BadBind {
+    serial: SerialConsolePath
+    interrupts: Interrupts
+
+    on serial.interrupt(event: SerialInterrupt) {
+        self.interrupts.bind()
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0019) {
+		t.Fatalf("expected SEM0019, got %#v", diags)
+	}
+}
+
+func TestOnlySupportedInterruptRuntimeBindingsExposed(t *testing.T) {
+	checked, diags := checkModuleForTest(t, `
+module machine.x86_64.serial
+`+interruptPrelude+`
+
+image Good {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let serial = SerialConsolePath()
+        let exec = ConsoleExec(serial = serial)
+        while true {}
+    }
+}
+`)
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", diags)
+	}
+	if len(checked.InterruptBindings) != 1 || checked.InterruptBindings[0].Vector != 0x40 {
+		t.Fatalf("interrupt bindings = %#v, want vector 0x40", checked.InterruptBindings)
+	}
+}
+
+func TestOnlySupportedInterruptRuntimeRejectsReachableUnsupported(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_unsupported_reachable
+`+interruptPrelude+`
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let serial = SerialConsolePath()
+        let exec = ConsoleExec(serial = serial)
+        while true {}
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0020) {
+		t.Fatalf("expected SEM0020, got %#v", diags)
+	}
+}
+
+func TestUnsupportedInterruptRuntimeShapeIgnoredWhenUnreachable(t *testing.T) {
+	checked, diags := checkModuleForTest(t, `
+module index.interrupt_unsupported_unreachable
+`+interruptPrelude+`
+
+image Good {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
+`)
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", diags)
+	}
+	if len(checked.InterruptBindings) != 0 {
+		t.Fatalf("interrupt bindings = %#v, want none", checked.InterruptBindings)
+	}
+}

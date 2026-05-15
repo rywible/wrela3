@@ -65,9 +65,20 @@ type Type struct {
 	Methods       []Method
 }
 
+type InterruptBinding struct {
+	ExecutorModule string
+	ExecutorType   string
+	PathField      string
+	PathType       string
+	EventType      *Type
+	Vector         uint8
+	Span           source.Span
+}
+
 type CheckedProgram struct {
-	Modules    []*ast.Module
-	Index      *Index
-	ImageGraph ImageGraph
-	OwnedRoot  *Type
+	Modules           []*ast.Module
+	Index             *Index
+	ImageGraph        ImageGraph
+	OwnedRoot         *Type
+	InterruptBindings []InterruptBinding
 }

@@ -132,3 +132,64 @@ module index.stringliteral
 		}
 	})
 }
+
+func TestInterruptEventsAndOnHandlersIndexed(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module index.interrupt_symbols
+
+data SerialInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+}
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {}
+}
+`)
+	idx, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	if got := idx.InterruptEvent("index.interrupt_symbols", "SerialConsolePath"); got == nil || got.EventType != "SerialInterrupt" {
+		t.Fatalf("interrupt event = %#v, want SerialInterrupt", got)
+	}
+	if got := idx.OnHandler("index.interrupt_symbols", "ConsoleExec", "serial"); got == nil || got.ParamType != "SerialInterrupt" {
+		t.Fatalf("on handler = %#v, want SerialInterrupt", got)
+	}
+}
+
+func TestInterruptEventsAndOnHandlersDuplicateRejected(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module index.interrupt_duplicates
+
+data SerialInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 2)
+    }
+}
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {}
+    on serial.interrupt(event: SerialInterrupt) {}
+}
+`)
+	_, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if !hasCode(ds, diag.SEM0014) {
+		t.Fatalf("expected SEM0014, got %#v", ds)
+	}
+}

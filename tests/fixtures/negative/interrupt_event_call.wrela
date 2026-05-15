@@ -1,0 +1,18 @@
+// expect: SEM0019: interrupt events cannot be called directly
+module negative.interrupt_event_call
+
+data SerialInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+}
+
+executor BadCall {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {
+        self.serial.interrupt()
+    }
+}

@@ -15,6 +15,8 @@ const (
 	ContextNormalMethod ContextKind = iota
 	ContextImagePhaseDirect
 	ContextOwnershipTransferAuthorityMethod
+	ContextInterruptEvent
+	ContextOnHandler
 )
 
 type Scope struct {
@@ -112,13 +114,15 @@ func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
 }
 
 type checker struct {
-	index        *Index
-	modules      []*ast.Module
-	currentType  *Type
-	currentPhase string
-	diags        []diag.Diagnostic
-	ownedRoot    *Type
-	graph        ImageGraph
+	index           *Index
+	modules         []*ast.Module
+	currentType     *Type
+	currentPhase    string
+	diags           []diag.Diagnostic
+	ownedRoot       *Type
+	graph           ImageGraph
+	bindings        []InterruptBinding
+	runtimeBindings []InterruptBinding
 }
 
 type driverPathOwner struct {
@@ -150,12 +154,14 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkDelegatedOnlyCrossing()
 	c.checkUniqueConstructors()
 	c.checkExecutorWiring()
+	c.checkInterruptRuntimeSupport()
 
 	return &CheckedProgram{
-		Modules:    modules,
-		Index:      index,
-		ImageGraph: c.graph,
-		OwnedRoot:  c.ownedRoot,
+		Modules:           modules,
+		Index:             index,
+		ImageGraph:        c.graph,
+		OwnedRoot:         c.ownedRoot,
+		InterruptBindings: c.runtimeBindings,
 	}, c.diags
 }
 
@@ -256,9 +262,19 @@ func (c *checker) checkUnresolvedTypes() {
 			case *ast.DriverPathDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields)
 				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				for _, event := range d.InterruptEvents {
+					if c.resolveType(mod.Name, event.EventType) == nil {
+						c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType)
+					}
+				}
 			case *ast.ExecutorDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields)
 				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				for _, handler := range d.OnHandlers {
+					if c.resolveType(mod.Name, handler.ParamType) == nil {
+						c.error(handler.SpanV, diag.SEM0002, "unknown type "+handler.ParamType)
+					}
+				}
 			case *ast.ImageDecl:
 				for _, phase := range d.Phases {
 					c.checkParamsResolved(mod.Name, phase.Params)
@@ -311,12 +327,80 @@ func (c *checker) checkDeclBodiesAndConstructors() {
 			case *ast.DriverPathDecl:
 				typ := c.index.resolveInScope(mod.Name, d.Name)
 				c.checkMethods(mod.Name, typ, d.Methods)
+				c.checkInterruptEvents(mod.Name, typ, d.InterruptEvents)
 			case *ast.ExecutorDecl:
 				typ := c.index.resolveInScope(mod.Name, d.Name)
 				c.checkMethods(mod.Name, typ, d.Methods)
+				c.checkOnHandlers(mod.Name, typ, d.OnHandlers)
 			}
 		}
 	}
+}
+
+func (c *checker) checkInterruptEvents(moduleName string, path *Type, events []ast.InterruptEventDecl) {
+	if path == nil {
+		return
+	}
+	for _, event := range events {
+		retType := c.resolveType(moduleName, event.EventType)
+		if retType == nil {
+			c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType)
+			continue
+		}
+		scope := NewScope(nil)
+		scope.Define("self", path)
+		prevType := c.currentType
+		prevPhase := c.currentPhase
+		c.currentType = path
+		c.currentPhase = "interrupt receiver"
+		terminates := c.checkStmtList(moduleName, event.Body, scope, retType, ContextInterruptEvent)
+		c.currentType = prevType
+		c.currentPhase = prevPhase
+		if retType != nil && !terminates {
+			c.error(event.SpanV, diag.SEM0015, "interrupt event must return "+retType.Name)
+		}
+	}
+}
+
+func (c *checker) checkOnHandlers(moduleName string, exec *Type, handlers []ast.OnHandlerDecl) {
+	if exec == nil {
+		return
+	}
+	seen := map[string]source.Span{}
+	for _, handler := range handlers {
+		key := handler.PathField + ".interrupt"
+		seen[key] = handler.Span()
+		field := c.fieldByName(exec, handler.PathField)
+		if field == nil || field.Type == nil || field.Type.Kind != KindDriverPath {
+			c.error(handler.SpanV, diag.SEM0018, "on handler must reference a driver path field with an interrupt event")
+			continue
+		}
+		event := c.eventDeclForPath(field.Type)
+		if event == nil {
+			c.error(handler.SpanV, diag.SEM0018, "on handler must reference a driver path field with an interrupt event")
+			continue
+		}
+		paramType := c.resolveType(moduleName, handler.ParamType)
+		if paramType == nil {
+			c.error(handler.SpanV, diag.SEM0002, "unknown type "+handler.ParamType)
+			continue
+		}
+		eventType := c.resolveType(field.Type.Module, event.EventType)
+		if eventType == nil || !typesCompatible(eventType, paramType) || eventType.Module != paramType.Module || eventType.Name != paramType.Name {
+			c.error(handler.SpanV, diag.SEM0016, "on handler parameter type must match interrupt event type")
+		}
+		scope := NewScope(nil)
+		scope.Define("self", exec)
+		scope.Define(handler.ParamName, paramType)
+		prevType := c.currentType
+		prevPhase := c.currentPhase
+		c.currentType = exec
+		c.currentPhase = "on " + key
+		c.checkStmtList(moduleName, handler.Body, scope, nil, ContextOnHandler)
+		c.currentType = prevType
+		c.currentPhase = prevPhase
+	}
+	c.checkExecutorInterruptCompleteness(exec, seen)
 }
 
 func (c *checker) checkImageDecl(moduleName string, image *ast.ImageDecl) {
@@ -457,11 +541,17 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			return thenTerminates && elseTerminates
 		}
 	case *ast.WhileStmt:
+		if ctx == ContextOnHandler {
+			c.error(s.SpanV, diag.SEM0016, "on handler cannot contain loops")
+		}
 		cond := c.typeExpr(moduleName, s.Cond, scope, ctx)
 		c.requireType(cond, c.mustType(moduleName, "Bool"), s.Cond.Span())
 		c.checkStmtList(moduleName, s.Body, NewScope(scope), expectedReturn, ctx)
 		return isTrueLiteral(s.Cond)
 	case *ast.ForStmt:
+		if ctx == ContextOnHandler {
+			c.error(s.SpanV, diag.SEM0016, "on handler cannot contain loops")
+		}
 		inType := c.typeExpr(moduleName, s.InExpr, scope, ctx)
 		c.requireBytesIterable(inType, s.InExpr.Span())
 		loopScope := NewScope(scope)
@@ -470,6 +560,10 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 	case *ast.ReturnStmt:
 		if expectedReturn == nil {
 			if s.Value != nil {
+				if ctx == ContextOnHandler {
+					c.error(s.SpanV, diag.SEM0016, "on handler cannot return a value")
+					return true
+				}
 				c.error(s.SpanV, diag.CG0001, "cannot return value from void function")
 				return true
 			}
@@ -484,11 +578,21 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			return true
 		}
 		if s.Value == nil {
-			c.error(s.SpanV, diag.CG0001, "missing return value")
+			if ctx == ContextInterruptEvent {
+				c.error(s.SpanV, diag.SEM0015, "interrupt event must return a value")
+			} else {
+				c.error(s.SpanV, diag.CG0001, "missing return value")
+			}
 			return true
 		}
 		got := c.typeExpr(moduleName, s.Value, scope, ctx)
-		c.requireType(got, expectedReturn, s.Value.Span())
+		if ctx == ContextInterruptEvent {
+			if got != nil && expectedReturn != nil && !typesCompatible(expectedReturn, got) {
+				c.error(s.Value.Span(), diag.SEM0015, "interrupt event return type mismatch")
+			}
+		} else {
+			c.requireType(got, expectedReturn, s.Value.Span())
+		}
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
 		return true
 	case *ast.ExprStmt:
@@ -623,6 +727,98 @@ func (c *checker) checkExecutorWiring() {
 			break
 		}
 	}
+}
+
+func interruptVector(path *Type) (uint8, bool) {
+	switch qualifiedTypeName(path) {
+	case "machine.x86_64.serial.SerialConsolePath":
+		return 0x40, true
+	case "machine.x86_64.edu.EduMsiPath":
+		return 0x41, true
+	case "machine.x86_64.ivshmem.IvshmemMsixPath":
+		return 0x42, true
+	default:
+		return 0, false
+	}
+}
+
+func (c *checker) checkExecutorInterruptCompleteness(exec *Type, seen map[string]source.Span) {
+	for _, field := range exec.Fields {
+		if field.Type == nil || field.Type.Kind != KindDriverPath {
+			continue
+		}
+		event := c.eventDeclForPath(field.Type)
+		if event == nil {
+			continue
+		}
+		key := field.Name + ".interrupt"
+		if _, ok := seen[key]; !ok {
+			c.error(field.Span, diag.SEM0017, "missing on handler for "+key)
+			continue
+		}
+		c.bindings = append(c.bindings, InterruptBinding{
+			ExecutorModule: exec.Module,
+			ExecutorType:   exec.Name,
+			PathField:      field.Name,
+			PathType:       qualifiedTypeName(field.Type),
+			EventType:      c.resolveType(field.Type.Module, event.EventType),
+			Span:           field.Span,
+		})
+	}
+}
+
+func (c *checker) eventDeclForPath(path *Type) *ast.InterruptEventDecl {
+	if path == nil {
+		return nil
+	}
+	return c.index.InterruptEvent(path.Module, path.Name)
+}
+
+func (c *checker) checkInterruptRuntimeSupport() {
+	c.runtimeBindings = c.runtimeBindings[:0]
+	for _, binding := range c.bindings {
+		if !c.isReachableInterruptBinding(binding) {
+			continue
+		}
+		pathModule, pathName := splitQualifiedType(binding.PathType)
+		vector, ok := interruptVector(&Type{Module: pathModule, Name: pathName})
+		if !ok {
+			c.error(binding.Span, diag.SEM0020, "unsupported interrupt runtime path "+binding.PathType)
+			continue
+		}
+		binding.Vector = vector
+		c.runtimeBindings = append(c.runtimeBindings, binding)
+	}
+}
+
+func (c *checker) isReachableInterruptBinding(binding InterruptBinding) bool {
+	for _, exec := range c.graph.Executors {
+		if exec.Type == nil || exec.Type.Module != binding.ExecutorModule || exec.Type.Name != binding.ExecutorType {
+			continue
+		}
+		if exec.FieldBindings[binding.PathField] != "" || exec.PathUses[binding.PathField].Key != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func splitQualifiedType(raw string) (string, string) {
+	parts := strings.Split(raw, ".")
+	if len(parts) <= 1 {
+		return "", raw
+	}
+	return strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+}
+
+func qualifiedTypeName(typ *Type) string {
+	if typ == nil {
+		return ""
+	}
+	if typ.Module == "" || typ.Module == "builtin" {
+		return typ.Name
+	}
+	return typ.Module + "." + typ.Name
 }
 
 func secondDriverPathOwnerSpan(owners map[string]driverPathOwner, fallback source.Span) source.Span {
@@ -832,6 +1028,9 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		c.error(expr.SpanV, diag.SEM0002, "unknown constructor type "+expr.Type)
 		return nil
 	}
+	if ctx == ContextOnHandler && constructed.Kind != KindData {
+		c.error(expr.SpanV, diag.SEM0016, "on handler can only construct data values")
+	}
 
 	c.checkConstructorPermissions(moduleName, expr, constructed, scope, ctx)
 	if c.currentPhase == "owned_hardware" && c.hasDelegatedField(constructed) {
@@ -931,8 +1130,20 @@ func (c *checker) canMintInContext(ctx ContextKind, typ *Type) bool {
 }
 
 func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
+	if c.isExplicitInterruptBindCall(expr) {
+		c.error(expr.SpanV, diag.SEM0019, "explicit interrupt binding calls are not allowed")
+		return nil
+	}
 	recvType := c.typeExpr(moduleName, expr.Receiver, scope, ctx)
 	if recvType == nil {
+		return nil
+	}
+	if expr.Method == "interrupt" && recvType.Kind == KindDriverPath && c.eventDeclForPath(recvType) != nil {
+		c.error(expr.SpanV, diag.SEM0019, "interrupt events cannot be called directly")
+		return nil
+	}
+	if ctx == ContextOnHandler && c.isForbiddenOnHandlerCall(recvType, expr.Method) {
+		c.error(expr.SpanV, diag.SEM0016, "on handler cannot call runtime platform APIs")
 		return nil
 	}
 	method, errSpan := c.lookupMethod(recvType, expr.Method, expr.SpanV)
@@ -942,10 +1153,35 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
-	if method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
+	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}
 	return method.Return
+}
+
+func (c *checker) isExplicitInterruptBindCall(expr *ast.CallExpr) bool {
+	if expr == nil || expr.Method != "bind" {
+		return false
+	}
+	field, ok := expr.Receiver.(*ast.FieldExpr)
+	return ok && field.Field == "interrupts"
+}
+
+func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
+	if recvType == nil {
+		return false
+	}
+	switch recvType.Module + "." + recvType.Name + "::" + method {
+	case "machine.x86_64.interrupts.ApicInterruptController::enable_cpu_interrupts",
+		"machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive",
+		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_edu_msi_vector41",
+		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_ivshmem_msix_vector42",
+		"machine.x86_64.executor_memory.ExecutorMemory::halt_forever",
+		"arch.x86_64.cpu.CpuControl::halt_forever":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *checker) typeAndVerifyCallArgs(moduleName string, method *Method, args []ast.NamedArg, scope *Scope, ctx ContextKind) {
@@ -1016,6 +1252,18 @@ func (c *checker) lookupFieldForArg(typ *Type, name string) (*Field, *Scope, boo
 		}
 	}
 	return nil, nil, false
+}
+
+func (c *checker) fieldByName(typ *Type, name string) *Field {
+	if typ == nil {
+		return nil
+	}
+	for i := range typ.Fields {
+		if typ.Fields[i].Name == name {
+			return &typ.Fields[i]
+		}
+	}
+	return nil
 }
 
 func (c *checker) lookupField(base *Type, name string, span source.Span) *Type {

@@ -15,15 +15,19 @@ type Index struct {
 	ByImport map[string]map[string]*Type
 	Images   []*ast.ImageDecl
 
-	primitives map[string]*Type
+	InterruptEvents map[string]map[string]*ast.InterruptEventDecl
+	OnHandlers      map[string]map[string]map[string]*ast.OnHandlerDecl
+	primitives      map[string]*Type
 }
 
 func NewIndex() *Index {
 	return &Index{
-		Modules:    map[string]*ast.Module{},
-		ByModule:   map[string]map[string]*Type{},
-		ByImport:   map[string]map[string]*Type{},
-		primitives: map[string]*Type{},
+		Modules:         map[string]*ast.Module{},
+		ByModule:        map[string]map[string]*Type{},
+		ByImport:        map[string]map[string]*Type{},
+		InterruptEvents: map[string]map[string]*ast.InterruptEventDecl{},
+		OnHandlers:      map[string]map[string]map[string]*ast.OnHandlerDecl{},
+		primitives:      map[string]*Type{},
 	}
 }
 
@@ -45,6 +49,20 @@ func (idx *Index) Lookup(moduleName, name string) (*Type, bool) {
 		return p, true
 	}
 	return nil, false
+}
+
+func (idx *Index) InterruptEvent(moduleName, pathType string) *ast.InterruptEventDecl {
+	if idx == nil || idx.InterruptEvents[moduleName] == nil {
+		return nil
+	}
+	return idx.InterruptEvents[moduleName][pathType]
+}
+
+func (idx *Index) OnHandler(moduleName, executorType, pathField string) *ast.OnHandlerDecl {
+	if idx == nil || idx.OnHandlers[moduleName] == nil || idx.OnHandlers[moduleName][executorType] == nil {
+		return nil
+	}
+	return idx.OnHandlers[moduleName][executorType][pathField]
 }
 
 func (idx *Index) MustType(name string) *Type {
@@ -225,9 +243,48 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 			case *ast.DriverPathDecl:
 				typ.Fields = buildFields(idx, mod.Name, d.Fields)
 				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				if idx.InterruptEvents[mod.Name] == nil {
+					idx.InterruptEvents[mod.Name] = map[string]*ast.InterruptEventDecl{}
+				}
+				for i := range d.InterruptEvents {
+					event := &d.InterruptEvents[i]
+					if idx.InterruptEvents[mod.Name][d.Name] != nil {
+						diagOut = append(diagOut, diag.Diagnostic{
+							Phase:    "sem",
+							Code:     diag.SEM0014,
+							Severity: diag.Error,
+							Start:    event.Span().Start,
+							End:      event.Span().End,
+							Message:  "duplicate interrupt receiver",
+						})
+						continue
+					}
+					idx.InterruptEvents[mod.Name][d.Name] = event
+				}
 			case *ast.ExecutorDecl:
 				typ.Fields = buildFields(idx, mod.Name, d.Fields)
 				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				if idx.OnHandlers[mod.Name] == nil {
+					idx.OnHandlers[mod.Name] = map[string]map[string]*ast.OnHandlerDecl{}
+				}
+				if idx.OnHandlers[mod.Name][d.Name] == nil {
+					idx.OnHandlers[mod.Name][d.Name] = map[string]*ast.OnHandlerDecl{}
+				}
+				for i := range d.OnHandlers {
+					handler := &d.OnHandlers[i]
+					if idx.OnHandlers[mod.Name][d.Name][handler.PathField] != nil {
+						diagOut = append(diagOut, diag.Diagnostic{
+							Phase:    "sem",
+							Code:     diag.SEM0014,
+							Severity: diag.Error,
+							Start:    handler.Span().Start,
+							End:      handler.Span().End,
+							Message:  "duplicate on handler " + handler.PathField + ".interrupt",
+						})
+						continue
+					}
+					idx.OnHandlers[mod.Name][d.Name][handler.PathField] = handler
+				}
 			case *ast.ImageDecl:
 				idx.Images = append(idx.Images, d)
 			}
