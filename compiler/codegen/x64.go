@@ -158,11 +158,30 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	}
 
 	return &Image{
-		EntrySymbol: program.Entry.Symbol,
-		Sections:    sections,
-		Symbols:     symbols,
-		Relocs:      relocs,
+		EntrySymbol:       program.Entry.Symbol,
+		Sections:          sections,
+		Symbols:           symbols,
+		Relocs:            relocs,
+		InterruptBindings: compileInterruptBindings(program.InterruptBindings),
 	}, nil
+}
+
+func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding {
+	out := make([]InterruptBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		out = append(out, InterruptBinding{
+			EventSymbol:           binding.EventSymbol,
+			HandlerSymbol:         binding.HandlerSymbol,
+			EventFunctionSymbol:   binding.EventFunctionSymbol,
+			HandlerFunctionSymbol: binding.HandlerFunctionSymbol,
+			PathFieldOffset:       binding.PathFieldOffset,
+			ContextSymbol:         binding.ContextSymbol,
+			EventStorageSymbol:    binding.EventStorageSymbol,
+			EventStorageSize:      binding.EventStorageSize,
+			Vector:                binding.Vector,
+		})
+	}
+	return out
 }
 
 func buildRData(program *ir.Program) ([]byte, map[string]uint64) {

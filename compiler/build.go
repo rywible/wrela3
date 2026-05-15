@@ -22,6 +22,7 @@ type BuildOptions struct {
 
 type BuildResult struct {
 	OutputPath string
+	Image      *codegen.Image
 }
 
 type DiagnosticError struct {
@@ -96,7 +97,7 @@ func Build(opts BuildOptions) (BuildResult, error) {
 	if err := os.WriteFile(outputPath, bytes, 0o644); err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{OutputPath: outputPath}, nil
+	return BuildResult{OutputPath: outputPath, Image: image}, nil
 }
 
 func resolveRepoRoot(raw string) string {

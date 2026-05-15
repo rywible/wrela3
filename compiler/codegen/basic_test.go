@@ -51,3 +51,33 @@ func TestCompileReturnConstantPrologueEpilogue(t *testing.T) {
 		t.Fatalf("epilogue bytes = %#x, want ... 48 89 ec 5d c3", code[len(code)-5:])
 	}
 }
+
+func TestCompilePreservesInterruptBindings(t *testing.T) {
+	program := &ir.Program{
+		InterruptBindings: []ir.InterruptBinding{{
+			EventSymbol:           "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt",
+			HandlerSymbol:         "on_handler::examples.hello.program::HelloWorld::serial_path::interrupt",
+			EventFunctionSymbol:   "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt",
+			HandlerFunctionSymbol: "_wrela_on_fn_examples_hello_program_HelloWorld_serial_path_interrupt",
+			PathFieldOffset:       8,
+			EventStorageSize:      1,
+			EventStorageSymbol:    "_wrela_interrupt_event_40",
+			Vector:                0x40,
+		}},
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if len(image.InterruptBindings) != 1 {
+		t.Fatalf("image interrupt bindings = %#v, want one", image.InterruptBindings)
+	}
+	got := image.InterruptBindings[0]
+	if got.Vector != 0x40 || got.PathFieldOffset != 8 || got.EventStorageSymbol != "_wrela_interrupt_event_40" {
+		t.Fatalf("image interrupt binding = %#v", got)
+	}
+	if got.EventFunctionSymbol != program.InterruptBindings[0].EventFunctionSymbol || got.HandlerFunctionSymbol != program.InterruptBindings[0].HandlerFunctionSymbol {
+		t.Fatalf("image interrupt binding functions = %#v, want %#v", got, program.InterruptBindings[0])
+	}
+}

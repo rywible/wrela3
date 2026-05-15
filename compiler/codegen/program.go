@@ -8,10 +8,23 @@ const (
 )
 
 type Image struct {
-	EntrySymbol string
-	Sections    []Section
-	Symbols     map[string]uint64
-	Relocs      []Reloc
+	EntrySymbol       string
+	Sections          []Section
+	Symbols           map[string]uint64
+	Relocs            []Reloc
+	InterruptBindings []InterruptBinding
+}
+
+type InterruptBinding struct {
+	EventSymbol           string
+	HandlerSymbol         string
+	EventFunctionSymbol   string
+	HandlerFunctionSymbol string
+	PathFieldOffset       int
+	ContextSymbol         string
+	EventStorageSymbol    string
+	EventStorageSize      int
+	Vector                uint8
 }
 
 type Section struct {
