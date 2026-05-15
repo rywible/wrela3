@@ -50,3 +50,16 @@ func TestRenderSkipsCodeAndFileAndMessageFormatting(t *testing.T) {
 		t.Fatalf("unexpected render output: %q", out)
 	}
 }
+
+func TestMemoryDiagnosticCodesExist(t *testing.T) {
+	codes := []string{
+		diag.SEM0021, diag.SEM0022, diag.SEM0023, diag.SEM0024,
+		diag.SEM0025, diag.SEM0026, diag.SEM0027, diag.SEM0028,
+		diag.SEM0029, diag.SEM0030, diag.SEM0031, diag.SEM0032,
+	}
+	for _, code := range codes {
+		if code == "" {
+			t.Fatalf("memory diagnostic code must not be empty")
+		}
+	}
+}

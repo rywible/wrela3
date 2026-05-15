@@ -1,9 +1,11 @@
 # Production Deferred Work Register
 
 ## Memory and address spaces
-- This is required for production and not optional because memory safety, isolation, and deterministic mapping break quickly as images and drivers grow beyond a toy shape.
-- v0 exclusion reason: this work is intentionally deferred to keep the first compiler iteration small and to validate the core end-to-end flow before hardening layout policy.
-- v0 must not block: moving to a managed address-space model, higher-half VA layout, and W^X/NX policy should be possible without changing PE emission contracts.
+- This is required for production and not optional because memory safety, isolation, deterministic placement, and memory-footprint predictability break quickly as images and drivers grow beyond a toy shape.
+- Selected direction: Wrela source models memory as direct physical region authority with hierarchical arenas, explicit `with` frame boundaries, statically checked lifetimes, bounded root executor memory, and default-evicting cache regions.
+- x86_64 paging remains target boot glue only: the backend emits a minimal 2 MiB identity map required by long mode, but Wrela source does not expose virtual address spaces, higher-half layout, page permissions, W^X, NX, or guard pages in this stage.
+- v0 exclusion reason: this work was intentionally deferred to keep the first compiler iteration small and to validate the core end-to-end flow before hardening memory policy.
+- This stage must not block adding hardware-enforced page permissions, guard pages, DMA/IOMMU policy, or higher-half layout as backend artifacts generated from the physical-region authority graph.
 
 ## CPU and interrupts
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.

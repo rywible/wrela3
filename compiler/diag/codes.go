@@ -32,6 +32,18 @@ const (
 	SEM0018  = "SEM0018"
 	SEM0019  = "SEM0019"
 	SEM0020  = "SEM0020"
+	SEM0021  = "SEM0021" // invalid arena receiver
+	SEM0022  = "SEM0022" // frame expression must be arena.frame(length = ...)
+	SEM0023  = "SEM0023" // frame length must be U64
+	SEM0024  = "SEM0024" // frame lifetime escapes with block value
+	SEM0025  = "SEM0025" // frame value stored in longer-lived state
+	SEM0026  = "SEM0026" // place argument must be constructor expression
+	SEM0027  = "SEM0027" // reserve length and align must be U64
+	SEM0028  = "SEM0028" // raw physical byte authority construction is not allowed here
+	SEM0029  = "SEM0029" // ArenaFrame cannot be constructed directly
+	SEM0030  = "SEM0030" // cache lookup must copy into frame
+	SEM0031  = "SEM0031" // cache entry cannot escape lookup scope
+	SEM0032  = "SEM0032" // asm raw memory access requires edge-capability module
 	ASM0001  = "ASM0001"
 	ASM0002  = "ASM0002"
 	ASM0003  = "ASM0003"
