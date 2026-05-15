@@ -112,11 +112,14 @@ func stopIvshmemServer(cmd *exec.Cmd) {
 
 func Run(opts Options) (string, error) {
 	ivshmemPath := opts.IvshmemSocketPath
+	var ivshmemTmpDir string
 	if opts.EnableIvshmemMsix && ivshmemPath == "" {
 		tmpDir, err := os.MkdirTemp("", "ivshmem-")
 		if err != nil {
 			return "", err
 		}
+		ivshmemTmpDir = tmpDir
+		defer os.RemoveAll(ivshmemTmpDir)
 		ivshmemPath = filepath.Join(tmpDir, "ivshmem.sock")
 	}
 	if ivshmemPath != "" {
@@ -143,10 +146,9 @@ func Run(opts Options) (string, error) {
 		if ivshmemServerBinary == "" {
 			ivshmemServerBinary = "ivshmem-server"
 		}
-		ivshmemTmpDir := filepath.Dir(ivshmemPath)
 		ivshmemServerCmd := exec.CommandContext(ctx, ivshmemServerBinary, IvshmemServerArgs(IvshmemServerOptions{
 			SocketPath: ivshmemPath,
-			PidPath:    filepath.Join(ivshmemTmpDir, "ivshmem.pid"),
+			PidPath:    filepath.Join(filepath.Dir(ivshmemPath), "ivshmem.pid"),
 			ShmName:    "wrela-ivshmem",
 			Size:       "1M",
 			Vectors:    1,

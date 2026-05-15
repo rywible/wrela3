@@ -608,6 +608,22 @@ driver path MissingReturn {
 	}
 }
 
+func TestInterruptEventMustReturnDataRecord(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module index.interrupt_event_data_record
+`+typePrelude+`
+
+driver path PrimitiveEvent {
+    interrupt receiver -> U8 {
+        return 1
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0015) {
+		t.Fatalf("expected SEM0015, got %#v", diags)
+	}
+}
+
 func TestExecutorMustHandleInterruptPathFields(t *testing.T) {
 	_, diags := checkModuleForTest(t, `
 module index.interrupt_missing_on
@@ -685,6 +701,77 @@ executor BadBody {
     }
 }
 `)
+	if !hasCode(diags, diag.SEM0016) {
+		t.Fatalf("expected SEM0016, got %#v", diags)
+	}
+}
+
+func TestOnHandlerRejectsAllocationAndInterruptReconfigurationCalls(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+class ExecutorMemory {
+    fn allocate_bytes(self, length: U64) -> U64 {
+        return length
+    }
+}
+`, `
+module machine.x86_64.interrupts
+class LocalApic {
+    fn enable(self) {}
+}
+
+class IoApic {
+    fn route_gsi4_to_vector40(self) {}
+}
+
+class ApicInterruptController {
+    local_apic: LocalApic
+    io_apic: IoApic
+
+    fn enable_cpu_interrupts(self) {}
+}
+`, `
+module machine.x86_64.serial
+
+use { ExecutorMemory } from machine.x86_64.executor_memory
+use { ApicInterruptController } from machine.x86_64.interrupts
+
+unique class OwnedHardware {}
+unique class DelegatedHardware {
+    fn exit_to_owned_hardware(self) -> OwnedHardware {
+        return OwnedHardware()
+    }
+}
+
+data SerialInterrupt { vector: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialInterrupt {
+        return SerialInterrupt(vector = 1)
+    }
+
+    fn enable_receive_interrupts(self) {}
+}
+
+executor BadHandler {
+    serial: SerialConsolePath
+    memory: ExecutorMemory
+    interrupts: ApicInterruptController
+
+    on serial.interrupt(event: SerialInterrupt) {
+        self.memory.allocate_bytes(length = 8)
+        self.serial.enable_receive_interrupts()
+        self.interrupts.local_apic.enable()
+        self.interrupts.io_apic.route_gsi4_to_vector40()
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
 	if !hasCode(diags, diag.SEM0016) {
 		t.Fatalf("expected SEM0016, got %#v", diags)
 	}
@@ -804,5 +891,38 @@ image Good {
 	}
 	if len(checked.InterruptBindings) != 0 {
 		t.Fatalf("interrupt bindings = %#v, want none", checked.InterruptBindings)
+	}
+}
+
+func TestDuplicateReachableInterruptRuntimeVectorRejected(t *testing.T) {
+	_, diags := checkModuleForTest(t, `
+module machine.x86_64.serial
+`+interruptPrelude+`
+
+executor DuplicateSerial {
+    first: SerialConsolePath
+    second: SerialConsolePath
+
+    on first.interrupt(event: SerialInterrupt) {}
+    on second.interrupt(event: SerialInterrupt) {}
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let first = SerialConsolePath()
+        let second = SerialConsolePath()
+        let exec = DuplicateSerial(first = first, second = second)
+        while true {}
+    }
+}
+`)
+	if !hasCode(diags, diag.SEM0020) {
+		t.Fatalf("expected SEM0020, got %#v", diags)
 	}
 }

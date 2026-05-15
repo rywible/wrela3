@@ -347,6 +347,10 @@ func (c *checker) checkInterruptEvents(moduleName string, path *Type, events []a
 			c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType)
 			continue
 		}
+		if retType.Kind != KindData {
+			c.error(event.SpanV, diag.SEM0015, "interrupt event type must be a data record")
+			continue
+		}
 		scope := NewScope(nil)
 		scope.Define("self", path)
 		prevType := c.currentType
@@ -588,7 +592,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		}
 		got := c.typeExpr(moduleName, s.Value, scope, ctx)
 		if ctx == ContextInterruptEvent {
-			if got != nil && expectedReturn != nil && !typesCompatible(expectedReturn, got) {
+			if got != nil && expectedReturn != nil && (got.Module != expectedReturn.Module || got.Name != expectedReturn.Name) {
 				c.error(s.Value.Span(), diag.SEM0015, "interrupt event return type mismatch")
 			}
 		} else {
@@ -777,6 +781,7 @@ func (c *checker) eventDeclForPath(path *Type) *ast.InterruptEventDecl {
 
 func (c *checker) checkInterruptRuntimeSupport() {
 	c.runtimeBindings = c.runtimeBindings[:0]
+	seenVectors := map[uint8]InterruptBinding{}
 	for _, binding := range c.bindings {
 		if !c.isReachableInterruptBinding(binding) {
 			continue
@@ -787,6 +792,11 @@ func (c *checker) checkInterruptRuntimeSupport() {
 			c.error(binding.Span, diag.SEM0020, "unsupported interrupt runtime path "+binding.PathType)
 			continue
 		}
+		if previous, exists := seenVectors[vector]; exists {
+			c.error(binding.Span, diag.SEM0020, "duplicate interrupt runtime vector for "+binding.PathType+" and "+previous.PathType)
+			continue
+		}
+		seenVectors[vector] = binding
 		binding.Vector = vector
 		c.runtimeBindings = append(c.runtimeBindings, binding)
 	}
@@ -1175,8 +1185,19 @@ func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
 	switch recvType.Module + "." + recvType.Name + "::" + method {
 	case "machine.x86_64.interrupts.ApicInterruptController::enable_cpu_interrupts",
 		"machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive",
+		"machine.x86_64.interrupts.LocalApic::enable",
+		"machine.x86_64.interrupts.IoApic::route_gsi4_to_vector40",
 		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_edu_msi_vector41",
 		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_ivshmem_msix_vector42",
+		"machine.x86_64.pci.Q35PciInterruptConfigurator::write_config32",
+		"machine.x86_64.pci.PciConfigPorts::write32",
+		"machine.x86_64.pci.MsixTable::write_entry0",
+		"machine.x86_64.edu.EduMsiPath::raise_test_interrupt",
+		"machine.x86_64.edu.EduMsiPath::write32",
+		"machine.x86_64.ivshmem.IvshmemDoorbellPeerPath::ring_peer",
+		"machine.x86_64.ivshmem.IvshmemDoorbellPeerPath::write32",
+		"machine.x86_64.serial.SerialConsolePath::enable_receive_interrupts",
+		"machine.x86_64.executor_memory.ExecutorMemory::allocate_bytes",
 		"machine.x86_64.executor_memory.ExecutorMemory::halt_forever",
 		"arch.x86_64.cpu.CpuControl::halt_forever":
 		return true

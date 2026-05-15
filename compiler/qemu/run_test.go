@@ -172,6 +172,45 @@ func TestRunDoesNotStartQEMUWhenIvshmemServerSocketIsMissing(t *testing.T) {
 	}
 }
 
+func TestRunRemovesImplicitIvshmemTempDirOnStartupFailure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	fakeServer := filepath.Join(tmp, "fake-ivshmem-server.sh")
+	serverScript := "#!/usr/bin/env sh\nsleep 30\n"
+	if err := os.WriteFile(fakeServer, []byte(serverScript), 0o755); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	if err := os.WriteFile(fakeQEMU, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	_, err := Run(Options{
+		QEMUBinary:            fakeQEMU,
+		OVMFCode:              filepath.Join(tmp, "code.fd"),
+		OVMFVars:              filepath.Join(tmp, "vars.fd"),
+		ESPDir:                filepath.Join(tmp, "esp"),
+		ImagePath:             image,
+		EnableIvshmemMsix:     true,
+		IvshmemServerBinary:   fakeServer,
+		IvshmemStartupTimeout: 200 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatalf("expected ivshmem startup error")
+	}
+	matches, globErr := filepath.Glob(filepath.Join(tmp, "ivshmem-*"))
+	if globErr != nil {
+		t.Fatalf("glob implicit temp dirs: %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("implicit ivshmem temp dirs still exist: %#v", matches)
+	}
+}
+
 func processRunning(pid int) bool {
 	if pid <= 0 {
 		return false
