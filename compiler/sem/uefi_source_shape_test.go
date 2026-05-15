@@ -290,6 +290,23 @@ func TestExecutorMemoryPhysicalArenaShape(t *testing.T) {
 	}
 }
 
+func TestCacheMemorySourceShape(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+
+	cache := moduleType(t, index, "machine.x86_64.cache_memory", "CacheArena")
+	lookup := moduleType(t, index, "machine.x86_64.cache_memory", "CacheLookup")
+	if fieldTypeName(t, cache, "slot_count") != "U64" || fieldTypeName(t, cache, "slot_size") != "U64" {
+		t.Fatalf("CacheArena must expose slot_count and slot_size")
+	}
+	if fieldTypeName(t, lookup, "hit") != "Bool" || fieldTypeName(t, lookup, "bytes") != "Bytes" {
+		t.Fatalf("CacheLookup must expose hit and bytes")
+	}
+}
+
 func TestMachineX64InterruptSupportAsmIsAllowed(t *testing.T) {
 	_, ds := checkModuleForTest(t, `
 module machine.x86_64.interrupts
@@ -316,6 +333,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
@@ -334,7 +352,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 module sem.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, ExecutorPlacement, IoPortAuthority } from machine.x86_64.cpu_state
-use { MemoryPlan, VirtualMemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
 use { MutableBytes, ExecutorMemory, Bytes } from machine.x86_64.executor_memory
 
 image UefiSourceHarness {
@@ -354,7 +372,6 @@ image UefiSourceHarness {
             executor_arena = MutableBytes(address = 0, length = 0),
             io_ports = IoPortAuthority()
         )
-        let virtual_memory_plan = VirtualMemoryPlan(pml4 = 0)
         let cpu_plan = CpuPlan(
             vcpu0 = vcpu0,
             owned_stack_top = 0,
@@ -364,7 +381,6 @@ image UefiSourceHarness {
         )
         return hardware.exit_to_owned_hardware(
             memory_plan = memory_plan,
-            virtual_memory_plan = virtual_memory_plan,
             cpu_plan = cpu_plan
         )
     }

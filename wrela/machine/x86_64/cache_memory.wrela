@@ -1,0 +1,20 @@
+module machine.x86_64.cache_memory
+
+use { Bytes, MutableBytes } from machine.x86_64.executor_memory
+
+data CacheLookup {
+    hit: Bool
+    bytes: Bytes
+}
+
+data CachePutResult {
+    stored: Bool
+    evicted: U64
+}
+
+class CacheArena {
+    storage: MutableBytes
+    slot_count: U64
+    slot_size: U64
+    next_victim: U64
+}
