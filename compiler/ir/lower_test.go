@@ -35,6 +35,21 @@ func TestLowerSynthesizesEntryAdapterFromImage(t *testing.T) {
 	}
 }
 
+func TestLowerStringLiteralAddressIsPhysicalAddress(t *testing.T) {
+	ctx := newLowerContext(&sem.CheckedProgram{})
+	info, ok := ctx.program.Types["StringLiteral"]
+	if !ok {
+		t.Fatalf("missing StringLiteral type info")
+	}
+	address, ok := info.Fields["address"]
+	if !ok {
+		t.Fatalf("missing StringLiteral.address field info")
+	}
+	if address.Type.Name != "PhysicalAddress" || address.Type.Kind != TypeKindPrimitive {
+		t.Fatalf("StringLiteral.address type = %#v, want PhysicalAddress primitive", address.Type)
+	}
+}
+
 func TestLowerUsesSourceVisiblePhaseAndExecutorPath(t *testing.T) {
 	executorType := &sem.Type{
 		Module: "examples.hello.program",

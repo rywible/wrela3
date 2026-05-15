@@ -475,9 +475,9 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		if explicitParamCount(method.Params) > 5 {
 			c.error(method.SpanV, diag.SEM0013, "too many explicit parameters")
 		}
-	if method.IsAsm && !c.isAsmAllowedHere(typ) {
-		c.error(method.SpanV, diag.SEM0032, "asm raw memory access requires edge-capability module")
-	}
+		if method.IsAsm && !c.isAsmAllowedHere(typ) {
+			c.error(method.SpanV, diag.SEM0032, "asm raw memory access requires edge-capability module")
+		}
 		if isCanonicalFrameIntrinsic(moduleName, typ, method) {
 			continue
 		}
@@ -512,25 +512,14 @@ func (c *checker) isAsmAllowedHere(typ *Type) bool {
 	if typ == nil {
 		return false
 	}
+	return isEdgeCapabilityModule(typ.Module)
+}
 
-	switch typ.Kind {
-	case KindDriver, KindDriverPath:
-		return true
-	case KindClass:
-		if typ.Name == "ExecutorMemory" {
-			return true
-		}
-		if strings.HasPrefix(typ.Module, "arch.") ||
-			strings.HasPrefix(typ.Module, "platform.") ||
-			strings.HasPrefix(typ.Module, "machine.x86_64.") ||
-			typ.Module == "machine.x86_64.serial" ||
-			strings.HasPrefix(typ.Module, "machine.x86_64.serial.") {
-			return true
-		}
-		return false
-	default:
-		return false
-	}
+func isEdgeCapabilityModule(moduleName string) bool {
+	return strings.HasPrefix(moduleName, "arch.") ||
+		strings.HasPrefix(moduleName, "platform.") ||
+		moduleName == "machine.x86_64" ||
+		strings.HasPrefix(moduleName, "machine.x86_64.")
 }
 
 func (c *checker) checkStmtList(moduleName string, stmts []ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {

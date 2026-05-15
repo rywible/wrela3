@@ -31,6 +31,66 @@ func TestUserRawMemoryAuthorityRejected(t *testing.T) {
 	}
 }
 
+func TestUserModuleAsmBypassShapesRejected(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "driver",
+			source: `
+module negative.user_driver_asm
+
+unique driver BadDriver {
+    asm fn write_raw(self) {
+        mov rax, 0x200000
+        mov [rax], rax
+    }
+}
+`,
+		},
+		{
+			name: "driver_path",
+			source: `
+module negative.user_driver_path_asm
+
+driver path BadPath {
+    asm fn write_raw(self) {
+        mov rax, 0x200000
+        mov [rax], rax
+    }
+}
+`,
+		},
+		{
+			name: "shadow_executor_memory",
+			source: `
+module negative.user_shadow_executor_memory
+
+class ExecutorMemory {
+    asm fn halt_forever(self) -> never {
+        hlt
+    }
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			modules := parseModulesForTest(t, tc.source)
+			index, ds := BuildIndex(modules)
+			ds = filterMissingImageDiagnostic(ds)
+			if len(ds) != 0 {
+				t.Fatalf("index diagnostics: %#v", ds)
+			}
+			_, diags := Check(index, modules)
+			if !hasCode(diags, diag.SEM0032) {
+				t.Fatalf("expected SEM0032, got %#v", diags)
+			}
+		})
+	}
+}
+
 func TestMemoryKindClassification(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module machine.x86_64.executor_memory

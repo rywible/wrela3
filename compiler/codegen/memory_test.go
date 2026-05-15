@@ -31,6 +31,21 @@ func TestArenaReserveEmitsBoundsTrapAndBump(t *testing.T) {
 	}
 }
 
+func TestArenaReserveEmitsOverflowTraps(t *testing.T) {
+	program := testProgramWithArenaReserve(t)
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("compile diagnostics: %#v", diags)
+	}
+	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
+	if got := countBytes(code, []byte{0x0F, 0x81}); got < 3 {
+		t.Fatalf("reserve/frame code must skip OOM only when arithmetic does not overflow, got %d jno branches in %x", got, code)
+	}
+	if got := countBytes(code, []byte{0x0F, 0x80}); got != 0 {
+		t.Fatalf("reserve/frame overflow guard must not skip OOM on overflow, got %d jo branches in %x", got, code)
+	}
+}
+
 func TestArenaPlaceWritesConstructedFields(t *testing.T) {
 	program := testProgramWithArenaPlace(t)
 	image, diags := Compile(program)
@@ -62,6 +77,16 @@ func codeCallsSymbol(t *testing.T, image *Image, caller, target string) bool {
 		}
 	}
 	return false
+}
+
+func countBytes(haystack, needle []byte) int {
+	count := 0
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if string(haystack[i:i+len(needle)]) == string(needle) {
+			count++
+		}
+	}
+	return count
 }
 
 func testProgramWithArenaReserve(t *testing.T) *ir.Program {

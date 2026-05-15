@@ -1200,11 +1200,13 @@ func emitFrameBegin(e *Emitter, op *ir.FrameBegin, frame Frame) {
 	emitLoadValue(e, frame, op.Length, length)
 	emitRegRegMove(e, end, saved)
 	emitRegRegOp(e, 0x01, end, length)
+	emitTrapOnOverflow(e)
 	emitLoadMemToReg(e, limit, parent, 8, 64)
 	emitTrapIfAbove(e, end, limit)
 
 	emitLoadMemToReg(e, base, parent, 0, 64)
 	emitRegRegOp(e, 0x01, base, saved)
+	emitTrapOnOverflow(e)
 	emitStoreSlotFromReg(e, base, objectSlot, 64)
 	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
 	emitMovImmToReg(e, saved, 0)
@@ -1312,15 +1314,18 @@ func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg,
 		asm.ImmOperand{Value: 1},
 	}})
 	emitRegRegOp(e, 0x01, next, end)
+	emitTrapOnOverflow(e)
 	emitNegReg(e, align)
 	emitRegRegOp(e, 0x21, next, align)
 	emitRegRegMove(e, end, next)
 	emitRegRegOp(e, 0x01, end, length)
+	emitTrapOnOverflow(e)
 	emitLoadMemToReg(e, limit, arena, 8, 64)
 	emitTrapIfAbove(e, end, limit)
 
 	emitLoadMemToReg(e, base, arena, 0, 64)
 	emitRegRegOp(e, 0x01, base, next)
+	emitTrapOnOverflow(e)
 	emitStoreMemFromReg(e, arena, 16, end, 64)
 	return base, true
 }
@@ -1344,6 +1349,13 @@ func emitTrapIfAbove(e *Emitter, value asm.Reg, limit asm.Reg) {
 	ok := e.newLabel("arena_bounds_ok")
 	emitCmpRegReg(e, value, limit)
 	e.emitJcc(0x86, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+}
+
+func emitTrapOnOverflow(e *Emitter) {
+	ok := e.newLabel("arena_overflow_ok")
+	e.emitJcc(0x81, ok)
 	emitCallReloc(e, "_wrela_memory_oom")
 	e.bindLabel(ok)
 }

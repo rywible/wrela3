@@ -153,7 +153,7 @@ func (ctx *lowerContext) addPrimitiveTypes() {
 		Align:       8,
 		StorageSize: 16,
 		Fields: map[string]FieldInfo{
-			"address": {Name: "address", Type: Type{Name: "VirtualAddress", Kind: TypeKindPrimitive}, Offset: 0, Size: 8, Align: 8},
+			"address": {Name: "address", Type: Type{Name: "PhysicalAddress", Kind: TypeKindPrimitive}, Offset: 0, Size: 8, Align: 8},
 			"length":  {Name: "length", Type: Type{Name: "U64", Kind: TypeKindPrimitive}, Offset: 8, Size: 8, Align: 8},
 		},
 		FieldOrder: []string{"address", "length"},
