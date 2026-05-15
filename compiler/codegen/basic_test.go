@@ -53,12 +53,23 @@ func TestCompileReturnConstantPrologueEpilogue(t *testing.T) {
 }
 
 func TestCompilePreservesInterruptBindings(t *testing.T) {
+	eventFn := ir.Function{
+		Symbol: "_wrela_test_interrupt_event",
+		Return: ir.Type{Name: "void", Module: "builtin", Kind: ir.TypeKindPrimitive},
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{&ir.Return{}}}},
+	}
+	handlerFn := ir.Function{
+		Symbol: "_wrela_test_interrupt_handler",
+		Return: ir.Type{Name: "void", Module: "builtin", Kind: ir.TypeKindPrimitive},
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{&ir.Return{}}}},
+	}
 	program := &ir.Program{
+		Functions: []ir.Function{eventFn, handlerFn},
 		InterruptBindings: []ir.InterruptBinding{{
 			EventSymbol:           "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt",
 			HandlerSymbol:         "on_handler::examples.hello.program::HelloWorld::serial_path::interrupt",
-			EventFunctionSymbol:   "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt",
-			HandlerFunctionSymbol: "_wrela_on_fn_examples_hello_program_HelloWorld_serial_path_interrupt",
+			EventFunctionSymbol:   eventFn.Symbol,
+			HandlerFunctionSymbol: handlerFn.Symbol,
 			PathFieldOffset:       8,
 			EventStorageSize:      1,
 			EventStorageSymbol:    "_wrela_interrupt_event_40",

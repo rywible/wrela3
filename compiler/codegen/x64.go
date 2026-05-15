@@ -76,7 +76,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		ctx.types = map[string]ir.TypeInfo{}
 	}
 
-	units := make([]compiledUnit, 0, len(program.Functions)+len(program.AsmMethods)+1)
+	units := make([]compiledUnit, 0, len(program.Functions)+len(program.AsmMethods)+len(program.InterruptBindings)+1)
 	for _, fn := range program.Functions {
 		unit, ds := compileFunction(fn, ctx)
 		if len(ds) != 0 {
@@ -91,6 +91,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}
 		units = append(units, unit)
 	}
+	units = append(units, compileInterruptDispatchUnits(program)...)
 	if program.Entry.Symbol != "" {
 		unit, ds := compileEntryAdapterUnit(program.Entry, ctx)
 		if len(ds) != 0 {
@@ -182,6 +183,66 @@ func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding
 		})
 	}
 	return out
+}
+
+func compileInterruptDispatchUnits(program *ir.Program) []compiledUnit {
+	units := make([]compiledUnit, 0, len(program.InterruptBindings))
+	for _, binding := range program.InterruptBindings {
+		symbol := interruptVectorSymbol(binding.Vector)
+		if symbol == "" {
+			continue
+		}
+		units = append(units, buildInterruptDispatchUnit(symbol, binding))
+	}
+	return units
+}
+
+func interruptVectorSymbol(vector uint8) string {
+	switch vector {
+	case 0x40:
+		return "_wrela_interrupt_vector40_serial"
+	case 0x41:
+		return "_wrela_interrupt_vector41_edu_msi"
+	case 0x42:
+		return "_wrela_interrupt_vector42_ivshmem_msix"
+	default:
+		return ""
+	}
+}
+
+func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding) compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	for _, reg := range []string{"rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"} {
+		e.emitInstruction(asm.Instruction{Mnemonic: "push", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup(reg)}}})
+	}
+	emitCallReloc(e, binding.EventFunctionSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rsi")},
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+	}})
+	emitCallReloc(e, binding.HandlerFunctionSymbol)
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("r11")},
+		asm.ImmOperand{Value: 0xFEE00000},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("eax")},
+		asm.ImmOperand{Value: 0},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: asm.MustLookup("r11"), Disp: 0xB0, Width: 32},
+		asm.RegOperand{Reg: asm.MustLookup("eax")},
+	}})
+	for _, reg := range []string{"r15", "r14", "r13", "r12", "r11", "r10", "r9", "r8", "rdi", "rsi", "rbp", "rbx", "rdx", "rcx", "rax"} {
+		e.emitInstruction(asm.Instruction{Mnemonic: "pop", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup(reg)}}})
+	}
+	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
+	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc}
+}
+
+func emitCallReloc(e *Emitter, symbol string) {
+	e.Code = append(e.Code, 0xE8, 0, 0, 0, 0)
+	e.CallReloc = append(e.CallReloc, internalReloc{Offset: uint64(len(e.Code) - 4), Symbol: symbol})
 }
 
 func buildRData(program *ir.Program) ([]byte, map[string]uint64) {
