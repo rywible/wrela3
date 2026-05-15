@@ -134,7 +134,7 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	memory := moduleType(t, checked.Index, "platform.uefi.types", "DelegatedMemory")
 	identity := methodByName(t, memory, "build_identity_paging")
 	gdt := methodByName(t, memory, "build_owned_gdt")
-	idt := methodByName(t, memory, "build_fatal_idt")
+	idt := methodByName(t, memory, "build_interrupt_idt")
 	fatalHandler := methodByName(t, memory, "fatal_idt_handler")
 
 	if !identity.IsAsm || identity.AsmBody == nil {
@@ -144,7 +144,7 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		t.Fatalf("build_owned_gdt must be asm and non-empty")
 	}
 	if !idt.IsAsm || idt.AsmBody == nil {
-		t.Fatalf("build_fatal_idt must be asm and non-empty")
+		t.Fatalf("build_interrupt_idt must be asm and non-empty")
 	}
 
 	for _, want := range []string{
@@ -209,18 +209,26 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		"push r12",
 		"push r13",
 		"push r14",
+		"push r15",
 		"fatal_handler",
+		"vector40_handler",
+		"vector41_handler",
+		"vector42_handler",
 		"256",
 		"jne idt_gate_loop",
+		"1040",
+		"1056",
+		"1072",
 		"mov [r10 + 0], r11",
 		"mov [r10 + 8], 4112",
 		"mov rax, r10",
+		"pop r15",
 		"pop r14",
 		"pop r13",
 		"pop r12",
 	} {
 		if !strings.Contains(idt.AsmBody.Source, want) {
-			t.Fatalf("build_fatal_idt asm body missing %q in:\n%s", want, idt.AsmBody.Source)
+			t.Fatalf("build_interrupt_idt asm body missing %q in:\n%s", want, idt.AsmBody.Source)
 		}
 	}
 	if fatalHandler.AsmBody == nil {

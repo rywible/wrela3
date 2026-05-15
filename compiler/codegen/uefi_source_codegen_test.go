@@ -147,9 +147,9 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 	if gdt.Body == "" {
 		t.Fatalf("build_owned_gdt is not an asm method")
 	}
-	idt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_fatal_idt")
+	idt := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_interrupt_idt")
 	if idt.Body == "" {
-		t.Fatalf("build_fatal_idt is not an asm method")
+		t.Fatalf("build_interrupt_idt is not an asm method")
 	}
 
 	for _, method := range []ir.AsmMethod{identity, gdt, idt} {
@@ -224,9 +224,30 @@ func TestUEFIBuilderAsmMethodCompilation(t *testing.T) {
 
 	idtInstructions, ds, _ := lowerAndEncodeAsmMethod(idt)
 	if len(ds) != 0 {
-		t.Fatalf("lowerAndEncodeAsmMethod build_fatal_idt diagnostics: %#v", ds)
+		t.Fatalf("lowerAndEncodeAsmMethod build_interrupt_idt diagnostics: %#v", ds)
 	}
-	assertInstructionOrder(t, idtInstructions, "push r12", "push r13", "push r14", "pop r14", "pop r13", "pop r12", "ret")
+	assertInstructionOrder(t, idtInstructions, "push r12", "push r13", "push r14", "push r15", "pop r15", "pop r14", "pop r13", "pop r12", "ret")
+}
+
+func TestInterruptIDTSourceShape(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	build := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_interrupt_idt")
+	for _, want := range []string{
+		"1040", "1056", "1072",
+		"vector40_handler", "vector41_handler", "vector42_handler",
+	} {
+		if !strings.Contains(build.Body, want) {
+			t.Fatalf("build_interrupt_idt missing %s:\n%s", want, build.Body)
+		}
+	}
+
+	transition := methodFromSem(t, checked, "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware")
+	if transition == nil {
+		t.Fatalf("missing exit_to_owned_hardware")
+	}
+	if !stmtListContainsCall(transition.Body, "build_interrupt_idt") {
+		t.Fatalf("exit_to_owned_hardware must call build_interrupt_idt")
+	}
 }
 
 func TestInterruptPlatformSourceCodegen(t *testing.T) {
@@ -423,6 +444,36 @@ func asmMethodFromSem(t *testing.T, checked *sem.CheckedProgram, moduleName, typ
 	}
 	t.Fatalf("missing lowered asm method %s", symbol)
 	return ir.AsmMethod{}
+}
+
+func methodFromSem(t *testing.T, checked *sem.CheckedProgram, moduleName, typeName, methodName string) *sem.Method {
+	t.Helper()
+	typ, ok := checked.Index.Lookup(moduleName, typeName)
+	if !ok || typ == nil {
+		t.Fatalf("missing type %s.%s", moduleName, typeName)
+	}
+	for i := range typ.Methods {
+		if typ.Methods[i].Name == methodName {
+			return &typ.Methods[i]
+		}
+	}
+	return nil
+}
+
+func stmtListContainsCall(stmts []ast.Stmt, method string) bool {
+	for _, stmt := range stmts {
+		if expr, ok := stmt.(*ast.ExprStmt); ok {
+			if call, ok := expr.Expr.(*ast.CallExpr); ok && call.Method == method {
+				return true
+			}
+		}
+		if let, ok := stmt.(*ast.LetStmt); ok {
+			if call, ok := let.Expr.(*ast.CallExpr); ok && call.Method == method {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func asmMethodSymbol(moduleName, typeName, methodName string) string {

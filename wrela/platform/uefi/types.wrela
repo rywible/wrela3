@@ -305,10 +305,17 @@ class DelegatedMemory {
         ret
     }
 
-    asm fn build_fatal_idt(self, fatal_handler: VirtualAddress) -> DelegatedBytes {
+    asm fn build_interrupt_idt(
+        self,
+        fatal_handler: VirtualAddress,
+        vector40_handler: VirtualAddress,
+        vector41_handler: VirtualAddress,
+        vector42_handler: VirtualAddress
+    ) -> DelegatedBytes {
         push r12
         push r13
         push r14
+        push r15
 
         mov r14, self.next_offset
         mov r11, self.arena_base
@@ -327,6 +334,36 @@ class DelegatedMemory {
         mov rcx, 256
         mov r13, fatal_handler
     idt_gate_loop:
+        call write_idt_gate
+        add r12, 16
+        sub rcx, 1
+        jne idt_gate_loop
+
+        mov r12, r11
+        add r12, 1040
+        mov r13, vector40_handler
+        call write_idt_gate
+
+        mov r12, r11
+        add r12, 1056
+        mov r13, vector41_handler
+        call write_idt_gate
+
+        mov r12, r11
+        add r12, 1072
+        mov r13, vector42_handler
+        call write_idt_gate
+
+        mov [r10 + 0], r11
+        mov [r10 + 8], 4112
+        mov rax, r10
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        ret
+
+    write_idt_gate:
         mov rax, r13
         mov [r12], ax
         mov ax, 8
@@ -343,16 +380,6 @@ class DelegatedMemory {
         mov [r12 + 8], eax
         mov rax, 0
         mov [r12 + 12], eax
-        add r12, 16
-        sub rcx, 1
-        jne idt_gate_loop
-
-        mov [r10 + 0], r11
-        mov [r10 + 8], 4112
-        mov rax, r10
-        pop r14
-        pop r13
-        pop r12
         ret
     }
 

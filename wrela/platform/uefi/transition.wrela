@@ -51,7 +51,12 @@ unique class DelegatedHardware {
 
         let pml4 = self.delegated_memory.build_identity_paging(memory_map = final_map)
         let gdt = self.delegated_memory.build_owned_gdt()
-        let idt = self.delegated_memory.build_fatal_idt(fatal_handler = self.capture_fatal_idt_handler())
+        let idt = self.delegated_memory.build_interrupt_idt(
+            fatal_handler = self.capture_fatal_idt_handler(),
+            vector40_handler = self.capture_vector40_serial_handler(),
+            vector41_handler = self.capture_vector41_edu_msi_handler(),
+            vector42_handler = self.capture_vector42_ivshmem_msix_handler()
+        )
         self.activate_owned_hardware(
             owned_stack_top = cpu_plan.owned_stack_top,
             cr3_value = pml4,
@@ -106,6 +111,36 @@ unique class DelegatedHardware {
         hlt
         jmp fatal_idt_handler
     fatal_idt_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vector40_serial_handler(self) -> VirtualAddress {
+        // Capture the address of vector40_serial_handler without executing it.
+        call vector40_capture_return
+    vector40_serial_handler:
+        jmp _wrela_interrupt_vector40_serial
+    vector40_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vector41_edu_msi_handler(self) -> VirtualAddress {
+        // Capture the address of vector41_edu_msi_handler without executing it.
+        call vector41_capture_return
+    vector41_edu_msi_handler:
+        jmp _wrela_interrupt_vector41_edu_msi
+    vector41_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vector42_ivshmem_msix_handler(self) -> VirtualAddress {
+        // Capture the address of vector42_ivshmem_msix_handler without executing it.
+        call vector42_capture_return
+    vector42_ivshmem_msix_handler:
+        jmp _wrela_interrupt_vector42_ivshmem_msix
+    vector42_capture_return:
         pop rax
         ret
     }
