@@ -275,6 +275,22 @@ func callArgForParam(method *Method, args []ast.NamedArg, paramIndex int) ast.Ex
 	return nil
 }
 
+func explicitParamIndex(method *Method, name string) int {
+	if method == nil {
+		return -1
+	}
+	params := method.Params
+	if len(params) > 0 && params[0].Name == "self" {
+		params = params[1:]
+	}
+	for i, param := range params {
+		if param.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func (c *checker) isFrameCall(moduleName string, expr ast.Expr, scope *Scope, ctx ContextKind) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || call.Method != "frame" {
@@ -320,7 +336,13 @@ func (c *checker) lifetimeOfExpr(expr ast.Expr, scope *Scope) Lifetime {
 			return lifetime
 		}
 	case *ast.FieldExpr:
-		return c.lifetimeOfExpr(e.Base, scope)
+		baseLifetime := c.lifetimeOfExpr(e.Base, scope)
+		if baseLifetime.Kind == LifetimeCacheLookup && e.Field == "bytes" {
+			lifetime := Lifetime{Kind: LifetimeCacheCopy, Scope: baseLifetime.Scope}
+			c.rememberLifetime(e, lifetime)
+			return lifetime
+		}
+		return baseLifetime
 	case *ast.StringLiteral:
 		return Lifetime{Kind: LifetimeStatic}
 	case *ast.IntLiteral, *ast.BoolLiteral:
@@ -364,6 +386,14 @@ func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifeti
 	if c.lifetimeShorterThan(value, target) {
 		c.error(span, diag.SEM0025, "frame value cannot be stored")
 	}
+}
+
+func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target Lifetime) bool {
+	if (lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) && c.lifetimeShorterThan(lifetime, target) {
+		c.error(span, diag.SEM0031, "cache lookup result cannot escape destination frame")
+		return true
+	}
+	return false
 }
 
 func (c *checker) pushFrameLifetime(name string, span source.Span, parentLifetime Lifetime) int {

@@ -564,7 +564,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
 		sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
 		targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
-		c.rejectIfLifetimeEscapes(s.Value.Span(), sourceLifetime, targetLifetime)
+		if !c.rejectCacheEscape(s.Value.Span(), sourceLifetime, targetLifetime) {
+			c.rejectIfLifetimeEscapes(s.Value.Span(), sourceLifetime, targetLifetime)
+		}
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), valueType)
 		return isNeverType(valueType)
 	case *ast.IfStmt:
@@ -658,6 +660,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			return true
 		}
 		if lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy {
+			if c.rejectCacheEscape(s.Value.Span(), lifetime, Lifetime{Kind: LifetimeExecutorRoot}) {
+				return true
+			}
 			c.error(s.Value.Span(), diag.SEM0024, "frame value cannot escape")
 		}
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
@@ -1237,6 +1242,22 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 			c.error(expr.SpanV, diag.SEM0022, "arena.frame(length = ...) can only appear as a with expression")
 		}
 		c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
+		return method.Return
+	}
+	if ClassifyMemoryType(recvType) == MemoryKindCacheArena && method.Name == "get_bytes" {
+		c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
+		intoArg := callArgForParam(method, expr.Args, explicitParamIndex(method, "into"))
+		if intoArg == nil {
+			return method.Return
+		}
+		intoType := c.typeExpr(moduleName, intoArg, scope, ctx)
+		if ClassifyMemoryType(intoType) != MemoryKindFrameArena {
+			c.error(expr.SpanV, diag.SEM0030, "cache lookup must copy into ArenaFrame")
+		}
+		c.rememberLifetime(expr, Lifetime{
+			Kind:  LifetimeCacheLookup,
+			Scope: c.lifetimeOfExpr(intoArg, scope).Scope,
+		})
 		return method.Return
 	}
 

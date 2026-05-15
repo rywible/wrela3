@@ -525,3 +525,191 @@ executor Worker {
 		t.Fatalf("check diagnostics: %#v", diags)
 	}
 }
+
+func TestCacheLookupRequiresFrameDestination(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Bytes { address: PhysicalAddress; length: U64 }
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class ExecutorMemory { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+`, `
+module machine.x86_64.cache_memory
+
+use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
+
+data CacheLookup { hit: Bool; bytes: Bytes }
+data CachePutResult { stored: Bool; evicted: U64 }
+class CacheArena {
+    storage: MutableBytes
+    slot_count: U64
+    slot_size: U64
+    next_victim: U64
+    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
+    fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult { return CachePutResult(stored = true, evicted = 0) }
+}
+class Bad {
+    cache: CacheArena
+    memory: ExecutorMemory
+    fn bad(self) -> CacheLookup {
+        return self.cache.get_bytes(key = 1, into = self.memory)
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if !hasCode(diags, diag.SEM0030) {
+		t.Fatalf("expected SEM0030, got %#v", diags)
+	}
+}
+
+func TestCacheLookupBytesCannotEscapeFrame(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Bytes { address: PhysicalAddress; length: U64 }
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+`, `
+module machine.x86_64.cache_memory
+
+use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
+
+data CacheLookup { hit: Bool; bytes: Bytes }
+data CachePutResult { stored: Bool; evicted: U64 }
+class CacheArena {
+    storage: MutableBytes
+    slot_count: U64
+    slot_size: U64
+    next_victim: U64
+    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
+}
+class Bad {
+    cache: CacheArena
+    memory: ExecutorMemory
+    saved: Bytes
+    fn bad(self) {
+        with self.memory.frame(length = 64) as tick {
+            let found = self.cache.get_bytes(key = 1, into = tick)
+            self.saved = found.bytes
+        }
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if !hasCode(diags, diag.SEM0031) {
+		t.Fatalf("expected SEM0031, got %#v", diags)
+	}
+}
+
+func TestCacheLookupValueCannotEscapeFrame(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Bytes { address: PhysicalAddress; length: U64 }
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+`, `
+module machine.x86_64.cache_memory
+
+use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
+
+data CacheLookup { hit: Bool; bytes: Bytes }
+class CacheArena {
+    storage: MutableBytes
+    slot_count: U64
+    slot_size: U64
+    next_victim: U64
+    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
+}
+class Bad {
+    cache: CacheArena
+    memory: ExecutorMemory
+    fn bad(self) -> CacheLookup {
+        with self.memory.frame(length = 64) as tick {
+            return self.cache.get_bytes(key = 1, into = tick)
+        }
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if !hasCode(diags, diag.SEM0031) {
+		t.Fatalf("expected SEM0031, got %#v", diags)
+	}
+}
+
+func TestCacheLookupPositionalIntoUsesFrameLifetime(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+
+data Bytes { address: PhysicalAddress; length: U64 }
+data MutableBytes { address: PhysicalAddress; length: U64 }
+class ArenaFrame { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
+}
+`, `
+module machine.x86_64.cache_memory
+
+use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
+
+data CacheLookup { hit: Bool; bytes: Bytes }
+class CacheArena {
+    storage: MutableBytes
+    slot_count: U64
+    slot_size: U64
+    next_victim: U64
+    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
+}
+class Worker {
+    cache: CacheArena
+    memory: ExecutorMemory
+    fn ok(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let found = self.cache.get_bytes(1, tick)
+            let bytes = found.bytes
+        }
+        while true {}
+    }
+}
+`)
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, diags := Check(index, modules)
+	if len(diags) != 0 {
+		t.Fatalf("check diagnostics: %#v", diags)
+	}
+}
