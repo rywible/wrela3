@@ -27,7 +27,7 @@
 ;     mov eax, cr4
 ;     or eax, 0x20
 ;     mov cr4, eax
-;     mov eax, [apTrampolineBase + pml4_phys_low32]
+;     mov eax, [apTrampolineBase + pml4_phys_qword]
 ;     mov cr3, eax
 ;     mov ecx, 0xc0000080
 ;     rdmsr
@@ -60,7 +60,7 @@
 ;     jmp halt
 ;
 ; Metadata slots:
-;     0xa0 pml4_phys_low32: dd 0
+;     0xa0 pml4_phys_qword: dq 0
 ;     0xa8 entry_qword:     dq 0
 ;     0xb0 stack_qword:     dq 0
 ;     0xb8 context_qword:   dq 0

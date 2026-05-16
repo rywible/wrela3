@@ -115,13 +115,13 @@ func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext
 func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
 	emitPrepareVcpuStartup(e, op, frame, ctx)
 	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x000C4500)
-	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRLow, 0x00004500)
+	emitDelayLoop(e, 70000)
 	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
-	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
+	emitDelayLoop(e, 70000)
 	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
+	emitLapicWrite(e, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
 	emitWaitForVcpuReady(e, op.VcpuID)
 	emitStoreVcpuStartStatus(e, op, frame)
 }
@@ -160,7 +160,7 @@ func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compi
 	emitMovImmToReg(e, trampolineBase, apTrampolineBase)
 	emitStoreIDTDescriptor(e, trampolineBase, apTrampolineIDTDescriptorOffset)
 	e.emit(0x0F, 0x20, 0xD8) // mov rax, cr3
-	emitStoreMemFromReg(e, trampolineBase, apTrampolinePML4Offset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolinePML4Offset, asm.MustLookup("rax"), 64)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), runSymbol)
 	emitStoreMemFromReg(e, trampolineBase, apTrampolineEntryOffset, asm.MustLookup("rax"), 64)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), stackSymbol)

@@ -992,7 +992,7 @@ func TestExecutorTopicGraphDiagnostics(t *testing.T) {
 		{
 			name:  "subscription used by wrong executor",
 			code:  diag.SEM0040,
-			graph: ImageGraph{SubscriptionUses: []SubscriptionUseNode{{TopicLabel: "counter", SubscriberLabel: "worker", CurrentSlotLabel: "other", Span: testSpan(16)}}},
+			graph: ImageGraph{SubscriptionUses: []SubscriptionUseNode{{TopicLabel: "counter", FieldName: "input", CurrentExecutorType: "Other", Span: testSpan(16)}}},
 		},
 		{
 			name: "gap topic uses no gap policy",

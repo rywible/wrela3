@@ -11,7 +11,7 @@
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.
 - v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, ivshmem-doorbell via MSI-X, AP startup, and explicit vCPU placement on QEMU lab hardware.
 - v0 still exposes no CPU traps.
-- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and hardware-derived multiprocessor routing beyond the static q35 two-vCPU shape.
+- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and hardware-derived multiprocessor routing beyond the static q35 two-vCPU shape. Real-hardware AP startup also needs calibrated PIT/TSC delays instead of fixed spin loops, explicit high-CR3 trampoline support or a documented low-page-table contract, and an interrupt save policy if Wrela ever emits FPU/SSE/AVX instructions.
 
 ## Hardware discovery
 - This is required for production and not optional because ACPI, PCIe, and framebuffer discovery are expected for realistic boots and platform integration.

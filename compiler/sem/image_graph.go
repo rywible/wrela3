@@ -68,10 +68,10 @@ type TopicSubscriptionNode struct {
 }
 
 type SubscriptionUseNode struct {
-	TopicLabel       string
-	SubscriberLabel  string
-	CurrentSlotLabel string
-	Span             source.Span
+	TopicLabel          string
+	FieldName           string
+	CurrentExecutorType string
+	Span                source.Span
 }
 
 type ReliableTryPublishCallNode struct {

@@ -1413,7 +1413,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			}
 			enter := VcpuEnter{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
-			return receiver, ops, ctx.resolveType(moduleName, "void")
+			return receiver, ops, ctx.resolveType(moduleName, "never")
 		}
 		if recvType != nil && recvType.Module == "machine.x86_64.cpu_state" && recvType.Name == "OwnedMemory" && e.Method == "claim_executor_arena" {
 			_, ownerOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "owner"))
@@ -1424,7 +1424,8 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			u64Type := ctx.resolveType(moduleName, "U64")
 			arenaField := ctx.lookupField(recvType, "arena")
 			addressField := ctx.lookupField(mutableBytesType, "address")
-			if arenaField == nil || addressField == nil {
+			lengthField := ctx.lookupField(mutableBytesType, "length")
+			if arenaField == nil || addressField == nil || lengthField == nil {
 				ctx.errorf("claim_executor_arena missing memory arena fields")
 				return receiver, receiverOps, recvType
 			}
@@ -1442,6 +1443,13 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 				Type:       addressField.Type,
 				Offset:     addressField.Offset,
 			}
+			arenaLength := &FieldLoad{
+				Object:     arena,
+				ObjectType: mutableBytesType.Name,
+				Field:      "length",
+				Type:       lengthField.Type,
+				Offset:     lengthField.Offset,
+			}
 			zero := &ConstInt{Symbol: "const", Value: 0, Type: ctx.irType(u64Type)}
 			one := &ConstInt{Symbol: "const", Value: 1, Type: ctx.irType(u64Type)}
 			alignMinusOne := &Binary{Op: "sub", Left: align, Right: one, Type: ctx.irType(u64Type)}
@@ -1449,6 +1457,8 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			alignmentMask := &Binary{Op: "sub", Left: zero, Right: align, Type: ctx.irType(u64Type)}
 			arenaClaimBase := &Binary{Op: "and", Left: adjustedBase, Right: alignmentMask, Type: arenaBase.Type}
 			nextArenaBase := &Binary{Op: "add", Left: arenaClaimBase, Right: length, Type: arenaBase.Type}
+			consumed := &Binary{Op: "sub", Left: nextArenaBase, Right: arenaBase, Type: ctx.irType(u64Type)}
+			remainingLength := &Binary{Op: "sub", Left: arenaLength, Right: consumed, Type: arenaLength.Type}
 			arenaBaseStore := &FieldStore{
 				Object:     arena,
 				ObjectType: mutableBytesType.Name,
@@ -1456,6 +1466,14 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 				Value:      nextArenaBase,
 				Type:       arenaBase.Type,
 				Offset:     addressField.Offset,
+			}
+			arenaLengthStore := &FieldStore{
+				Object:     arena,
+				ObjectType: mutableBytesType.Name,
+				Field:      "length",
+				Value:      remainingLength,
+				Type:       arenaLength.Type,
+				Offset:     lengthField.Offset,
 			}
 			construct := &Construct{
 				Symbol: "ExecutorMemory",
@@ -1470,7 +1488,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, ownerOps...)
 			ops = append(ops, lengthOps...)
 			ops = append(ops, alignOps...)
-			ops = append(ops, arena, arenaBase, zero, one, alignMinusOne, adjustedBase, alignmentMask, arenaClaimBase, nextArenaBase, arenaBaseStore, construct)
+			ops = append(ops, arena, arenaBase, arenaLength, zero, one, alignMinusOne, adjustedBase, alignmentMask, arenaClaimBase, nextArenaBase, consumed, remainingLength, arenaBaseStore, arenaLengthStore, construct)
 			return construct, ops, executorMemoryType
 		}
 		if sem.IsArenaType(recvType) {

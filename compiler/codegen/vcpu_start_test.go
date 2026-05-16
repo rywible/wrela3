@@ -167,8 +167,8 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 	}
 	code := symbolBytes(t, image, "start_worker")
 	for _, want := range [][]byte{
-		u32le(0x000C4500),
-		u32le(0x000C4608),
+		u32le(0x00004500),
+		u32le(0x00004608),
 		{0x0F, 0x20, 0xD8}, // mov rax, cr3 before patching trampoline PML4 slot
 	} {
 		if !bytes.Contains(code, want) {
@@ -180,8 +180,13 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 			t.Fatalf("start_worker missing reference to %s", symbol)
 		}
 	}
-	if !bytes.Contains(code, []byte{0x41, 0x89, 0x81, apTrampolinePML4Offset, 0x00, 0x00, 0x00}) {
-		t.Fatalf("start_worker must patch trampoline CR3 metadata through stable r9 base: %x", code)
+	if !bytes.Contains(code, []byte{0x49, 0x89, 0x81, apTrampolinePML4Offset, 0x00, 0x00, 0x00}) {
+		t.Fatalf("start_worker must patch 64-bit trampoline CR3 metadata through stable r9 base: %x", code)
+	}
+	for _, broadcast := range [][]byte{u32le(0x000C4500), u32le(0x000C4608)} {
+		if bytes.Contains(code, broadcast) {
+			t.Fatalf("start_worker must not use destination-shorthand broadcast ICR command %x in %x", broadcast, code)
+		}
 	}
 	for _, offset := range []byte{apTrampolineEntryOffset, apTrampolineStackOffset, apTrampolineContextOffset, apTrampolineReadyOffset} {
 		wantStore := []byte{0x49, 0x89, 0x81, offset, 0x00, 0x00, 0x00}

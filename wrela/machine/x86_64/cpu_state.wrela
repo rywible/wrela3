@@ -54,6 +54,7 @@ class OwnedMemory {
     fn claim_executor_arena(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
         let arena_base = (self.arena.address + align - 1) & (0 - align)
         self.arena.address = arena_base + length
+        self.arena.length = self.arena.length - length
         return ExecutorMemory(arena_base = arena_base, arena_length = length, next_offset = 0)
     }
 }

@@ -1236,23 +1236,23 @@ func (c *checker) checkSubscriptionUses() {
 		}
 	}
 	for _, use := range c.graph.SubscriptionUses {
-		if use.SubscriberLabel == "" || use.CurrentSlotLabel == "" || use.SubscriberLabel == use.CurrentSlotLabel {
+		if use.FieldName == "" || use.CurrentExecutorType == "" {
 			continue
 		}
 		if c.checkExecutorSubscriptionUse(use, subscriptions) {
 			continue
 		}
-		c.error(use.Span, diag.SEM0040, "subscription for slot "+use.SubscriberLabel+" used from executor "+use.CurrentSlotLabel)
+		c.error(use.Span, diag.SEM0040, "subscription field "+use.FieldName+" used from executor "+use.CurrentExecutorType)
 	}
 }
 
 func (c *checker) checkExecutorSubscriptionUse(use SubscriptionUseNode, subscriptions map[string]TopicSubscriptionNode) bool {
 	reported := false
 	for _, exec := range c.graph.Executors {
-		if exec.Type == nil || exec.Type.Name != use.CurrentSlotLabel {
+		if exec.Type == nil || exec.Type.Name != use.CurrentExecutorType {
 			continue
 		}
-		binding := exec.FieldBindings[use.SubscriberLabel]
+		binding := exec.FieldBindings[use.FieldName]
 		sub := subscriptions[binding]
 		if sub.SubscriberLabel == "" || exec.SlotLabel == "" {
 			continue
@@ -1363,19 +1363,6 @@ func nonZeroSpan(span, fallback source.Span) source.Span {
 	return span
 }
 
-func interruptVector(path *Type) (uint8, bool) {
-	switch qualifiedTypeName(path) {
-	case "machine.x86_64.serial.SerialConsolePath":
-		return 0x40, true
-	case "machine.x86_64.edu.EduMsiPath":
-		return 0x41, true
-	case "machine.x86_64.ivshmem.IvshmemMsixPath":
-		return 0x42, true
-	default:
-		return 0, false
-	}
-}
-
 func subscriberSlotsForTopic(subscriptions []TopicSubscriptionNode, label string) []string {
 	var slots []string
 	seen := map[string]bool{}
@@ -1402,14 +1389,6 @@ func (c *checker) eventDeclForPath(path *Type) *ast.InterruptEventDecl {
 		return nil
 	}
 	return c.index.InterruptEvent(path.Module, path.Name)
-}
-
-func splitQualifiedType(raw string) (string, string) {
-	parts := strings.Split(raw, ".")
-	if len(parts) <= 1 {
-		return "", raw
-	}
-	return strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
 }
 
 func qualifiedTypeName(typ *Type) string {
@@ -1865,9 +1844,9 @@ func (c *checker) recordSubscriptionMethodCall(moduleName string, expr ast.Expr,
 		return
 	}
 	c.graph.SubscriptionUses = append(c.graph.SubscriptionUses, SubscriptionUseNode{
-		SubscriberLabel:  field.Field,
-		CurrentSlotLabel: c.currentType.Name,
-		Span:             call.SpanV,
+		FieldName:           field.Field,
+		CurrentExecutorType: c.currentType.Name,
+		Span:                call.SpanV,
 	})
 }
 

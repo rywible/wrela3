@@ -253,7 +253,8 @@ class Boot {
 		t.Fatalf("claim_executor_arena should lower as caller-side intrinsic: %#v", fn.Blocks)
 	}
 	var constructs []*Construct
-	var stores []*FieldStore
+	var addressStores []*FieldStore
+	var lengthStores []*FieldStore
 	var addCount, andCount, subCount int
 	for _, block := range fn.Blocks {
 		for _, op := range block.Ops {
@@ -264,7 +265,10 @@ class Boot {
 				}
 			case *FieldStore:
 				if op.ObjectType == "MutableBytes" && op.Field == "address" {
-					stores = append(stores, op)
+					addressStores = append(addressStores, op)
+				}
+				if op.ObjectType == "MutableBytes" && op.Field == "length" {
+					lengthStores = append(lengthStores, op)
 				}
 			case *Binary:
 				switch op.Op {
@@ -281,8 +285,11 @@ class Boot {
 	if len(constructs) != 2 {
 		t.Fatalf("Boot.run ExecutorMemory constructs = %d, want 2: %#v", len(constructs), fn.Blocks)
 	}
-	if len(stores) != 2 {
-		t.Fatalf("Boot.run arena address stores = %d, want 2: %#v", len(stores), fn.Blocks)
+	if len(addressStores) != 2 {
+		t.Fatalf("Boot.run arena address stores = %d, want 2: %#v", len(addressStores), fn.Blocks)
+	}
+	if len(lengthStores) != 2 {
+		t.Fatalf("Boot.run arena length stores = %d, want 2: %#v", len(lengthStores), fn.Blocks)
 	}
 	for _, construct := range constructs {
 		base := constructFieldValue(construct, "arena_base")

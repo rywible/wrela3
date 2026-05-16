@@ -140,7 +140,7 @@ compiler/qemu/run_test.go
 
 examples/hello/main.wrela
 examples/hello/program.wrela
-tests/e2e/fixtures/multi_vcpu_topics/main.wrela
+examples/multi_vcpu_topics/main.wrela
 tests/e2e/fixtures/hello_ivshmem/main.wrela
 tests/e2e/fixtures/hello_ivshmem/program.wrela
 tests/e2e/hello_qemu_test.go
@@ -192,7 +192,7 @@ Merge gates:
 
 - **Gate A:** Tasks 1, 2, and 7 complete. All lanes now share stable names for diagnostics, source contracts, and IR structs.
 - **Gate B:** Semantic Graph Lane complete. Topic and interrupt lanes can rely on `ImageGraph.Topics`, `TopicSubscriptions`, `TopicPublishers`, and `VcpuPlacements`.
-- **Gate C:** Topic Codegen Lane and vCPU Codegen Lane complete. E2E can start multi-vCPU fixture execution.
+- **Gate C:** Topic Codegen Lane and vCPU Codegen Lane complete. E2E can start multi-vCPU example execution.
 - **Gate D:** Interrupt Topic Lane complete. Hello and ivshmem fixture cutover can start.
 - **Gate E:** Tasks 16 and 17 complete. Run Task 18 final verification.
 
@@ -239,7 +239,7 @@ Task 18:  depends on Task 17
 This is the source shape the final implementation must compile.
 
 ```wrela
-module tests.e2e.fixtures.multi_vcpu_topics.main
+module examples.multi_vcpu_topics.main
 
 use { OwnedHardware, MemoryPlan, OwnedMemory, IoPortAuthority, CpuPlan, ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
 use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
@@ -4086,7 +4086,7 @@ git commit -m "feat: publish interrupts to topics -Codex Automated"
 **Files:**
 - Modify: `examples/hello/main.wrela`
 - Modify: `examples/hello/program.wrela`
-- Create: `tests/e2e/fixtures/multi_vcpu_topics/main.wrela`
+- Create: `examples/multi_vcpu_topics/main.wrela`
 - Modify: `tests/e2e/hello_qemu_test.go`
 
 Do not modify `wrela/machine/x86_64/cpu_state.wrela` or `wrela/machine/x86_64/serial.wrela` in this task. If `claim_executor_arena` or `create_console_path` is missing, stop and complete Task 15A first.
@@ -4107,7 +4107,7 @@ func TestMultiVcpuTopicsQEMU(t *testing.T) {
 	image := filepath.Join(tmp, "multi-vcpu-topics.efi")
 	_, err = compiler.Build(compiler.BuildOptions{
 		Mode: compiler.ModeDev,
-		RootPath: "tests/e2e/fixtures/multi_vcpu_topics/main.wrela",
+		RootPath: "examples/multi_vcpu_topics/main.wrela",
 		OutputPath: image,
 		RepoRoot: ".",
 	})
@@ -4137,7 +4137,7 @@ Expected: FAIL because fixture does not exist or feature is incomplete.
 
 - [ ] **Step 3: Create fixture**
 
-Create `tests/e2e/fixtures/multi_vcpu_topics/main.wrela` using the executor bodies from Section 4 and this exact image wiring shape:
+Create `examples/multi_vcpu_topics/main.wrela` using the executor bodies from Section 4 and this exact image wiring shape:
 
 ```wrela
 phase owned_hardware(hardware: OwnedHardware) -> never {
@@ -4316,11 +4316,11 @@ Expected: PASS on machines with QEMU/OVMF.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add examples/hello/main.wrela examples/hello/program.wrela tests/e2e/fixtures/multi_vcpu_topics/main.wrela tests/e2e/hello_qemu_test.go
+git add examples/hello/main.wrela examples/hello/program.wrela examples/multi_vcpu_topics/main.wrela tests/e2e/hello_qemu_test.go
 git commit -m "test: verify explicit vcpu topics in qemu -Codex Automated"
 ```
 
-**Acceptance Criteria:** Multi-vCPU QEMU fixture proves producer publishes 64 messages, consumer receives 64, and serial output confirms both. Hello uses hard-cut topic interrupts and vCPU enter.
+**Acceptance Criteria:** Multi-vCPU QEMU example proves producer publishes 64 messages, consumer receives 64, and serial output confirms both. Hello uses hard-cut topic interrupts and vCPU enter.
 
 ### Task 17: Remove Old Wiring From Fixtures And Tests
 
@@ -4517,4 +4517,4 @@ Before marking this plan complete, verify:
 - [ ] Gap topics detect overflow gaps.
 - [ ] Reliable topics refuse to overwrite unread messages.
 - [ ] Interrupt dispatch publishes topics and does not call executor handlers.
-- [ ] QEMU multi-vCPU fixture proves cross-vCPU communication.
+- [ ] QEMU multi-vCPU example proves cross-vCPU communication.
