@@ -936,7 +936,7 @@ func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {
 		p.skipSeparators()
 		name := ""
 		start := p.peek().Start
-		if isNameToken(p.peek()) && p.peekN(1).Kind == lex.Equal {
+		if isExpressionNameToken(p.peek()) && p.peekN(1).Kind == lex.Equal {
 			nameTok := p.next()
 			name = nameTok.Text
 			p.next()

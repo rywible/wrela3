@@ -169,7 +169,7 @@ image Img {
         let topic = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
         let input = topic.subscribe(subscriber = worker_slot)
         let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = input)
-        hardware.vcpu1.enter(worker)
+        hardware.vcpu1.start(executor = worker)
         while true {}
     }
 }`

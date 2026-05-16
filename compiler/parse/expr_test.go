@@ -95,3 +95,18 @@ func TestMethodChainMayContinueAfterNewline(t *testing.T) {
 		t.Fatalf("method = %q, want write", call.Method)
 	}
 }
+
+func TestKeywordSelectorAndNamedArgInExpression(t *testing.T) {
+	p := newParser("test", "hardware.vcpu1.start(executor = worker)")
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("expr = %#v, want *ast.CallExpr", expr)
+	}
+	if call.Method != "start" || len(call.Args) != 1 || call.Args[0].Name != "executor" {
+		t.Fatalf("call = %#v", call)
+	}
+}

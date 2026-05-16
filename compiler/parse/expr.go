@@ -140,5 +140,9 @@ func (p *Parser) expectSelectorName(msg string) (lex.Token, []diag.Diagnostic) {
 }
 
 func isSelectorNameToken(tok lex.Token) bool {
-	return isNameToken(tok) || tok.Kind == lex.KeywordInterrupt
+	return isExpressionNameToken(tok)
+}
+
+func isExpressionNameToken(tok lex.Token) bool {
+	return isNameToken(tok) || tok.Kind == lex.KeywordInterrupt || tok.Kind == lex.KeywordStart || tok.Kind == lex.KeywordExecutor
 }
