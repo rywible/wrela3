@@ -1963,6 +1963,9 @@ func (c *checker) canMintInContext(ctx ContextKind, typ *Type) bool {
 	if ctx == ContextImagePhaseDirect && typ.Kind != KindData {
 		return true
 	}
+	if c.currentType != nil && isEdgeCapabilityModule(c.currentType.Module) && isEdgeCapabilityModule(typ.Module) {
+		return true
+	}
 	if ctx == ContextOwnershipTransferAuthorityMethod {
 		switch qualifiedTypeName(typ) {
 		case "machine.x86_64.cpu_state.ExecutorRegistry",
