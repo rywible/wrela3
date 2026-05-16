@@ -366,37 +366,29 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 	}
 }
 
-func TestLowerInterruptEventsAndOnHandlers(t *testing.T) {
+func TestLowerInterruptTopicBindingMetadata(t *testing.T) {
 	checked := checkedProgramForTest(t, `
 module machine.x86_64.serial
 
-data SerialInterrupt { vector: U8 }
+data SerialPathInterrupt { byte: U8 }
 
 driver path SerialConsolePath {
-    interrupt receiver -> SerialInterrupt {
-        return SerialInterrupt(vector = 1)
-    }
-}
-
-executor ConsoleExec {
-    serial: SerialConsolePath
-
-    on serial.interrupt(event: SerialInterrupt) {
-        let seen = event.vector
+    interrupt receiver -> SerialPathInterrupt {
+        return SerialPathInterrupt(byte = 1)
     }
 }
 `)
-	eventType, ok := checked.Index.Lookup("machine.x86_64.serial", "SerialInterrupt")
-	if !ok {
-		t.Fatal("missing SerialInterrupt type")
-	}
-	checked.InterruptBindings = []sem.InterruptBinding{{
-		ExecutorModule: "machine.x86_64.serial",
-		ExecutorType:   "ConsoleExec",
-		PathField:      "serial",
-		PathType:       "machine.x86_64.serial.SerialConsolePath",
-		EventType:      eventType,
-		Vector:         0x40,
+	checked.ImageGraph.InterruptTopicRoutes = []sem.InterruptTopicRouteNode{{
+		Vector:              0x40,
+		PathLabel:           "console.com1",
+		PathBinding:         "serial_path",
+		ContextSymbol:       "_wrela_interrupt_context_console_com1",
+		PathFieldOffset:     24,
+		TopicLabel:          "console.com1.rx",
+		TopicKind:           "serial_rx",
+		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
+		SubscriberSlots:     []string{"console"},
 	}}
 
 	program, diags := Lower(checked)
@@ -405,20 +397,12 @@ executor ConsoleExec {
 	}
 
 	eventSymbol := symbolName("event_fn", "machine.x86_64.serial", "SerialConsolePath", "interrupt")
-	handlerSymbol := symbolName("on_fn", "machine.x86_64.serial", "ConsoleExec", "serial", "interrupt")
 	eventFn := findFunction(program, eventSymbol)
 	if eventFn == nil {
 		t.Fatalf("missing lowered interrupt event function %q", eventSymbol)
 	}
 	if len(eventFn.Params) != 1 {
 		t.Fatalf("event params = %d, want self", len(eventFn.Params))
-	}
-	handlerFn := findFunction(program, handlerSymbol)
-	if handlerFn == nil {
-		t.Fatalf("missing lowered on handler function %q", handlerSymbol)
-	}
-	if len(handlerFn.Params) != 2 {
-		t.Fatalf("handler params = %d, want self and event", len(handlerFn.Params))
 	}
 
 	if len(program.InterruptEvents) != 1 {
@@ -431,14 +415,8 @@ executor ConsoleExec {
 		t.Fatalf("event function symbol = %q, want %q", program.InterruptEvents[0].FunctionSymbol, eventSymbol)
 	}
 
-	if len(program.OnHandlers) != 1 {
-		t.Fatalf("on handlers = %#v, want one", program.OnHandlers)
-	}
-	if got := program.OnHandlers[0].Symbol; got != "on_handler::machine.x86_64.serial::ConsoleExec::serial::interrupt" {
-		t.Fatalf("handler symbol = %q", got)
-	}
-	if program.OnHandlers[0].FunctionSymbol != handlerSymbol {
-		t.Fatalf("handler function symbol = %q, want %q", program.OnHandlers[0].FunctionSymbol, handlerSymbol)
+	if len(program.OnHandlers) != 0 {
+		t.Fatalf("on handlers = %#v, want none", program.OnHandlers)
 	}
 
 	if len(program.InterruptBindings) != 1 {
@@ -448,19 +426,34 @@ executor ConsoleExec {
 	if binding.Vector != 0x40 {
 		t.Fatalf("binding vector = %#x, want 0x40", binding.Vector)
 	}
-	if binding.PathFieldOffset != 0 {
-		t.Fatalf("binding path offset = %d, want field offset 0", binding.PathFieldOffset)
+	if binding.HandlerFunctionSymbol != "" {
+		t.Fatalf("handler function symbol = %q, want empty", binding.HandlerFunctionSymbol)
 	}
-	wantEventStorageSize := program.Types["machine.x86_64.serial.SerialInterrupt"].StorageSize
+	if binding.PathFieldOffset != 24 {
+		t.Fatalf("binding path offset = %d, want route offset 24", binding.PathFieldOffset)
+	}
+	wantEventStorageSize := program.Types["machine.x86_64.serial.SerialPathInterrupt"].StorageSize
 	if binding.EventStorageSize != wantEventStorageSize {
 		t.Fatalf("binding event storage size = %d, want %d", binding.EventStorageSize, wantEventStorageSize)
 	}
 	if binding.EventStorageSymbol != "_wrela_interrupt_event_40" {
 		t.Fatalf("binding event storage symbol = %q", binding.EventStorageSymbol)
 	}
+	if binding.TopicLabel != "console.com1.rx" || binding.TopicKind != "serial_rx" {
+		t.Fatalf("binding topic = %q/%q, want console.com1.rx/serial_rx", binding.TopicLabel, binding.TopicKind)
+	}
+	if binding.PublisherOwnerKind != "driver_path" || binding.PublisherOwnerLabel != "console.com1" {
+		t.Fatalf("binding owner = %q/%q, want driver_path/console.com1", binding.PublisherOwnerKind, binding.PublisherOwnerLabel)
+	}
+	if len(binding.SubscriberSlots) != 1 || binding.SubscriberSlots[0] != "console" {
+		t.Fatalf("binding subscribers = %#v, want [console]", binding.SubscriberSlots)
+	}
+	if binding.ContextSymbol != "_wrela_interrupt_context_console_com1" {
+		t.Fatalf("binding context = %q", binding.ContextSymbol)
+	}
 }
 
-func TestLowerInsertsInterruptContextStoreBeforeExecutorStart(t *testing.T) {
+func TestLowerInterruptTopicRouteMissingVectorDiagnostic(t *testing.T) {
 	checked := checkedProgramForTest(t, `
 module machine.x86_64.serial
 
@@ -471,62 +464,20 @@ driver path SerialConsolePath {
         return SerialPathInterrupt(byte = 0)
     }
 }
-
-executor HelloWorld {
-    serial_path: SerialConsolePath
-
-    on serial_path.interrupt(event: SerialPathInterrupt) { }
-
-    start fn run(self) -> never {
-        while true {
-        }
-    }
-}
-
-unique class DelegatedHardware {
-    fn claim(self) -> OwnedHardware {
-        return OwnedHardware()
-    }
-}
-
-unique class OwnedHardware {}
-
-image Img {
-    transitions { delegated_hardware -> owned_hardware }
-
-    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        return hardware.claim()
-    }
-
-    phase owned_hardware(hardware: OwnedHardware) -> never {
-        let hello = HelloWorld(serial_path = SerialConsolePath())
-        hello.run()
-    }
-}
 `)
-	program, diags := Lower(checked)
-	if len(diags) != 0 {
-		t.Fatalf("Lower() diagnostics = %#v", diags)
+	checked.ImageGraph.InterruptTopicRoutes = []sem.InterruptTopicRouteNode{{
+		TopicLabel:          "console.com1.rx",
+		TopicKind:           "serial_rx",
+		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
+	}}
+
+	_, diags := Lower(checked)
+	if len(diags) != 1 {
+		t.Fatalf("Lower() diagnostics = %#v, want one", diags)
 	}
-	phase := findFunction(program, "_wrela_phase_machine_x86_64_serial_Img_owned_hardware")
-	if phase == nil {
-		t.Fatal("missing owned phase")
-	}
-	storeIndex, callIndex := -1, -1
-	seq := 0
-	for _, block := range phase.Blocks {
-		for _, op := range block.Ops {
-			if _, ok := op.(*InterruptContextStore); ok && storeIndex < 0 {
-				storeIndex = seq
-			}
-			if call, ok := op.(*Call); ok && call.Symbol == "_wrela_method_machine_x86_64_serial_HelloWorld_run" && callIndex < 0 {
-				callIndex = seq
-			}
-			seq++
-		}
-	}
-	if storeIndex < 0 || callIndex < 0 || storeIndex > callIndex {
-		t.Fatalf("context store index %d must precede start call index %d in %#v", storeIndex, callIndex, phase.Blocks)
+	if diags[0].Code != diag.SEM0043 || diags[0].Message != "interrupt route missing vector" {
+		t.Fatalf("diagnostic = %#v, want SEM0043 interrupt route missing vector", diags[0])
 	}
 }
 

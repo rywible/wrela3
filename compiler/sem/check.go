@@ -226,6 +226,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkImageSignatures()
 	c.checkUnresolvedTypes()
 	c.checkDeclBodiesAndConstructors()
+	c.finalizeInterruptTopicRoutes()
 	c.checkDelegatedOnlyCrossing()
 	c.checkUniqueConstructors()
 	c.checkExecutorWiring()
@@ -1140,6 +1141,40 @@ func interruptVector(path *Type) (uint8, bool) {
 	}
 }
 
+func vectorForInterruptTopicKind(kind string) (uint8, bool) {
+	switch kind {
+	case "serial_rx":
+		return 0x40, true
+	case "edu_interrupt":
+		return 0x41, true
+	case "ivshmem_doorbell":
+		return 0x42, true
+	default:
+		return 0, false
+	}
+}
+
+func subscriberSlotsForTopic(subscriptions []TopicSubscriptionNode, label string) []string {
+	var slots []string
+	seen := map[string]bool{}
+	for _, sub := range subscriptions {
+		if sub.TopicLabel != label || sub.SubscriberLabel == "" || seen[sub.SubscriberLabel] {
+			continue
+		}
+		seen[sub.SubscriberLabel] = true
+		slots = append(slots, sub.SubscriberLabel)
+	}
+	return slots
+}
+
+func interruptContextSymbol(pathLabel string) string {
+	if pathLabel == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(".", "_", "-", "_", "/", "_", " ", "_")
+	return "_wrela_interrupt_context_" + replacer.Replace(pathLabel)
+}
+
 func (c *checker) checkExecutorInterruptCompleteness(exec *Type, seen map[string]source.Span) {
 	for _, field := range exec.Fields {
 		if field.Type == nil || field.Type.Kind != KindDriverPath {
@@ -1426,6 +1461,10 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 			}
 		}
 		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(typ)
+		if publisher := pathPublisherOrigin(expr, scope); publisher.Type != nil {
+			origin.TopicLabel = publisher.TopicLabel
+			origin.TopicKind = publisher.TopicKind
+		}
 	}
 	if typ.Kind == KindExecutor {
 		origin.SlotLabel = slotLabelForExpr(constructorArg(expr, "slot"), scope)
@@ -1467,6 +1506,28 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 	return origin
 }
 
+func pathPublisherOrigin(expr *ast.ConstructorExpr, scope *Scope) localOrigin {
+	if origin := publisherOriginForArg(constructorArg(expr, "rx"), scope); origin.Type != nil {
+		return origin
+	}
+	if origin := publisherOriginForArg(constructorArg(expr, "irq"), scope); origin.Type != nil {
+		return origin
+	}
+	return publisherOriginForArg(constructorArg(expr, "interrupt"), scope)
+}
+
+func publisherOriginForArg(expr ast.Expr, scope *Scope) localOrigin {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		return originForExpr(e, scope)
+	case *ast.CallExpr:
+		if e.Method == "publisher" {
+			return originForExpr(e.Receiver, scope)
+		}
+	}
+	return localOrigin{}
+}
+
 func (c *checker) recordGraphFromLet(name string, origin localOrigin, span source.Span) {
 	if origin.Type == nil {
 		return
@@ -1481,10 +1542,32 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case IsTopicSubscriptionType(origin.Type):
 		c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{TopicLabel: origin.TopicLabel, SubscriberLabel: origin.SlotLabel, Binding: name, Span: span})
 	case origin.Type.Kind == KindDriverPath:
-		publishes := origin.FieldBindings["rx"] != "" || origin.FieldBindings["interrupt"] != ""
+		publishes := origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
+		if origin.EventType != "" && origin.TopicLabel != "" {
+			c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, InterruptTopicRouteNode{
+				PathLabel:           origin.PathLabel,
+				PathBinding:         name,
+				ContextSymbol:       interruptContextSymbol(origin.PathLabel),
+				TopicLabel:          origin.TopicLabel,
+				TopicKind:           origin.TopicKind,
+				EventType:           origin.EventType,
+				EventFunctionSymbol: origin.EventFunctionSymbol,
+				Span:                span,
+			})
+		}
 	case origin.Type.Kind == KindExecutor:
 		c.updateExecutorGraphNode(origin, span)
+	}
+}
+
+func (c *checker) finalizeInterruptTopicRoutes() {
+	for i := range c.graph.InterruptTopicRoutes {
+		route := &c.graph.InterruptTopicRoutes[i]
+		route.SubscriberSlots = subscriberSlotsForTopic(c.graph.TopicSubscriptions, route.TopicLabel)
+		if vector, ok := vectorForInterruptTopicKind(route.TopicKind); ok {
+			route.Vector = int(vector)
+		}
 	}
 }
 

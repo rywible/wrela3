@@ -469,6 +469,11 @@ type InterruptBinding struct {
 	EventStorageSymbol    string
 	EventStorageSize      int
 	Vector                uint8
+	TopicLabel            string
+	TopicKind             string
+	PublisherOwnerKind    string
+	PublisherOwnerLabel   string
+	SubscriberSlots       []string
 }
 
 type TopicLayout struct {

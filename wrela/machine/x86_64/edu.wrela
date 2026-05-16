@@ -1,11 +1,57 @@
 module machine.x86_64.edu
 
+use { ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+
 data EduInterrupt {
     status: U32
 }
 
+data EduInterruptNext {
+    has_message: Bool
+    message: EduInterrupt
+}
+
+class EduInterruptTopic {
+    identity: TopicIdentity
+    id: U64
+
+    asm fn publisher(self) -> EduInterruptPublisher {
+        ret
+    }
+
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> EduInterruptSubscription {
+        ret
+    }
+}
+
+class EduInterruptPublisher {
+    topic: EduInterruptTopic
+}
+
+class EduInterruptSubscription {
+    topic: EduInterruptTopic
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+
+    asm fn try_next(self) -> EduInterruptNext {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.armed = true
+    }
+
+    fn is_wait_armed(self) -> Bool {
+        return self.armed
+    }
+}
+
 driver path EduMsiPath {
+    identity: PathIdentity
     mmio_base: VirtualAddress
+    irq: EduInterruptPublisher
 
     interrupt receiver -> EduInterrupt {
         return EduInterrupt(status = self.read32(offset = 0x24))

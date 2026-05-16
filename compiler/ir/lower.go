@@ -10,6 +10,7 @@ import (
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/layout"
 	"github.com/ryanwible/wrela3/compiler/sem"
+	"github.com/ryanwible/wrela3/compiler/source"
 )
 
 type lowerBinding struct {
@@ -406,53 +407,41 @@ func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Typ
 }
 
 func (ctx *lowerContext) lowerInterruptBindings() {
-	for _, binding := range ctx.checked.InterruptBindings {
-		eventType := ctx.irType(binding.EventType)
+	for _, route := range ctx.checked.ImageGraph.InterruptTopicRoutes {
+		if route.Vector == 0 {
+			ctx.addDiag(route.Span, diag.SEM0043, "interrupt route missing vector")
+			continue
+		}
+		eventType := ctx.irType(ctx.resolveType("", route.EventType))
 		eventInfo, ok := typeInfoFor(ctx.program.Types, eventType)
 		if !ok {
 			ctx.errorf("missing type info for interrupt event %s.%s", eventType.Module, eventType.Name)
 			continue
 		}
-		eventStorageSize := eventInfo.StorageSize
-		if eventStorageSize == 0 {
-			eventStorageSize = eventInfo.Size
-		}
-		if eventStorageSize == 0 {
-			eventStorageSize = 8
-		}
-		executorType := Type{Name: binding.ExecutorType, Module: binding.ExecutorModule, Kind: TypeKindExecutor}
-		executorInfo, ok := typeInfoFor(ctx.program.Types, executorType)
-		if !ok {
-			ctx.errorf("missing type info for interrupt executor %s.%s", executorType.Module, executorType.Name)
-			continue
-		}
-		pathField, ok := executorInfo.Fields[binding.PathField]
-		if !ok {
-			ctx.errorf("missing interrupt path field %s on executor %s.%s", binding.PathField, executorType.Module, executorType.Name)
-			continue
-		}
 		ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, InterruptBinding{
-			EventSymbol:           logicalSymbol("interrupt_event", pathModule(binding.PathType), pathName(binding.PathType), "interrupt"),
-			HandlerSymbol:         logicalSymbol("on_handler", binding.ExecutorModule, binding.ExecutorType, binding.PathField, "interrupt"),
-			EventFunctionSymbol:   symbolName("event_fn", pathModule(binding.PathType), pathName(binding.PathType), "interrupt"),
-			HandlerFunctionSymbol: symbolName("on_fn", binding.ExecutorModule, binding.ExecutorType, binding.PathField, "interrupt"),
-			ExecutorType:          executorType,
-			PathField:             binding.PathField,
-			PathFieldOffset:       pathField.Offset,
-			EventStorageSymbol:    fmt.Sprintf("_wrela_interrupt_event_%02x", binding.Vector),
-			EventStorageSize:      eventStorageSize,
-			Vector:                binding.Vector,
+			EventSymbol:         logicalSymbol("interrupt_event", pathModule(route.EventType), pathName(route.EventType), "interrupt"),
+			EventFunctionSymbol: route.EventFunctionSymbol,
+			PathFieldOffset:     route.PathFieldOffset,
+			ContextSymbol:       route.ContextSymbol,
+			EventStorageSymbol:  fmt.Sprintf("_wrela_interrupt_event_%02x", route.Vector),
+			EventStorageSize:    storageSizeOrEight(eventInfo),
+			Vector:              uint8(route.Vector),
+			TopicLabel:          route.TopicLabel,
+			TopicKind:           route.TopicKind,
+			PublisherOwnerKind:  "driver_path",
+			PublisherOwnerLabel: route.PathLabel,
+			SubscriberSlots:     append([]string{}, route.SubscriberSlots...),
 		})
 	}
 	sort.Slice(ctx.program.InterruptBindings, func(i, j int) bool {
-		if ctx.program.InterruptBindings[i].Vector != ctx.program.InterruptBindings[j].Vector {
-			return ctx.program.InterruptBindings[i].Vector < ctx.program.InterruptBindings[j].Vector
-		}
-		return ctx.program.InterruptBindings[i].HandlerSymbol < ctx.program.InterruptBindings[j].HandlerSymbol
+		return ctx.program.InterruptBindings[i].Vector < ctx.program.InterruptBindings[j].Vector
 	})
 }
 
 func (ctx *lowerContext) lowerInterruptContexts() {
+	if len(ctx.checked.ImageGraph.InterruptTopicRoutes) > 0 {
+		return
+	}
 	byExecutor := map[string][]int{}
 	for i, binding := range ctx.program.InterruptBindings {
 		key := binding.ExecutorType.Module + "." + binding.ExecutorType.Name
@@ -1201,6 +1190,27 @@ func (ctx *lowerContext) errorf(format string, args ...any) {
 		Code:    diag.CG0001,
 		Message: fmt.Sprintf(format, args...),
 	})
+}
+
+func (ctx *lowerContext) addDiag(span source.Span, code string, message string) {
+	ctx.diags = append(ctx.diags, diag.Diagnostic{
+		Phase:    "sem",
+		Code:     code,
+		Severity: diag.Error,
+		Start:    span.Start,
+		End:      span.End,
+		Message:  message,
+	})
+}
+
+func storageSizeOrEight(info TypeInfo) int {
+	if info.StorageSize != 0 {
+		return info.StorageSize
+	}
+	if info.Size != 0 {
+		return info.Size
+	}
+	return 8
 }
 
 func assignedNames(stmts []ast.Stmt) map[string]bool {

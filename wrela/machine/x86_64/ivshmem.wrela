@@ -1,11 +1,57 @@
 module machine.x86_64.ivshmem
 
+use { ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+
 data IvshmemDoorbellInterrupt {
     vector: U32
 }
 
-driver path IvshmemMsixPath {
+data IvshmemDoorbellNext {
+    has_message: Bool
+    message: IvshmemDoorbellInterrupt
+}
+
+class IvshmemDoorbellTopic {
+    identity: TopicIdentity
+    id: U64
+
+    asm fn publisher(self) -> IvshmemDoorbellPublisher {
+        ret
+    }
+
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> IvshmemDoorbellSubscription {
+        ret
+    }
+}
+
+class IvshmemDoorbellPublisher {
+    topic: IvshmemDoorbellTopic
+}
+
+class IvshmemDoorbellSubscription {
+    topic: IvshmemDoorbellTopic
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+
+    asm fn try_next(self) -> IvshmemDoorbellNext {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.armed = true
+    }
+
+    fn is_wait_armed(self) -> Bool {
+        return self.armed
+    }
+}
+
+driver path IvshmemDoorbellPath {
+    identity: PathIdentity
     registers_base: VirtualAddress
+    irq: IvshmemDoorbellPublisher
 
     interrupt receiver -> IvshmemDoorbellInterrupt {
         return IvshmemDoorbellInterrupt(vector = 0)
