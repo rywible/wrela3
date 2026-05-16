@@ -1405,6 +1405,58 @@ func qualifiedTypeName(typ *Type) string {
 	return typ.Module + "." + typ.Name
 }
 
+func isTrustedHardwareAuthorityModule(moduleName string) bool {
+	switch {
+	case strings.HasPrefix(moduleName, "platform.uefi."):
+		return true
+	case strings.HasPrefix(moduleName, "platform.acpi."):
+		return true
+	case strings.HasPrefix(moduleName, "platform.hardware."):
+		return true
+	case moduleName == "machine.x86_64.interrupts":
+		return true
+	case moduleName == "machine.x86_64.pci":
+		return true
+	case moduleName == "machine.x86_64.cpu_state":
+		return true
+	case strings.HasPrefix(moduleName, "sem."):
+		return true
+	}
+	return false
+}
+
+func isHardwareAuthorityType(typ *Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch qualifiedTypeName(typ) {
+	case "platform.hardware.bytes.BoundedBytes",
+		"platform.hardware.bytes.PhysicalBytes",
+		"platform.hardware.bytes.MmioRegion",
+		"platform.hardware.bytes.IoPortRegion",
+		"platform.acpi.root.AcpiRoot",
+		"platform.acpi.tables.AcpiTable",
+		"platform.acpi.madt.MadtTable",
+		"platform.acpi.mcfg.McfgTable",
+		"machine.x86_64.interrupts.LocalApic",
+		"machine.x86_64.interrupts.IoApicDiscovered",
+		"machine.x86_64.interrupts.IoApicSet",
+		"machine.x86_64.interrupts.InterruptOverrideSet",
+		"machine.x86_64.interrupts.InterruptAuthority",
+		"machine.x86_64.interrupts.IoApicRoute",
+		"machine.x86_64.pci.PciDevice",
+		"machine.x86_64.pci.PciDeviceIdentity",
+		"machine.x86_64.pci.PcieEcamWindow",
+		"machine.x86_64.pci.PcieEcamWindows",
+		"machine.x86_64.pci.PciDeviceSet",
+		"machine.x86_64.pci.MsiCapability",
+		"machine.x86_64.pci.MsixCapability",
+		"machine.x86_64.cpu_state.Vcpu":
+		return true
+	}
+	return false
+}
+
 func secondDriverPathOwnerSpan(owners map[string]driverPathOwner, fallback source.Span) source.Span {
 	out := fallback
 	for _, owner := range owners {
@@ -2200,7 +2252,6 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 }
 
 func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope, ctx ContextKind) {
-	_ = moduleName
 	_ = scope
 	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "ArenaFrame" {
 		c.error(expr.SpanV, diag.SEM0029, "ArenaFrame can only be created by with arena.frame(length = ...)")
@@ -2225,6 +2276,10 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 			c.error(expr.SpanV, diag.SEM0028, "raw physical byte authority can only be created directly in delegated_hardware phase")
 			return
 		}
+	}
+	if isHardwareAuthorityType(typ) && !isTrustedHardwareAuthorityModule(moduleName) {
+		c.error(expr.SpanV, diag.SEM0049, typ.Name+" must come from hardware discovery authority")
+		return
 	}
 	if typ.Kind == KindData {
 		return

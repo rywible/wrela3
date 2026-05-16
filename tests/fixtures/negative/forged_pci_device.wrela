@@ -1,0 +1,66 @@
+// expect: SEM0049: PciDevice must come from hardware discovery authority
+module platform.hardware.panic
+class BootPanic {
+    asm fn fail(self, code: U64) -> never { hlt }
+}
+
+module machine.x86_64.pci
+use { BootPanic } from platform.hardware.panic
+
+class PcieEcamWindow {
+    base: PhysicalAddress
+    segment: U16
+    start_bus: U8
+    end_bus: U8
+    panic: BootPanic
+}
+
+data PciDeviceIdentity {
+    segment: U16
+    bus: U8
+    device: U8
+    function: U8
+    vendor_id: U16
+    device_id: U16
+    class_code: U8
+    subclass: U8
+    prog_if: U8
+}
+
+class PciDevice {
+    window: PcieEcamWindow
+    identity: PciDeviceIdentity
+    panic: BootPanic
+}
+
+class PciFixtureFactory {
+    panic: BootPanic
+
+    fn window(self) -> PcieEcamWindow {
+        return PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
+    }
+
+    fn identity(self) -> PciDeviceIdentity {
+        return PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0x1234, device_id = 0x11E8, class_code = 0, subclass = 0, prog_if = 0)
+    }
+}
+
+module tests.fixtures.negative.forged_pci_device
+
+use { BootPanic } from platform.hardware.panic
+use { PciDevice, PciFixtureFactory } from machine.x86_64.pci
+
+image BadForgedPci {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let panic = BootPanic()
+        let factory = PciFixtureFactory(panic = panic)
+        let device = PciDevice(window = factory.window(), identity = factory.identity(), panic = panic)
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}

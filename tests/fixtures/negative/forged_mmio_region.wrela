@@ -1,0 +1,31 @@
+// expect: SEM0049: MmioRegion must come from hardware discovery authority
+module platform.hardware.panic
+class BootPanic {
+    asm fn fail(self, code: U64) -> never { hlt }
+}
+
+module platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+class MmioRegion {
+    address: PhysicalAddress
+    length: U64
+    panic: BootPanic
+}
+
+module tests.fixtures.negative.forged_mmio_region
+
+use { BootPanic } from platform.hardware.panic
+use { MmioRegion } from platform.hardware.bytes
+
+image BadForgedMmio {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let fake = MmioRegion(address = 0xFEC00000, length = 4096, panic = BootPanic())
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
