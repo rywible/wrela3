@@ -6,18 +6,104 @@ class BoundedBytes {
     address: PhysicalAddress
     length: U64
     panic: BootPanic
+
+    fn require_range(self, offset: U64, width: U64) -> U64 {
+        if offset > self.length {
+            self.panic.fail(code = 0xAC030001)
+        }
+        if width > self.length - offset {
+            self.panic.fail(code = 0xAC030002)
+        }
+        return offset
+    }
+
+    fn slice(self, offset: U64, length: U64) -> BoundedBytes {
+        self.require_range(offset = offset, width = length)
+        return BoundedBytes(address = self.address + offset, length = length, panic = self.panic)
+    }
+
+    fn read_u8(self, offset: U64) -> U8 {
+        self.require_range(offset = offset, width = 1)
+        return self.unchecked_read_u8(offset = offset)
+    }
+
+    fn read_u16(self, offset: U64) -> U16 {
+        self.require_range(offset = offset, width = 2)
+        return self.unchecked_read_u16(offset = offset)
+    }
+
+    fn read_u32(self, offset: U64) -> U32 {
+        self.require_range(offset = offset, width = 4)
+        return self.unchecked_read_u32(offset = offset)
+    }
+
+    fn read_u64(self, offset: U64) -> U64 {
+        self.require_range(offset = offset, width = 8)
+        return self.unchecked_read_u64(offset = offset)
+    }
+
+    asm fn unchecked_read_u8(self, offset: U64) -> U8 {
+        mov r11, self.address
+        add r11, offset
+        mov al, [r11]
+        ret
+    }
+
+    asm fn unchecked_read_u16(self, offset: U64) -> U16 {
+        mov r11, self.address
+        add r11, offset
+        mov ax, [r11]
+        ret
+    }
+
+    asm fn unchecked_read_u32(self, offset: U64) -> U32 {
+        mov r11, self.address
+        add r11, offset
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn unchecked_read_u64(self, offset: U64) -> U64 {
+        mov r11, self.address
+        add r11, offset
+        mov rax, [r11]
+        ret
+    }
 }
 
 class PhysicalBytes {
     address: PhysicalAddress
     length: U64
     panic: BootPanic
+
+    fn bounded(self) -> BoundedBytes {
+        return BoundedBytes(address = self.address, length = self.length, panic = self.panic)
+    }
 }
 
 class MmioRegion {
     address: PhysicalAddress
     length: U64
     panic: BootPanic
+
+    fn bytes(self) -> BoundedBytes {
+        return BoundedBytes(address = self.address, length = self.length, panic = self.panic)
+    }
+
+    asm fn read32(self, offset: U64) -> U32 {
+        mov r11, self.address
+        add r11, offset
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn write32(self, offset: U64, value: U32) {
+        mov r11, self.address
+        add r11, offset
+        mov eax, value
+        mov [r11], eax
+        ret
+    }
 }
 
 class IoPortRegion {

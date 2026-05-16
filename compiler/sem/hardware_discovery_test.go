@@ -21,4 +21,9 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, tables, "find_acpi_rsdp")
 	assertMethodExists(t, moduleType(t, index, "platform.uefi.types", "UefiMemoryMap"), "descriptor_at")
 	assertMethodExists(t, moduleType(t, index, "platform.uefi.types", "UefiMemoryMap"), "require_usable_region")
+
+	assertMethodExists(t, moduleType(t, index, "platform.hardware.panic", "BootPanic"), "fail")
+	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "BoundedBytes"), "read_u32")
+	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "read32")
+	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "write32")
 }

@@ -120,6 +120,24 @@ func TestUEFITransitionActivateAsmMethodCodegen(t *testing.T) {
 	)
 }
 
+func TestHardwareBytesAsmCodegen(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	methods := []ir.AsmMethod{
+		asmMethodFromSem(t, checked, "platform.hardware.panic", "BootPanic", "fail"),
+		asmMethodFromSem(t, checked, "platform.hardware.bytes", "BoundedBytes", "unchecked_read_u32"),
+		asmMethodFromSem(t, checked, "platform.hardware.bytes", "MmioRegion", "write32"),
+	}
+	for _, method := range methods {
+		unit, ds := compileAsmMethodUnit(method)
+		if len(ds) != 0 {
+			t.Fatalf("compileAsmMethodUnit %q diagnostics: %#v", method.Symbol, ds)
+		}
+		if len(unit.Bytes) == 0 {
+			t.Fatalf("%s compiled to empty bytes", method.Symbol)
+		}
+	}
+}
+
 func TestUEFISerialWrite8PreservesValueBeforePortRegisterSetup(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	write8 := asmMethodFromSem(t, checked, "machine.x86_64.serial", "SerialWriterRegisters", "write8")
