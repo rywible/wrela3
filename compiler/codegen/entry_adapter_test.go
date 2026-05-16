@@ -38,8 +38,8 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		t.Fatal("buildEntryAdapterLayout() failed")
 	}
 
-	if adapterLayout.FrameSize != 128 {
-		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 128)
+	if adapterLayout.FrameSize != 144 {
+		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 144)
 	}
 	if adapterLayout.UefiHandleOffset != -8 ||
 		adapterLayout.UefiBootServicesOffset != -16 ||
@@ -47,7 +47,7 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		adapterLayout.DelegatedBytesOffset != -40 ||
 		adapterLayout.UefiMemoryMapOffset != -72 ||
 		adapterLayout.DelegatedMemoryOffset != -104 ||
-		adapterLayout.DelegatedHardwareOffset != -128 {
+		adapterLayout.DelegatedHardwareOffset != -136 {
 		t.Fatalf("unexpected base offsets: %#v", adapterLayout)
 	}
 
@@ -110,11 +110,12 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	if !ok {
 		t.Fatal("DelegatedHardware TypeInfo did not produce a record layout")
 	}
-	if hardwareRecord.Size != 24 ||
+	if hardwareRecord.Size != 32 ||
 		hardwareRecord.Fields["image_handle"].Offset != 0 ||
 		hardwareRecord.Fields["boot_services"].Offset != 8 ||
-		hardwareRecord.Fields["delegated_memory"].Offset != 16 {
-		t.Fatalf("DelegatedHardware layout = %#v, want three handle fields", hardwareRecord)
+		hardwareRecord.Fields["system_table"].Offset != 16 ||
+		hardwareRecord.Fields["delegated_memory"].Offset != 24 {
+		t.Fatalf("DelegatedHardware layout = %#v, want four handle fields", hardwareRecord)
 	}
 
 	assertStoresSlotValue(t, entry, adapterLayout.UefiBootServicesCallsOffset, adapterLayout.UefiBootServicesOffset)
@@ -122,6 +123,10 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedMemoryMapOffset, adapterLayout.UefiMemoryMapOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
+	assertContainsInstruction(t, entry, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(adapterLayout.DelegatedHardwareSystemOffset), Width: 64},
+		asm.RegOperand{Reg: asm.MustLookup("rdx")},
+	}})
 	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
 }
 
@@ -400,10 +405,11 @@ func entryAdapterTestTypes(bootServicesOffset int) map[string]ir.TypeInfo {
 			entryAdapterField("next_offset", 16, 8, 8),
 			entryAdapterField("last_memory_map", 24, 8, 8),
 		),
-		"DelegatedHardware": entryAdapterTypeInfo("DelegatedHardware", 24, 8,
+		"DelegatedHardware": entryAdapterTypeInfo("DelegatedHardware", 32, 8,
 			entryAdapterField("image_handle", 0, 8, 8),
 			entryAdapterField("boot_services", 8, 8, 8),
-			entryAdapterField("delegated_memory", 16, 8, 8),
+			entryAdapterField("system_table", 16, 8, 8),
+			entryAdapterField("delegated_memory", 24, 8, 8),
 		),
 		"UefiSystemTable": {
 			Name: "UefiSystemTable",

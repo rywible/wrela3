@@ -234,6 +234,7 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 			switch d := decl.(type) {
 			case *ast.DataDecl:
 				typ.Fields = buildFields(idx, mod.Name, d.Fields)
+				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
 			case *ast.ClassDecl:
 				typ.Fields = buildFields(idx, mod.Name, d.Fields)
 				typ.Methods = buildMethods(idx, mod.Name, d.Methods)

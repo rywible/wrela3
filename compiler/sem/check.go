@@ -331,6 +331,7 @@ func (c *checker) checkUnresolvedTypes() {
 			switch d := decl.(type) {
 			case *ast.DataDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields)
+				c.checkMethodTypesResolved(mod.Name, d.Methods)
 			case *ast.ClassDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields)
 				c.checkMethodTypesResolved(mod.Name, d.Methods)
@@ -397,6 +398,9 @@ func (c *checker) checkDeclBodiesAndConstructors() {
 			switch d := decl.(type) {
 			case *ast.ImageDecl:
 				c.checkImageDecl(mod.Name, d)
+			case *ast.DataDecl:
+				typ := c.index.resolveInScope(mod.Name, d.Name)
+				c.checkMethods(mod.Name, typ, d.Methods)
 			case *ast.ClassDecl:
 				typ := c.index.resolveInScope(mod.Name, d.Name)
 				c.checkMethods(mod.Name, typ, d.Methods)

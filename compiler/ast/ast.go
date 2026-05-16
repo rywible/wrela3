@@ -24,9 +24,10 @@ type Decl interface {
 }
 
 type DataDecl struct {
-	Name   string
-	Fields []Field
-	SpanV  source.Span
+	Name    string
+	Fields  []Field
+	Methods []MethodDecl
+	SpanV   source.Span
 }
 
 func (d *DataDecl) Span() source.Span { return d.SpanV }

@@ -1777,6 +1777,8 @@ func assignedNames(stmts []ast.Stmt) map[string]bool {
 
 func compositeMethods(decl ast.Decl) (string, []ast.MethodDecl, bool) {
 	switch d := decl.(type) {
+	case *ast.DataDecl:
+		return d.Name, d.Methods, true
 	case *ast.ClassDecl:
 		return d.Name, d.Methods, true
 	case *ast.DriverDecl:

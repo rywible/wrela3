@@ -29,6 +29,7 @@ type entryFrameLayout struct {
 	DelegatedMemoryMapOffset       int
 	DelegatedHardwareImageOffset   int
 	DelegatedHardwareBootOffset    int
+	DelegatedHardwareSystemOffset  int
 	DelegatedHardwareMemoryOffset  int
 }
 
@@ -61,7 +62,7 @@ func buildEntryAdapterLayout(ctx compileContext) (entryFrameLayout, bool) {
 	mem := records["DelegatedMemory"]
 	memoryMap := records["UefiMemoryMap"]
 	if !recordHasFields(mem, "arena_base", "arena_length", "next_offset", "last_memory_map") ||
-		!recordHasFields(hw, "image_handle", "boot_services", "delegated_memory") ||
+		!recordHasFields(hw, "image_handle", "boot_services", "system_table", "delegated_memory") ||
 		!recordHasFields(memoryMap, "descriptors") {
 		return entryFrameLayout{}, false
 	}
@@ -74,6 +75,10 @@ func buildEntryAdapterLayout(ctx compileContext) (entryFrameLayout, bool) {
 		return entryFrameLayout{}, false
 	}
 	delegatedHardwareBoot, ok := recordField(hw, "boot_services")
+	if !ok {
+		return entryFrameLayout{}, false
+	}
+	delegatedHardwareSystem, ok := recordField(hw, "system_table")
 	if !ok {
 		return entryFrameLayout{}, false
 	}
@@ -98,6 +103,7 @@ func buildEntryAdapterLayout(ctx compileContext) (entryFrameLayout, bool) {
 		UefiMemoryMapDescriptorsOffset: offsets["UefiMemoryMap"] + memoryMapDescriptors.Offset,
 		DelegatedHardwareImageOffset:   offsets["DelegatedHardware"] + delegatedHardwareImage.Offset,
 		DelegatedHardwareBootOffset:    offsets["DelegatedHardware"] + delegatedHardwareBoot.Offset,
+		DelegatedHardwareSystemOffset:  offsets["DelegatedHardware"] + delegatedHardwareSystem.Offset,
 		DelegatedHardwareMemoryOffset:  offsets["DelegatedHardware"] + delegatedHardwareMemory.Offset,
 		DelegatedMemoryMapOffset:       offsets["DelegatedMemory"] + delegatedMemoryMap.Offset,
 	}, true
@@ -265,6 +271,7 @@ func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter, ctx compileContext) {
 	emitStoreSlotAddress(e, adapterLayout.DelegatedMemoryMapOffset, adapterLayout.UefiMemoryMapOffset)
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
+	emitStoreSlotFromReg(e, asm.MustLookup("rdx"), adapterLayout.DelegatedHardwareSystemOffset, 64)
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
 
 	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), adapterLayout.DelegatedHardwareOffset)

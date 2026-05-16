@@ -181,14 +181,15 @@ func (p *Parser) parseDataDecl() (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	fields, ds := p.parseFieldContainer()
+	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeClass)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.DataDecl{
-		Name:   name.Text,
-		Fields: fields,
-		SpanV:  p.span(start.Start, p.previous().End),
+		Name:    name.Text,
+		Fields:  fields,
+		Methods: methods,
+		SpanV:   p.span(start.Start, p.previous().End),
 	}, nil
 }
 
