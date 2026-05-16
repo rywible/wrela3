@@ -104,6 +104,8 @@ let console_path = serial_driver.create_console_path(
 
 The compiler assigns the canonical path instance identity to the created capability value. The path's `identity` field is human-readable graph metadata and must be unique within the image for path instances that publish topics. The compiler should use the canonical capability identity for ownership and routing, and use the label/source span for diagnostics and generated symbol names.
 
+Path identity labels are image-global. If two modules both use `console.com1`, that is a compile-time collision. Libraries should expose helper constructors but leave final image labels to the image phase, or use image-chosen prefixes such as `boot.console.com1` and `debug.console.com1`.
+
 If no label is provided for a non-publishing path, the compiler may synthesize one for diagnostics. If a path publishes a topic, the source should provide a label so generated topic identity remains reviewable.
 
 Path sharing is not part of this design. A path capability may be passed to exactly one executor. Fanout should be modeled with topics and subscriptions, not by sharing the path itself. Milestone 1 should reject shared paths.
@@ -123,7 +125,13 @@ executor value does not exist yet
 The image phase claims a slot first:
 
 ```wrela
-let console_slot = hardware.executors.claim("console")
+data SlotIdentity {
+    label: StringLiteral
+}
+
+let console_slot = hardware.executors.claim(
+    identity = SlotIdentity(label = "console")
+)
 ```
 
 The slot is then used to wire memory and subscriptions:
@@ -166,6 +174,10 @@ therefore serial_rx wakes vcpu0
 
 `ExecutorSlot` is unique and move-only. A slot may be claimed once, used by exactly one executor value, and placed on exactly one vCPU. Subscriptions and executor memory that name a slot may only be passed to the executor carrying that same slot.
 
+Slot labels are image-global and follow the same collision rule as path labels. A duplicate slot label is a compile-time error.
+
+The executor `slot` field is a compile-time wiring capability. User source may pass it to APIs that require an `ExecutorSlot`, but ordinary executor runtime code should not inspect it for scheduling decisions. Backends may erase the field after graph checks if no generated code needs a runtime slot handle.
+
 ### Executor
 
 An executor is:
@@ -180,7 +192,9 @@ An executor is:
 An executor is not scheduled by a hidden runtime. It is explicitly started on a vCPU:
 
 ```wrela
-let hello_slot = hardware.executors.claim("hello")
+let hello_slot = hardware.executors.claim(
+    identity = SlotIdentity(label = "hello")
+)
 
 let hello_memory = hardware.memory.claim_executor_arena(
     owner = hello_slot,
@@ -222,6 +236,8 @@ A topic is a cache-line-aware SPMC stream.
 
 The producer owns the topic. `Topic.publisher()` creates a single producer capability. The type system and ownership checker should enforce that publisher capability is unique and cannot be copied into multiple producers.
 
+Publisher authority may be owned by an executor slot or by a driver/path capability. Executor-owned publishers are used for executor-to-executor events. Driver/path-owned publishers are used for interrupt topics where generated ISR glue publishes on behalf of the path. In both cases there is exactly one publisher owner.
+
 Subscribers hold explicit read capabilities. Topics are the single communication model for:
 
 - executor-to-executor events
@@ -239,7 +255,9 @@ A subscription is a read capability to a topic.
 Subscriptions are explicit values passed into executor constructors. A subscription must name its subscriber slot when it is created:
 
 ```wrela
-let worker_slot = hardware.executors.claim("worker")
+let worker_slot = hardware.executors.claim(
+    identity = SlotIdentity(label = "worker")
+)
 let counter_in = counter_topic.subscribe(subscriber = worker_slot)
 ```
 
@@ -384,9 +402,24 @@ sleep if still idle
 
 The re-check prevents lost wakeups between "empty" and "sleep."
 
+Low-level loop APIs may expose `arm_wait()` and `recheck_or_wait()` separately because some executors wait on multiple subscriptions and timers, and must arm all wait sources before the final re-check. Higher-level helpers such as `wait_for_message()` may exist for single-subscription loops, but they must preserve the same drain, arm, re-check, sleep sequence.
+
 ## vCPU Loop Policies
 
 Each executor owns its loop policy explicitly.
+
+The proposed source shape is a normal executor field:
+
+```wrela
+executor Worker {
+    slot: ExecutorSlot
+    loop: EventLoopPolicy
+    memory: ExecutorMemory
+    counter_in: TopicSubscription<CounterMessage>
+}
+```
+
+The loop policy is source-visible so capacity planning can distinguish hot polling, adaptive spinning, event sleep, and timer sleep. Backends may specialize codegen from this field when the policy is statically known.
 
 ### Hot Poll
 
@@ -473,7 +506,9 @@ Interrupt routes should bind to path topics and subscriber slots, not directly t
 Illustrative shape:
 
 ```wrela
-let console_slot = hardware.executors.claim("console")
+let console_slot = hardware.executors.claim(
+    identity = SlotIdentity(label = "console")
+)
 
 let serial_irq = hardware.interrupts.claim_isa_irq(
     irq = 4,
@@ -534,12 +569,7 @@ The migration target is:
 - executor loops drain subscriptions explicitly
 - direct `on path.interrupt` handlers are removed or lowered only as temporary compatibility wrappers around topic consumption
 
-The first implementation plan should choose one migration step:
-
-- keep `on path.interrupt` unchanged while building the vCPU/topic spine, then migrate interrupts in a later plan
-- or migrate one simple interrupt path, such as serial receive, to a path-owned topic as part of the first multi-vCPU slice
-
-The design preference is the second path when feasible, but milestone 1 may defer it if AP startup and SPMC topics are already too large.
+Milestone 1 keeps `on path.interrupt` unchanged while building the vCPU/topic spine. Migrating one simple interrupt path, such as serial receive, to a path-owned topic is a stretch goal or the next implementation plan.
 
 ## Memory Model
 
@@ -668,8 +698,12 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
         identity = PathIdentity(label = "console.com1")
     )
 
-    let hello_slot = hardware.executors.claim("hello")
-    let worker_slot = hardware.executors.claim("worker")
+    let hello_slot = hardware.executors.claim(
+        identity = SlotIdentity(label = "hello")
+    )
+    let worker_slot = hardware.executors.claim(
+        identity = SlotIdentity(label = "worker")
+    )
 
     let producer_topic = Topic(
         message = CounterMessage,
@@ -692,6 +726,7 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
 
     let hello = HelloWorld(
         slot = hello_slot,
+        loop = HotPollPolicy(),
         memory = hello_memory,
         serial = serial_console,
         counter_out = producer_topic.publisher()
@@ -699,6 +734,7 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
 
     let worker = Worker(
         slot = worker_slot,
+        loop = EventSleepPolicy(),
         memory = worker_memory,
         counter_in = counter_in
     )
@@ -713,6 +749,7 @@ Illustrative executor loops:
 ```wrela
 executor HelloWorld {
     slot: ExecutorSlot
+    loop: HotPollPolicy
     memory: ExecutorMemory
     serial: SerialConsolePath
     counter_out: TopicPublisher<CounterMessage>
@@ -732,6 +769,7 @@ executor HelloWorld {
 
 executor Worker {
     slot: ExecutorSlot
+    loop: EventSleepPolicy
     memory: ExecutorMemory
     counter_in: TopicSubscription<CounterMessage>
 
@@ -739,14 +777,22 @@ executor Worker {
         let received = 0
 
         while received < 64 {
+            // drain
             while self.counter_in.try_next() as message {
                 received = received + 1
             }
 
+            // arm
             self.counter_in.arm_wait()
 
-            if received < 64 {
-                self.counter_in.recheck_or_wait()
+            // re-check
+            while self.counter_in.try_next() as message {
+                received = received + 1
+            }
+
+            // sleep if still idle
+            if received < 64 && self.counter_in.is_wait_armed() {
+                self.loop.wait()
             }
         }
 
@@ -763,6 +809,8 @@ The compiler derives:
 - `worker` is placed on `vcpu1`
 - `hello.slot` is `hello_slot`
 - `worker.slot` is `worker_slot`
+- `hello.loop` is a hot producer policy
+- `worker.loop` is an event-sleep consumer policy
 - `serial_console` is owned by `hello`
 - `producer_topic` has one producer and one subscriber, `worker_slot`
 - publishing to `producer_topic` can wake `vcpu1`
@@ -785,7 +833,11 @@ The first implementation milestone should prove the spine without solving every 
 - compiler checks for vCPU count, one executor per vCPU, one start/enter per executor, and terminal current-vCPU entry ordering
 - e2e proof that the producer publishes N messages and the consumer observes N messages, then reports success through serial
 
-Device interrupt topics and reliable bounded topics can follow after the vCPU/topic spine is working, unless interrupt-as-topic is needed to remove the current `on path.interrupt` model first.
+Device interrupt topics and reliable bounded topics follow after the vCPU/topic spine is working.
+
+Stretch goal:
+
+- migrate one simple interrupt path, such as serial receive, from `on path.interrupt` to a path-owned topic
 
 ## Non-Goals
 
