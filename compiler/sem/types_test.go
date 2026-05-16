@@ -960,12 +960,15 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 		"label": "StringLiteral",
 	})
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), map[string]string{
 		"identity": "TopicIdentity",
 		"depth":    "U64",
 	})
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), map[string]string{
 		"identity": "TopicIdentity",
 		"depth":    "U64",
@@ -980,8 +983,18 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 		"identity": "TopicIdentity",
 		"id":       "U64",
 	})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.serial", "SerialPathInterrupt"), map[string]string{
+		"has_byte": "Bool",
+		"byte":     "U8",
+	})
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "subscribe")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxSubscription"), "try_next")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "subscribe")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "subscribe")
 }
 
 func assertMethodExists(t *testing.T, typ *Type, name string) {
@@ -991,6 +1004,22 @@ func assertMethodExists(t *testing.T, typ *Type, name string) {
 	}
 	for _, method := range typ.Methods {
 		if method.Name == name {
+			return
+		}
+	}
+	t.Fatalf("%s.%s missing method %s", typ.Module, typ.Name, name)
+}
+
+func assertMethodIsSource(t *testing.T, typ *Type, name string) {
+	t.Helper()
+	if typ == nil {
+		t.Fatalf("nil type, missing method %s", name)
+	}
+	for _, method := range typ.Methods {
+		if method.Name == name {
+			if method.IsAsm {
+				t.Fatalf("%s.%s method %s must be source-backed, got asm body", typ.Module, typ.Name, name)
+			}
 			return
 		}
 	}

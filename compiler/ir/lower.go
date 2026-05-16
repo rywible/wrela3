@@ -58,9 +58,11 @@ type lowerContext struct {
 	types   map[string]*sem.Type
 	pseudo  map[string]*sem.Type
 
-	valueBindings map[Value]string
+	valueBindings   map[Value]string
+	currentExecutor *sem.ExecutorNode
 
 	stringSeq int
+	tempSeq   int
 	diags     []diag.Diagnostic
 
 	activeFrames []*FrameBegin
@@ -94,11 +96,11 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 		ctx.program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
 
-	ctx.lowerSourceMethods()
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
 	ctx.lowerVcpuStartPlans()
+	ctx.lowerSourceMethods()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
@@ -335,10 +337,43 @@ func (ctx *lowerContext) lowerSourceMethods() {
 				if method.IsAsm {
 					continue
 				}
+				if method.IsStart && receiverType != nil && receiverType.Kind == sem.KindExecutor {
+					placements := ctx.executorPlacementsForType(receiverType)
+					if len(placements) > 1 {
+						for _, exec := range placements {
+							ctx.currentExecutor = exec
+							ctx.program.Functions = append(ctx.program.Functions, ctx.lowerMethodWithSymbol(mod.Name, receiverType, method, executorStartSymbolForSlot(receiverType, exec.SlotLabel)))
+						}
+						ctx.currentExecutor = nil
+						continue
+					}
+				}
+				ctx.currentExecutor = nil
 				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerMethod(mod.Name, receiverType, method))
 			}
 		}
 	}
+}
+
+func (ctx *lowerContext) executorPlacementsForType(receiverType *sem.Type) []*sem.ExecutorNode {
+	if ctx == nil || ctx.checked == nil || receiverType == nil {
+		return nil
+	}
+	placed := map[string]bool{}
+	for _, placement := range ctx.checked.ImageGraph.VcpuPlacements {
+		if placement.SlotLabel != "" {
+			placed[placement.SlotLabel] = true
+		}
+	}
+	var out []*sem.ExecutorNode
+	for i := range ctx.checked.ImageGraph.Executors {
+		exec := &ctx.checked.ImageGraph.Executors[i]
+		if exec.SlotLabel == "" || !placed[exec.SlotLabel] || !sameSemType(exec.Type, receiverType) {
+			continue
+		}
+		out = append(out, exec)
+	}
+	return out
 }
 
 func (ctx *lowerContext) lowerInterruptEventsAndHandlers() {
@@ -407,9 +442,29 @@ func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Typ
 }
 
 func (ctx *lowerContext) lowerInterruptBindings() {
+	vectorRoutes := map[int]int{}
+	for _, route := range ctx.checked.ImageGraph.InterruptTopicRoutes {
+		if route.Vector != 0 {
+			vectorRoutes[route.Vector]++
+		}
+	}
+	ambiguousVectors := map[int]bool{}
+	reportedAmbiguous := map[int]bool{}
+	for vector, count := range vectorRoutes {
+		if count > 1 {
+			ambiguousVectors[vector] = true
+		}
+	}
 	for _, route := range ctx.checked.ImageGraph.InterruptTopicRoutes {
 		if route.Vector == 0 {
 			ctx.addDiag(route.Span, diag.SEM0043, "interrupt route missing vector")
+			continue
+		}
+		if ambiguousVectors[route.Vector] {
+			if !reportedAmbiguous[route.Vector] {
+				ctx.addDiag(route.Span, diag.SEM0043, "interrupt route vector is ambiguous")
+				reportedAmbiguous[route.Vector] = true
+			}
 			continue
 		}
 		eventType := ctx.irType(ctx.resolveType("", route.EventType))
@@ -484,7 +539,10 @@ func (ctx *lowerContext) lowerInterruptContexts() {
 }
 
 func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, method *ast.MethodDecl) Function {
-	symbol := symbolName("method", moduleName, receiverType.Name, method.Name)
+	return ctx.lowerMethodWithSymbol(moduleName, receiverType, method, symbolName("method", moduleName, receiverType.Name, method.Name))
+}
+
+func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *sem.Type, method *ast.MethodDecl, symbol string) Function {
 	params := []Value{}
 	scope := newLowerScope(nil)
 
@@ -546,10 +604,12 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, &Copy{Target: local, Source: value, Type: local.Type})
 			scope.define(s.Name, lowerBinding{value: local, typ: typ})
 			ctx.rememberValueBinding(local, s.Name)
+			ops = append(ops, ctx.interruptContextStoresForPathBinding(s.Name, local, typ)...)
 			return ops
 		}
 		scope.define(s.Name, lowerBinding{value: value, typ: typ})
 		ctx.rememberValueBinding(value, s.Name)
+		ops = append(ops, ctx.interruptContextStoresForPathBinding(s.Name, value, typ)...)
 		return ops
 	case *ast.AssignStmt:
 		value, valueOps, typ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
@@ -570,7 +630,7 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 				ctx.errorf("unknown field %s", target.Field)
 				return ops
 			}
-			ops = append(ops, &FieldStore{Object: object, ObjectType: objectType.Name, Field: target.Field, Value: value, Type: ctx.irType(typ), Offset: field.Offset})
+			ops = append(ops, &FieldStore{Object: object, ObjectType: objectType.Name, Field: target.Field, Value: value, Type: ctx.irType(typ), Offset: ctx.irFieldOffset(objectType, target.Field, field.Offset)})
 		default:
 			ctx.errorf("unsupported assignment target %T", s.Target)
 		}
@@ -603,6 +663,9 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		body := ctx.lowerStmtList(moduleName, receiverType, loopScope, assigned, s.Body)
 		return []Operation{&ForBytes{IterableOps: iterableOps, Iterable: iterable, Index: index, ByteValue: byteValue, Body: body}}
 	case *ast.IfStmt:
+		if wait, waitOps, ok := ctx.lowerTopicWaitIfArmed(moduleName, receiverType, scope, s); ok {
+			return append(waitOps, wait)
+		}
 		condition, conditionOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Cond)
 		thenOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Then)
 		elseOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Else)
@@ -633,6 +696,146 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		ctx.errorf("unsupported statement %T", stmt)
 		return nil
 	}
+}
+
+func (ctx *lowerContext) lowerTopicWaitIfArmed(moduleName string, receiverType *sem.Type, scope *lowerScope, stmt *ast.IfStmt) (*TopicWaitIfArmed, []Operation, bool) {
+	guardCalls, ok := topicWaitGuardCalls(stmt)
+	if !ok {
+		return nil, nil, false
+	}
+	var ops []Operation
+	var guards []TopicWaitGuard
+	for _, guardCall := range guardCalls {
+		subscription, subscriptionOps, subscriptionType := ctx.lowerExpr(moduleName, receiverType, scope, guardCall.Receiver)
+		if !sem.IsTopicSubscriptionType(subscriptionType) {
+			return nil, nil, false
+		}
+		label, _ := ctx.topicLabelAndKindForValue(subscription)
+		if label == "" {
+			return nil, nil, false
+		}
+		ops = append(ops, subscriptionOps...)
+		guards = append(guards, TopicWaitGuard{
+			TopicLabel:     label,
+			SubscriberSlot: ctx.subscriberSlotForValue(subscription, receiverType),
+			Subscription:   subscription,
+		})
+	}
+	wait := &TopicWaitIfArmed{
+		TopicLabel:     guards[0].TopicLabel,
+		SubscriberSlot: guards[0].SubscriberSlot,
+		Subscription:   guards[0].Subscription,
+		Guards:         guards,
+	}
+	return wait, ops, true
+}
+
+func topicWaitGuardCalls(stmt *ast.IfStmt) ([]*ast.CallExpr, bool) {
+	if stmt == nil || len(stmt.Else) != 0 || len(stmt.Then) != 1 {
+		return nil, false
+	}
+	condCall, ok := stmt.Cond.(*ast.CallExpr)
+	if !ok || condCall.Method != "is_wait_armed" {
+		return nil, false
+	}
+	switch then := stmt.Then[0].(type) {
+	case *ast.ExprStmt:
+		thenCall, ok := then.Expr.(*ast.CallExpr)
+		if !ok || thenCall.Method != "wait" {
+			return nil, false
+		}
+		return []*ast.CallExpr{condCall}, true
+	case *ast.IfStmt:
+		nested, ok := topicWaitGuardCalls(then)
+		if !ok {
+			return nil, false
+		}
+		return append([]*ast.CallExpr{condCall}, nested...), true
+	default:
+		return nil, false
+	}
+}
+
+func (ctx *lowerContext) lowerTopicFactoryCall(moduleName string, receiverType *sem.Type, scope *lowerScope, call *ast.CallExpr, receiver Value, receiverOps []Operation, recvType *sem.Type) (Value, []Operation, *sem.Type, bool) {
+	if !sem.IsTopicType(recvType) || (call.Method != "publisher" && call.Method != "subscribe") {
+		return nil, nil, nil, false
+	}
+	method := ctx.lookupMethod(recvType, call.Method)
+	ret := ctx.methodReturn(moduleName, method)
+	if ret == nil {
+		return nil, nil, nil, false
+	}
+	ops := append([]Operation{}, receiverOps...)
+	fields := []FieldValue{{Name: "topic", Value: receiver}}
+	if call.Method == "subscribe" {
+		subscriber, subscriberOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "subscriber"))
+		cursor := &ConstInt{Symbol: "topic_cursor", Value: 0, Type: ctx.irType(ctx.resolveType(moduleName, "U64"))}
+		armed := &ConstInt{Symbol: "topic_armed", Value: 0, Type: ctx.irType(ctx.resolveType(moduleName, "Bool"))}
+		ops = append(ops, subscriberOps...)
+		ops = append(ops, cursor, armed)
+		fields = append(fields,
+			FieldValue{Name: "subscriber", Value: subscriber},
+			FieldValue{Name: "cursor", Value: cursor},
+			FieldValue{Name: "armed", Value: armed},
+		)
+	}
+	construct := &Construct{Symbol: ret.Name, Type: ctx.irType(ret), Fields: fields}
+	ops = append(ops, construct)
+	return construct, ops, ret, true
+}
+
+func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, receiverType *sem.Type, scope *lowerScope, call *ast.CallExpr, receiver Value, receiverOps []Operation, recvType *sem.Type) (Value, []Operation, *sem.Type, bool) {
+	if qualifiedSemTypeName(recvType) != "machine.x86_64.serial.SerialDriver" || call.Method != "create_console_path" {
+		return nil, nil, nil, false
+	}
+	method := ctx.lookupMethod(recvType, call.Method)
+	ret := ctx.methodReturn(moduleName, method)
+	if ret == nil {
+		return nil, nil, nil, false
+	}
+	identity, identityOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "identity"))
+	rx, rxOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "rx"))
+	registersField := ctx.lookupField(recvType, "registers")
+	if registersField == nil {
+		ctx.errorf("SerialDriver.create_console_path requires registers field")
+		return receiver, receiverOps, recvType, true
+	}
+	registers := &FieldLoad{
+		Object:     receiver,
+		ObjectType: recvType.Name,
+		Field:      "registers",
+		Type:       registersField.Type,
+		Offset:     ctx.irFieldOffset(recvType, "registers", registersField.Offset),
+	}
+	construct := &Construct{
+		Symbol: "SerialConsolePath",
+		Type:   ctx.irType(ret),
+		Fields: []FieldValue{
+			{Name: "identity", Value: identity},
+			{Name: "registers", Value: registers},
+			{Name: "rx", Value: rx},
+		},
+	}
+	enable := &Call{
+		Symbol:   symbolName("method", ret.Module, ret.Name, "enable_receive_interrupts"),
+		Receiver: construct,
+		Type:     Type{Name: "void", Module: "builtin", Kind: TypeKindPrimitive},
+	}
+	ops := append([]Operation{}, receiverOps...)
+	ops = append(ops, identityOps...)
+	ops = append(ops, rxOps...)
+	ops = append(ops, registers, construct, enable)
+	return construct, ops, ret, true
+}
+
+func qualifiedSemTypeName(typ *sem.Type) string {
+	if typ == nil {
+		return ""
+	}
+	if typ.Module == "" {
+		return typ.Name
+	}
+	return typ.Module + "." + typ.Name
 }
 
 func (ctx *lowerContext) lowerReturn(value Value, prefix []Operation) []Operation {
@@ -691,12 +894,13 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		return
 	}
 	for _, topic := range ctx.checked.ImageGraph.Topics {
-		layout := TopicLayout{Label: topic.Label, Kind: topic.Kind}
+		layout := TopicLayout{Label: topic.Label, Kind: topic.Kind, Depth: topic.Depth}
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
 			if sub.TopicLabel == topic.Label {
 				layout.Subscribers = append(layout.Subscribers, sub.SubscriberLabel)
 			}
 		}
+		layout.Producers = ctx.publisherSlotsForTopic(topic.Label)
 		ctx.program.Topics = append(ctx.program.Topics, layout)
 	}
 }
@@ -713,9 +917,21 @@ func (ctx *lowerContext) lowerVcpuStartPlans() {
 		}
 		if exec := ctx.checked.ImageGraph.ExecutorBySlot(placement.SlotLabel); exec.Type != nil {
 			plan.ExecutorType = ctx.irType(exec.Type)
+			if len(ctx.executorPlacementsForType(exec.Type)) > 1 {
+				plan.EntrySymbol = executorStartSymbolForSlot(exec.Type, placement.SlotLabel)
+			}
 		}
 		ctx.program.VcpuStarts = append(ctx.program.VcpuStarts, plan)
 	}
+}
+
+func executorStartSymbolForSlot(executorType *sem.Type, slotLabel string) string {
+	return symbolName("method", executorType.Module, executorType.Name, "run", sanitizeSymbolName(slotLabel))
+}
+
+func sanitizeSymbolName(label string) string {
+	replacer := strings.NewReplacer(".", "_", "/", "_", "-", "_", " ", "_", ":", "_")
+	return replacer.Replace(label)
 }
 
 func (ctx *lowerContext) topicLabelAndKindForValue(value Value) (string, string) {
@@ -725,6 +941,98 @@ func (ctx *lowerContext) topicLabelAndKindForValue(value Value) (string, string)
 	}
 	topic := ctx.checked.ImageGraph.TopicByLabel(label)
 	return label, topic.Kind
+}
+
+func (ctx *lowerContext) publisherSlotsForTopic(topicLabel string) []string {
+	if ctx == nil || ctx.checked == nil || topicLabel == "" {
+		return nil
+	}
+	publisherBindings := map[string]bool{}
+	for _, publisher := range ctx.checked.ImageGraph.TopicPublishers {
+		if publisher.TopicLabel == topicLabel && publisher.Binding != "" {
+			publisherBindings[publisher.Binding] = true
+		}
+	}
+	if len(publisherBindings) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, exec := range ctx.checked.ImageGraph.Executors {
+		for _, binding := range exec.FieldBindings {
+			if !publisherBindings[binding] || exec.SlotLabel == "" || seen[exec.SlotLabel] {
+				continue
+			}
+			seen[exec.SlotLabel] = true
+			out = append(out, exec.SlotLabel)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (ctx *lowerContext) publisherSlotForValue(value Value, currentExecutor *sem.Type) string {
+	if ctx == nil || ctx.checked == nil {
+		return ""
+	}
+	binding := ctx.bindingNameForValue(value)
+	if binding == "" {
+		if load, ok := value.(*FieldLoad); ok {
+			binding = ctx.fieldBindingForLoad(load, currentExecutor)
+		}
+	}
+	if binding == "" {
+		return ctx.currentExecutorSlotLabel(currentExecutor)
+	}
+	for _, exec := range ctx.checked.ImageGraph.Executors {
+		for _, fieldBinding := range exec.FieldBindings {
+			if fieldBinding == binding {
+				return exec.SlotLabel
+			}
+		}
+	}
+	return ""
+}
+
+func (ctx *lowerContext) subscriberSlotForValue(value Value, currentExecutor *sem.Type) string {
+	if ctx == nil || ctx.checked == nil {
+		return ""
+	}
+	if binding := ctx.bindingNameForValue(value); binding != "" {
+		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
+			if sub.Binding == binding {
+				return sub.SubscriberLabel
+			}
+		}
+	}
+	if load, ok := value.(*FieldLoad); ok {
+		binding := ctx.fieldBindingForLoad(load, currentExecutor)
+		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
+			if sub.Binding == binding {
+				return sub.SubscriberLabel
+			}
+		}
+	}
+	return ""
+}
+
+func (ctx *lowerContext) fieldBindingForLoad(load *FieldLoad, currentExecutor *sem.Type) string {
+	if ctx == nil || ctx.checked == nil || load == nil {
+		return ""
+	}
+	if self, ok := load.Object.(*Param); !ok || self.Symbol != "self" {
+		return ""
+	}
+	if ctx.currentExecutor != nil && sameSemType(ctx.currentExecutor.Type, currentExecutor) {
+		return ctx.currentExecutor.FieldBindings[load.Field]
+	}
+	for _, exec := range ctx.checked.ImageGraph.Executors {
+		if !sameSemType(exec.Type, currentExecutor) {
+			continue
+		}
+		return exec.FieldBindings[load.Field]
+	}
+	return ""
 }
 
 func (ctx *lowerContext) topicLabelForValue(value Value) string {
@@ -751,6 +1059,11 @@ func (ctx *lowerContext) topicLabelForValue(value Value) string {
 	switch v := value.(type) {
 	case *FieldLoad:
 		if self, ok := v.Object.(*Param); ok && self.Symbol == "self" {
+			if ctx.currentExecutor != nil {
+				if binding := ctx.currentExecutor.FieldBindings[v.Field]; binding != "" {
+					return ctx.topicLabelForBinding(binding)
+				}
+			}
 			for _, exec := range ctx.checked.ImageGraph.Executors {
 				if exec.Type == nil || exec.Type.Name != v.ObjectType {
 					continue
@@ -763,6 +1076,12 @@ func (ctx *lowerContext) topicLabelForValue(value Value) string {
 	case *Call:
 		if strings.HasSuffix(v.Symbol, "_publisher") {
 			return ctx.topicLabelForValue(v.Receiver)
+		}
+	case *Construct:
+		for _, field := range v.Fields {
+			if field.Name == "topic" {
+				return ctx.topicLabelForValue(field.Value)
+			}
 		}
 	}
 	return ""
@@ -785,6 +1104,26 @@ func (ctx *lowerContext) topicLabelForBinding(binding string) string {
 		}
 	}
 	return ""
+}
+
+func (ctx *lowerContext) interruptContextStoresForPathBinding(binding string, value Value, typ *sem.Type) []Operation {
+	if ctx == nil || ctx.checked == nil || binding == "" || typ == nil || typ.Kind != sem.KindDriverPath {
+		return nil
+	}
+	var ops []Operation
+	for _, route := range ctx.checked.ImageGraph.InterruptTopicRoutes {
+		if route.PathBinding != binding || route.ContextSymbol == "" {
+			continue
+		}
+		ops = append(ops, &InterruptContextStore{
+			ContextSymbol: route.ContextSymbol,
+			ContextOffset: route.PathFieldOffset,
+			Source:        value,
+			SourceType:    ctx.irType(typ),
+			Size:          8,
+		})
+	}
+	return ops
 }
 
 func (ctx *lowerContext) slotLabelForExecutorValue(value Value) string {
@@ -822,6 +1161,9 @@ func (ctx *lowerContext) vcpuIDForValue(value Value) int {
 func (ctx *lowerContext) currentExecutorSlotLabel(receiverType *sem.Type) string {
 	if ctx == nil || ctx.checked == nil || receiverType == nil {
 		return ""
+	}
+	if ctx.currentExecutor != nil && sameSemType(ctx.currentExecutor.Type, receiverType) {
+		return ctx.currentExecutor.SlotLabel
 	}
 	for _, exec := range ctx.checked.ImageGraph.Executors {
 		if sameSemType(exec.Type, receiverType) {
@@ -900,7 +1242,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ObjectType: objectType.Name,
 			Field:      e.Field,
 			Type:       field.Type,
-			Offset:     field.Offset,
+			Offset:     ctx.irFieldOffset(objectType, e.Field, field.Offset),
 		}
 		return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
 	case *ast.ConstructorExpr:
@@ -917,11 +1259,20 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		return construct, ops, typ
 	case *ast.CallExpr:
 		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		if construct, ops, typ, ok := ctx.lowerTopicFactoryCall(moduleName, receiverType, scope, e, receiver, receiverOps, recvType); ok {
+			return construct, ops, typ
+		}
+		if construct, ops, typ, ok := ctx.lowerSerialConsolePathFactoryCall(moduleName, receiverType, scope, e, receiver, receiverOps, recvType); ok {
+			return construct, ops, typ
+		}
 		if sem.IsTopicPublisherType(recvType) {
 			switch e.Method {
 			case "publish":
 				value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "value"))
 				label, kind := ctx.topicLabelAndKindForValue(receiver)
+				if label == "" {
+					break
+				}
 				publish := TopicPublish{TopicLabel: label, Kind: kind, Value: value}
 				ops := append([]Operation{}, receiverOps...)
 				ops = append(ops, valueOps...)
@@ -932,14 +1283,56 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 				method := ctx.lookupMethod(recvType, e.Method)
 				ret := ctx.methodReturn(moduleName, method)
 				label, _ := ctx.topicLabelAndKindForValue(receiver)
+				if label == "" {
+					break
+				}
 				tryPublish := ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
 				ops := append([]Operation{}, receiverOps...)
 				ops = append(ops, valueOps...)
 				ops = append(ops, tryPublish)
 				return tryPublish, ops, ret
+			case "publish_or_wait":
+				value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "value"))
+				method := ctx.lookupMethod(recvType, "try_publish")
+				ret := ctx.methodReturn(moduleName, method)
+				label, _ := ctx.topicLabelAndKindForValue(receiver)
+				if label == "" {
+					break
+				}
+				fullField := ctx.lookupField(ret, "full")
+				if fullField == nil {
+					ctx.errorf("publish_or_wait requires U64PublishResult.full")
+					break
+				}
+				publisherSlot := ctx.publisherSlotForValue(receiver, receiverType)
+				result := ctx.tempLocal("publish_or_wait_result", ctx.irType(ret))
+				initialTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
+				initialCopy := &Copy{Target: result, Source: initialTry, Type: ctx.irType(ret)}
+				condition := &FieldLoad{
+					Object:     result,
+					ObjectType: ret.Name,
+					Field:      "full",
+					Type:       fullField.Type,
+					Offset:     fullField.Offset,
+				}
+				wait := &ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: publisherSlot}
+				retryTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
+				retryCopy := &Copy{Target: result, Source: retryTry, Type: ctx.irType(ret)}
+				loop := &While{
+					ConditionOps: []Operation{condition},
+					Condition:    condition,
+					Body:         []Operation{wait, retryTry, retryCopy},
+				}
+				ops := append([]Operation{}, receiverOps...)
+				ops = append(ops, valueOps...)
+				ops = append(ops, initialTry, initialCopy, loop)
+				return receiver, ops, ctx.resolveType(moduleName, "void")
 			case "wait_for_subscriber_advance":
 				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				wait := ReliableTopicWaitForAdvance{TopicLabel: label}
+				if label == "" {
+					break
+				}
+				wait := ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: ctx.publisherSlotForValue(receiver, receiverType)}
 				ops := append([]Operation{}, receiverOps...)
 				ops = append(ops, wait)
 				return receiver, ops, ctx.resolveType(moduleName, "void")
@@ -951,16 +1344,33 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 				method := ctx.lookupMethod(recvType, e.Method)
 				ret := ctx.methodReturn(moduleName, method)
 				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				next := TopicTryNext{TopicLabel: label, Subscription: receiver, Type: ctx.irType(ret)}
+				if label == "" {
+					break
+				}
+				next := TopicTryNext{TopicLabel: label, SubscriberSlot: ctx.subscriberSlotForValue(receiver, receiverType), Subscription: receiver, Type: ctx.irType(ret)}
 				ops := append([]Operation{}, receiverOps...)
 				ops = append(ops, next)
 				return next, ops, ret
 			case "arm_wait":
 				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				arm := TopicArmWait{TopicLabel: label, Subscription: receiver}
+				if label == "" {
+					break
+				}
+				arm := TopicArmWait{TopicLabel: label, SubscriberSlot: ctx.subscriberSlotForValue(receiver, receiverType), Subscription: receiver}
 				ops := append([]Operation{}, receiverOps...)
 				ops = append(ops, arm)
 				return receiver, ops, ctx.resolveType(moduleName, "void")
+			case "is_wait_armed":
+				method := ctx.lookupMethod(recvType, e.Method)
+				ret := ctx.methodReturn(moduleName, method)
+				label, _ := ctx.topicLabelAndKindForValue(receiver)
+				if label == "" {
+					break
+				}
+				armed := TopicIsWaitArmed{TopicLabel: label, SubscriberSlot: ctx.subscriberSlotForValue(receiver, receiverType), Subscription: receiver, Type: ctx.irType(ret)}
+				ops := append([]Operation{}, receiverOps...)
+				ops = append(ops, armed)
+				return armed, ops, ret
 			}
 		}
 		if sem.IsLoopPolicyType(recvType) && e.Method == "wait" {
@@ -984,6 +1394,64 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			enter := VcpuEnter{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
 			return receiver, ops, ctx.resolveType(moduleName, "void")
+		}
+		if recvType != nil && recvType.Module == "machine.x86_64.cpu_state" && recvType.Name == "OwnedMemory" && e.Method == "claim_executor_arena" {
+			_, ownerOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "owner"))
+			length, lengthOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "length"))
+			align, alignOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "align"))
+			mutableBytesType := ctx.resolveType("machine.x86_64.executor_memory", "MutableBytes")
+			executorMemoryType := ctx.resolveType("machine.x86_64.executor_memory", "ExecutorMemory")
+			u64Type := ctx.resolveType(moduleName, "U64")
+			arenaField := ctx.lookupField(recvType, "arena")
+			addressField := ctx.lookupField(mutableBytesType, "address")
+			if arenaField == nil || addressField == nil {
+				ctx.errorf("claim_executor_arena missing memory arena fields")
+				return receiver, receiverOps, recvType
+			}
+			arena := &FieldLoad{
+				Object:     receiver,
+				ObjectType: recvType.Name,
+				Field:      "arena",
+				Type:       arenaField.Type,
+				Offset:     arenaField.Offset,
+			}
+			arenaBase := &FieldLoad{
+				Object:     arena,
+				ObjectType: mutableBytesType.Name,
+				Field:      "address",
+				Type:       addressField.Type,
+				Offset:     addressField.Offset,
+			}
+			zero := &ConstInt{Symbol: "const", Value: 0, Type: ctx.irType(u64Type)}
+			one := &ConstInt{Symbol: "const", Value: 1, Type: ctx.irType(u64Type)}
+			alignMinusOne := &Binary{Op: "sub", Left: align, Right: one, Type: ctx.irType(u64Type)}
+			adjustedBase := &Binary{Op: "add", Left: arenaBase, Right: alignMinusOne, Type: arenaBase.Type}
+			alignmentMask := &Binary{Op: "sub", Left: zero, Right: align, Type: ctx.irType(u64Type)}
+			arenaClaimBase := &Binary{Op: "and", Left: adjustedBase, Right: alignmentMask, Type: arenaBase.Type}
+			nextArenaBase := &Binary{Op: "add", Left: arenaClaimBase, Right: length, Type: arenaBase.Type}
+			arenaBaseStore := &FieldStore{
+				Object:     arena,
+				ObjectType: mutableBytesType.Name,
+				Field:      "address",
+				Value:      nextArenaBase,
+				Type:       arenaBase.Type,
+				Offset:     addressField.Offset,
+			}
+			construct := &Construct{
+				Symbol: "ExecutorMemory",
+				Type:   ctx.irType(executorMemoryType),
+				Fields: []FieldValue{
+					{Name: "arena_base", Value: arenaClaimBase},
+					{Name: "arena_length", Value: length},
+					{Name: "next_offset", Value: zero},
+				},
+			}
+			ops := append([]Operation{}, receiverOps...)
+			ops = append(ops, ownerOps...)
+			ops = append(ops, lengthOps...)
+			ops = append(ops, alignOps...)
+			ops = append(ops, arena, arenaBase, zero, one, alignMinusOne, adjustedBase, alignmentMask, arenaClaimBase, nextArenaBase, arenaBaseStore, construct)
+			return construct, ops, executorMemoryType
 		}
 		if sem.IsArenaType(recvType) {
 			switch e.Method {
@@ -1057,6 +1525,23 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 	}
 }
 
+func (ctx *lowerContext) irFieldOffset(objectType *sem.Type, fieldName string, fallback int) int {
+	if objectType == nil {
+		return fallback
+	}
+	info, ok := ctx.program.Types[typeInfoKey(objectType.Module, objectType.Name)]
+	if !ok {
+		info, ok = ctx.program.Types[objectType.Name]
+	}
+	if !ok {
+		return fallback
+	}
+	if field, ok := info.Fields[fieldName]; ok {
+		return field.Offset
+	}
+	return fallback
+}
+
 func (ctx *lowerContext) lowerCallArgs(moduleName string, receiverType *sem.Type, scope *lowerScope, method *sem.Method, args []ast.NamedArg) ([]Value, []Operation) {
 	_ = receiverType
 	var values []Value
@@ -1103,6 +1588,14 @@ func (ctx *lowerContext) lookupField(typ *sem.Type, fieldName string) *FieldInfo
 	return &field
 }
 
+func (ctx *lowerContext) tempLocal(prefix string, typ Type) *Local {
+	ctx.tempSeq++
+	return &Local{
+		Symbol: fmt.Sprintf("__%s_%d", prefix, ctx.tempSeq),
+		Type:   typ,
+	}
+}
+
 func (ctx *lowerContext) lookupMethod(typ *sem.Type, methodName string) *sem.Method {
 	if typ == nil {
 		return nil
@@ -1127,9 +1620,6 @@ func (ctx *lowerContext) interruptContextForExecutor(executorType *sem.Type) *In
 
 func (ctx *lowerContext) methodReturn(moduleName string, method *sem.Method) *sem.Type {
 	if method == nil || method.Return == nil {
-		if ctx.checked != nil && ctx.checked.OwnedRoot != nil {
-			return ctx.checked.OwnedRoot
-		}
 		return ctx.resolveType(moduleName, "void")
 	}
 	return method.Return

@@ -52,15 +52,17 @@ func TestHelloQEMU(t *testing.T) {
 	}
 
 	out, err := qemu.Run(qemu.Options{
-		QEMUBinary:  qemuBin,
-		OVMFCode:    firmware.Code,
-		OVMFVars:    vars,
-		ESPDir:      filepath.Join(tmp, "esp"),
-		ImagePath:   image,
-		InputText:   "!",
-		SuccessText: "serial interrupt: !",
-		Timeout:     qemuTimeout(),
-		EnableEdu:   true,
+		QEMUBinary:    qemuBin,
+		OVMFCode:      firmware.Code,
+		OVMFVars:      vars,
+		ESPDir:        filepath.Join(tmp, "esp"),
+		ImagePath:     image,
+		UseSerialPipe: true,
+		InputText:     "!",
+		KeepInputOpen: true,
+		SuccessText:   "serial interrupt: !",
+		Timeout:       qemuTimeout(),
+		EnableEdu:     true,
 	})
 	if err != nil {
 		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
@@ -69,6 +71,9 @@ func TestHelloQEMU(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("serial output missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "serial interrupt: \x00") {
+		t.Fatalf("serial output contains spurious NUL receive event:\n%s", out)
 	}
 }
 
@@ -205,7 +210,9 @@ func TestHelloInterruptsQEMU(t *testing.T) {
 		OVMFVars:            vars,
 		ESPDir:              filepath.Join(tmp, "esp"),
 		ImagePath:           image,
+		UseSerialPipe:       true,
 		InputText:           "!",
+		KeepInputOpen:       true,
 		SuccessText:         "msix interrupt",
 		Timeout:             qemuTimeout(),
 		EnableEdu:           true,

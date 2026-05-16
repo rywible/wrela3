@@ -2,7 +2,7 @@ module tests.e2e.cache_memory
 
 use { DelegatedHardware } from platform.uefi.transition
 use { CacheArena } from machine.x86_64.cache_memory
-use { CpuPlan, DriverMemory, ExecutorPlacement, ExecutorSlot, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, ExecutorSlot, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
 
@@ -90,14 +90,12 @@ image CacheMemorySmoke {
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let arena = MutableBytes(address = 0x200000, length = 0x200000)
-        let executor_memory = ExecutorMemory(arena_base = arena.address, arena_length = arena.length, next_offset = 0)
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = arena),
             executor_arena = arena,
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            vcpu0 = ExecutorPlacement(id = 0, memory = executor_memory),
             owned_stack_top = arena.address + arena.length,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),

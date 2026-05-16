@@ -9,9 +9,9 @@
 
 ## CPU and interrupts
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.
-- v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, and ivshmem-doorbell via MSI-X on QEMU lab hardware.
+- v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, ivshmem-doorbell via MSI-X, AP startup, and explicit vCPU placement on QEMU lab hardware.
 - v0 still exposes no CPU traps.
-- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and multiprocessor routing.
+- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and hardware-derived multiprocessor routing beyond the static q35 two-vCPU shape.
 
 ## Hardware discovery
 - This is required for production and not optional because ACPI, PCIe, and framebuffer discovery are expected for realistic boots and platform integration.
@@ -24,9 +24,8 @@
 - v0 must not block: adding virtio, storage, network, and typed MMIO helpers must not require redesigning the driver/path graph semantics or relocation layout.
 
 ## Executor runtime
-- This is required for production and not optional because multi-executor scheduling and movement are core for practical systems workloads.
-- v0 exclusion reason: one executor path is sufficient to validate compiler and PE plumbing before adding runtime scheduling complexity.
-- v0 must not block: queueing, migration, and cross-executor movement should be introduced as additional runtime modules rather than replacing the current `executor` contract.
+- Implemented direction: executors are explicitly assigned to vCPUs through source-visible `ExecutorSlot` values and vCPU `start`/`enter` dispatch. Communication uses SPMC topics with compiler-planned cache-line layout and wake paths. There is no hidden scheduler, migration, or work stealing.
+- Remaining production work: dynamic hardware discovery beyond static q35 two-vCPU startup, richer topology placement, generalized topic payload typing, and production-grade monitor/mwait feature selection.
 
 ## Language/type system
 - This is required for production and not optional because richer ownership, traits, and phase modeling are essential for maintainable system code.

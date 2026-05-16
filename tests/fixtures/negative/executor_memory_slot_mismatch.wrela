@@ -2,18 +2,18 @@
 module negative.executor_memory_slot_mismatch
 
 module machine.x86_64.cpu_state
+use { ExecutorMemory } from machine.x86_64.executor_memory
 data SlotIdentity { label: StringLiteral }
 data ExecutorSlot { id: U64 }
 class ExecutorRegistry { fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) } }
+class OwnedMemory { asm fn claim_executor_arena(self, owner: ExecutorSlot) -> ExecutorMemory { ret } }
 
 module machine.x86_64.executor_memory
-use { ExecutorSlot } from machine.x86_64.cpu_state
 class ExecutorMemory {}
-class OwnedMemory { fn claim_executor_arena(self, owner: ExecutorSlot) -> ExecutorMemory { return ExecutorMemory() } }
 
 module negative.executor_memory_slot_mismatch.app
-use { ExecutorRegistry, ExecutorSlot, SlotIdentity } from machine.x86_64.cpu_state
-use { ExecutorMemory, OwnedMemory } from machine.x86_64.executor_memory
+use { ExecutorRegistry, ExecutorSlot, OwnedMemory, SlotIdentity } from machine.x86_64.cpu_state
+use { ExecutorMemory } from machine.x86_64.executor_memory
 
 executor Worker {
     slot: ExecutorSlot

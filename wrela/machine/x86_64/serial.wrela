@@ -46,6 +46,7 @@ unique driver SerialDriver {
 }
 
 data SerialPathInterrupt {
+    has_byte: Bool
     byte: U8
 }
 
@@ -58,12 +59,12 @@ class SerialRxTopic {
     identity: TopicIdentity
     id: U64
 
-    asm fn publisher(self) -> SerialRxPublisher {
-        ret
+    fn publisher(self) -> SerialRxPublisher {
+        return SerialRxPublisher(topic = self)
     }
 
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> SerialRxSubscription {
-        ret
+    fn subscribe(self, subscriber: ExecutorSlot) -> SerialRxSubscription {
+        return SerialRxSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
     }
 }
 
@@ -98,9 +99,10 @@ driver path SerialConsolePath {
     interrupt receiver -> SerialPathInterrupt {
         let status = self.registers.read8(offset = 5)
         if (status & 0x01) != 0 {
-            return SerialPathInterrupt(byte = self.registers.read8(offset = 0))
+            let value = self.registers.read8(offset = 0)
+            return SerialPathInterrupt(has_byte = true, byte = value)
         }
-        return SerialPathInterrupt(byte = 0)
+        return SerialPathInterrupt(has_byte = false, byte = 0)
     }
 
     fn enable_receive_interrupts(self) {

@@ -252,8 +252,8 @@ func TestInterruptIDTSourceShape(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	build := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "build_interrupt_idt")
 	for _, want := range []string{
-		"1040", "1056", "1072",
-		"vector40_handler", "vector41_handler", "vector42_handler",
+		"1040", "1056", "1072", "3856",
+		"vector40_handler", "vector41_handler", "vector42_handler", "vectorf0_handler",
 	} {
 		if !strings.Contains(build.Body, want) {
 			t.Fatalf("build_interrupt_idt missing %s:\n%s", want, build.Body)
@@ -724,9 +724,9 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 	files = append(files, source.NewFile(source.FileID(len(files)+1), "uefi-test-harness.wrela", `
 module codegen.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, ExecutorPlacement, IoPortAuthority } from machine.x86_64.cpu_state
+use { OwnedHardware, OwnedMemory, IoPortAuthority } from machine.x86_64.cpu_state
 use { MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
-use { MutableBytes, ExecutorMemory, Bytes } from machine.x86_64.executor_memory
+use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 
 image UefiCodegenHarness {
     transitions { delegated_hardware -> owned_hardware }
@@ -734,19 +734,12 @@ image UefiCodegenHarness {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let arena = MutableBytes(address = 0, length = 0)
         let owned_memory = OwnedMemory(arena = arena)
-        let exec_memory = ExecutorMemory(
-            arena_base = 0,
-            arena_length = 0,
-            next_offset = 0
-        )
-        let vcpu0 = ExecutorPlacement(id = 0, memory = exec_memory)
         let memory_plan = MemoryPlan(
             owned_memory = owned_memory,
             executor_arena = MutableBytes(address = 0, length = 0),
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            vcpu0 = vcpu0,
             owned_stack_top = 0,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),

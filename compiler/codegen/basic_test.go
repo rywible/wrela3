@@ -58,27 +58,27 @@ func TestCompilePreservesInterruptBindings(t *testing.T) {
 		Return: ir.Type{Name: "void", Module: "builtin", Kind: ir.TypeKindPrimitive},
 		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{&ir.Return{}}}},
 	}
-	handlerFn := ir.Function{
-		Symbol: "_wrela_test_interrupt_handler",
-		Return: ir.Type{Name: "void", Module: "builtin", Kind: ir.TypeKindPrimitive},
-		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{&ir.Return{}}}},
-	}
 	program := &ir.Program{
-		Functions: []ir.Function{eventFn, handlerFn},
+		Functions: []ir.Function{eventFn},
+		Topics: []ir.TopicLayout{{
+			Label: "test.irq",
+			Kind:  "test_irq",
+			Depth: 2,
+		}},
 		InterruptContexts: []ir.InterruptContext{{
 			Symbol: "_wrela_test_interrupt_context",
 			Size:   8,
 		}},
 		InterruptBindings: []ir.InterruptBinding{{
-			EventSymbol:           "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt",
-			HandlerSymbol:         "on_handler::examples.hello.program::HelloWorld::serial_path::interrupt",
-			EventFunctionSymbol:   eventFn.Symbol,
-			HandlerFunctionSymbol: handlerFn.Symbol,
-			PathFieldOffset:       8,
-			ContextSymbol:         "_wrela_test_interrupt_context",
-			EventStorageSize:      1,
-			EventStorageSymbol:    "_wrela_interrupt_event_40",
-			Vector:                0x40,
+			EventSymbol:         "interrupt_event::machine.x86_64.serial::SerialConsolePath::interrupt",
+			EventFunctionSymbol: eventFn.Symbol,
+			PathFieldOffset:     0,
+			ContextSymbol:       "_wrela_test_interrupt_context",
+			EventStorageSize:    1,
+			EventStorageSymbol:  "_wrela_interrupt_event_40",
+			Vector:              0x40,
+			TopicLabel:          "test.irq",
+			TopicKind:           "test_irq",
 		}},
 	}
 
@@ -90,10 +90,10 @@ func TestCompilePreservesInterruptBindings(t *testing.T) {
 		t.Fatalf("image interrupt bindings = %#v, want one", image.InterruptBindings)
 	}
 	got := image.InterruptBindings[0]
-	if got.Vector != 0x40 || got.PathFieldOffset != 8 || got.EventStorageSymbol != "_wrela_interrupt_event_40" {
+	if got.Vector != 0x40 || got.PathFieldOffset != 0 || got.EventStorageSymbol != "_wrela_interrupt_event_40" {
 		t.Fatalf("image interrupt binding = %#v", got)
 	}
-	if got.EventFunctionSymbol != program.InterruptBindings[0].EventFunctionSymbol || got.HandlerFunctionSymbol != program.InterruptBindings[0].HandlerFunctionSymbol {
+	if got.EventFunctionSymbol != program.InterruptBindings[0].EventFunctionSymbol || got.HandlerFunctionSymbol != "" || got.TopicLabel != "test.irq" {
 		t.Fatalf("image interrupt binding functions = %#v, want %#v", got, program.InterruptBindings[0])
 	}
 }

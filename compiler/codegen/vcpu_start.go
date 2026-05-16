@@ -16,11 +16,12 @@ const apTrampolineInstallSymbol = "_wrela_method_platform_uefi_types_DelegatedMe
 const apTrampolineVcpuStackSize = 16 * 1024
 
 const (
-	apTrampolinePML4Offset    = 0x7c
-	apTrampolineEntryOffset   = 0x80
-	apTrampolineStackOffset   = 0x84
-	apTrampolineContextOffset = 0x88
-	apTrampolineReadyOffset   = 0x8c
+	apTrampolinePML4Offset          = 0xa0
+	apTrampolineEntryOffset         = 0xa8
+	apTrampolineStackOffset         = 0xb0
+	apTrampolineContextOffset       = 0xb8
+	apTrampolineReadyOffset         = 0xc0
+	apTrampolineIDTDescriptorOffset = 0xe8
 )
 
 //go:embed testdata/ap_trampoline.bin
@@ -104,8 +105,10 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 }
 
 func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
+	emitLapicWrite(e, lapicSVR, 0x1ff)
+	e.emit(0xFB)
 	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
-	emitCallReloc(e, executorStartSymbol(ctx.VcpuPlans[op.SlotLabel].ExecutorType))
+	emitCallReloc(e, executorStartSymbolForPlan(ctx.VcpuPlans[op.SlotLabel], valueType(op.Executor)))
 	emitHltLoop(e)
 }
 
@@ -133,7 +136,7 @@ func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compi
 	if executorType.Name == "" {
 		executorType = valueType(op.Executor)
 	}
-	runSymbol := executorStartSymbol(executorType)
+	runSymbol := executorStartSymbolForPlan(ctx.VcpuPlans[op.SlotLabel], executorType)
 
 	// Reset and expose the startup record fields for debugging/inspection.
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), readySymbol)
@@ -153,22 +156,43 @@ func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compi
 	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
 
 	// Patch the SIPI-page handoff slots consumed by ap_trampoline.bin.
-	emitMovImmToReg(e, asm.MustLookup("r11"), apTrampolineBase)
+	trampolineBase := asm.MustLookup("r9")
+	emitMovImmToReg(e, trampolineBase, apTrampolineBase)
+	emitStoreIDTDescriptor(e, trampolineBase, apTrampolineIDTDescriptorOffset)
 	e.emit(0x0F, 0x20, 0xD8) // mov rax, cr3
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolinePML4Offset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolinePML4Offset, asm.MustLookup("rax"), 32)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), runSymbol)
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineEntryOffset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolineEntryOffset, asm.MustLookup("rax"), 64)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), stackSymbol)
 	emitAddImm(e, asm.MustLookup("rax"), apTrampolineVcpuStackSize)
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineStackOffset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolineStackOffset, asm.MustLookup("rax"), 64)
 	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rax"))
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineContextOffset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolineContextOffset, asm.MustLookup("rax"), 64)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), readySymbol)
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineReadyOffset, asm.MustLookup("rax"), 32)
+	emitStoreMemFromReg(e, trampolineBase, apTrampolineReadyOffset, asm.MustLookup("rax"), 64)
+}
+
+func emitStoreIDTDescriptor(e *Emitter, base asm.Reg, offset int64) {
+	if base.Name != "r9" {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "AP trampoline IDT descriptor patch requires r9 base"})
+		return
+	}
+	e.emit(0x41, 0x0F, 0x01, 0x89)
+	e.emitInt32(int32(offset))
 }
 
 func executorStartSymbol(typ ir.Type) string {
 	return codegenSymbolName("method", typ.Module, typ.Name, "run")
+}
+
+func executorStartSymbolForPlan(plan ir.VcpuStartPlan, fallback ir.Type) string {
+	if plan.EntrySymbol != "" {
+		return plan.EntrySymbol
+	}
+	if plan.ExecutorType.Name != "" {
+		return executorStartSymbol(plan.ExecutorType)
+	}
+	return executorStartSymbol(fallback)
 }
 
 func emitHltLoop(e *Emitter) {
@@ -210,11 +234,18 @@ func emitWaitForVcpuReady(e *Emitter, vcpuID int) {
 }
 
 func emitStoreVcpuStartStatus(e *Emitter, op *ir.VcpuStart, frame Frame) {
-	slot, ok := frame.Slots[op]
+	valueSlot, ok := frameSlot(frame, op)
 	if !ok {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing vcpu start status slot"})
 		return
 	}
+	slot, ok := frameObjectSlot(frame, op)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing vcpu start status object slot"})
+		return
+	}
+	emitSlotFromBase(e, asm.MustLookup("r10"), asm.MustLookup("rbp"), slot)
+	emitStoreSlotFromReg(e, asm.MustLookup("r10"), valueSlot, 64)
 	emitMovImmToReg(e, asm.MustLookup("rax"), 1)
 	emitStoreSlotFromReg(e, asm.MustLookup("rax"), slot, 8)
 	emitMovImmToReg(e, asm.MustLookup("rax"), int64(op.VcpuID))

@@ -61,19 +61,47 @@ func TestAPTrampolineBlobContract(t *testing.T) {
 		t.Fatalf("AP trampoline must fit in one 4KiB SIPI page, got %d bytes", len(blob))
 	}
 	for _, want := range [][]byte{
-		{0xFA},       // cli
-		{0x0F, 0x01}, // lgdt shape
-		{0x0F, 0x22}, // mov to control register shape
-		{0x0F, 0x30}, // wrmsr
-		{0xFF, 0xD0}, // call rax handoff
-		{0xF4},       // hlt fallback
+		{0xFA},                               // cli
+		{0x0F, 0x01},                         // lgdt shape
+		{0x0F, 0x01, 0x1D},                   // lidt owned IDT shape
+		{0x0F, 0x22},                         // mov to control register shape
+		{0x0F, 0x30},                         // wrmsr
+		{0x66, 0xB8, 0x33, 0x00, 0x01, 0x80}, // CR0 owned-mode value
+		{0x48, 0x8B, 0x3D},                   // 64-bit context pointer load
+		{0x48, 0x8B, 0x05},                   // 64-bit entry/stack pointer loads
+		{0x41, 0xBB, 0x00, 0x00, 0xE0, 0xFE}, // AP local APIC base
+		{0xB8, 0xFF, 0x01, 0x00, 0x00},       // AP local APIC SVR enable value
+		{0xFB},                               // sti before executor handoff
+		{0xFF, 0xD0},                         // call rax handoff
+		{0xF4},                               // hlt fallback
 	} {
 		if !bytes.Contains(blob, want) {
 			t.Fatalf("trampoline missing byte shape %x in %x", want, blob)
 		}
 	}
-	if len(blob) <= apTrampolineReadyOffset+4 {
+	if len(blob) <= apTrampolineReadyOffset+8 {
 		t.Fatalf("trampoline too short for ready metadata slot: %d", len(blob))
+	}
+	if len(blob) < apTrampolineIDTDescriptorOffset+10 {
+		t.Fatalf("trampoline too short for IDT descriptor metadata slot: %d", len(blob))
+	}
+	if !bytes.Equal(blob[0x10:0x12], []byte{0xC8, 0x80}) {
+		t.Fatalf("trampoline lgdt must address installed SIPI page metadata, got %x", blob[0x10:0x12])
+	}
+	if !bytes.Equal(blob[0x1e:0x20], []byte{0xA0, 0x80}) {
+		t.Fatalf("trampoline CR3 load must address installed SIPI page metadata, got %x", blob[0x1e:0x20])
+	}
+	if !bytes.Equal(blob[apTrampolinePML4Offset:apTrampolinePML4Offset+16], make([]byte, 16)) {
+		t.Fatalf("trampoline handoff metadata must start at %#x", apTrampolinePML4Offset)
+	}
+	if !bytes.Equal(blob[apTrampolineReadyOffset+8:apTrampolineReadyOffset+14], []byte{0x17, 0x00, 0xd0, 0x80, 0x00, 0x00}) {
+		t.Fatalf("trampoline ready offset must precede the checked-in GDT descriptor, got %x", blob[apTrampolineReadyOffset+8:apTrampolineReadyOffset+14])
+	}
+	if !bytes.Equal(blob[apTrampolineReadyOffset+24:apTrampolineReadyOffset+30], []byte{0xff, 0xff, 0x00, 0x00, 0x00, 0x9a}) {
+		t.Fatalf("trampoline GDT code descriptor must remain checked in, got %x", blob[apTrampolineReadyOffset+24:apTrampolineReadyOffset+30])
+	}
+	if !bytes.Equal(blob[apTrampolineIDTDescriptorOffset:apTrampolineIDTDescriptorOffset+10], make([]byte, 10)) {
+		t.Fatalf("trampoline IDT descriptor slot must start at %#x", apTrampolineIDTDescriptorOffset)
 	}
 }
 
@@ -100,6 +128,12 @@ func TestVcpuEnterCallsExecutorStartAndHaltsIfReturned(t *testing.T) {
 		t.Fatalf("Compile diagnostics: %#v", ds)
 	}
 	code := symbolBytes(t, image, "enter_hello")
+	if !bytes.Contains(code, []byte{0xB8, 0xFF, 0x01, 0x00, 0x00}) {
+		t.Fatalf("enter must enable the BSP local APIC before executor handoff: %x", code)
+	}
+	if !bytes.Contains(code, []byte{0xFB}) {
+		t.Fatalf("enter must enable interrupts before executor handoff: %x", code)
+	}
 	if !bytes.Contains(code, []byte{0xF4}) {
 		t.Fatalf("enter must contain hlt fallback if executor returns: %x", code)
 	}
@@ -145,6 +179,18 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 		if !codeReferencesSymbol(t, image, "start_worker", symbol) {
 			t.Fatalf("start_worker missing reference to %s", symbol)
 		}
+	}
+	if !bytes.Contains(code, []byte{0x41, 0x89, 0x81, apTrampolinePML4Offset, 0x00, 0x00, 0x00}) {
+		t.Fatalf("start_worker must patch trampoline CR3 metadata through stable r9 base: %x", code)
+	}
+	for _, offset := range []byte{apTrampolineEntryOffset, apTrampolineStackOffset, apTrampolineContextOffset, apTrampolineReadyOffset} {
+		wantStore := []byte{0x49, 0x89, 0x81, offset, 0x00, 0x00, 0x00}
+		if !bytes.Contains(code, wantStore) {
+			t.Fatalf("start_worker must patch 64-bit trampoline offset %#x through stable r9 base; missing %x in %x", offset, wantStore, code)
+		}
+	}
+	if !bytes.Contains(code, []byte{0x41, 0x0F, 0x01, 0x89, apTrampolineIDTDescriptorOffset, 0x00, 0x00, 0x00}) {
+		t.Fatalf("start_worker must patch AP trampoline IDT descriptor through stable r9 base: %x", code)
 	}
 }
 

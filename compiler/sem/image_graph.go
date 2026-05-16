@@ -47,6 +47,7 @@ type ExecutorSlotNode struct {
 type TopicNode struct {
 	Label   string
 	Kind    string
+	Depth   uint64
 	Binding string
 	Span    source.Span
 }
@@ -100,6 +101,12 @@ type InterruptTopicRouteNode struct {
 	Span                source.Span
 }
 
+type InterruptConfiguratorNode struct {
+	TopicKind string
+	Vector    int
+	Span      source.Span
+}
+
 type VcpuPlacementNode struct {
 	VcpuID          int
 	ExecutorBinding string
@@ -120,6 +127,7 @@ type ImageGraph struct {
 	ReliableTryPublishCalls []ReliableTryPublishCallNode
 	Paths                   []PathNode
 	InterruptTopicRoutes    []InterruptTopicRouteNode
+	InterruptConfigurators  []InterruptConfiguratorNode
 	VcpuPlacements          []VcpuPlacementNode
 }
 

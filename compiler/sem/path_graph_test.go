@@ -39,7 +39,7 @@ image Bad {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let serial = SerialDriver()
         let hello = HelloWorld(serial = serial)
-        hello.run()
+        while true {}
     }
 }
 `
@@ -64,18 +64,12 @@ image Bad {
 		src := `
 module index.path_twice
 
-data ExecutorPlacement {
-    id: U64
-}
-
 data Bytes {
     address: U64
     length: U64
 }
 
-driver path SerialWritePath {
-    owner: ExecutorPlacement
-}
+driver path SerialWritePath {}
 
 executor A {
     serial_path: SerialWritePath
@@ -108,11 +102,10 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+        let serial_path = SerialWritePath()
         let a = A(serial_path = serial_path)
         let b = B(serial_path = serial_path)
-        a.run()
-        b.run()
+        while true {}
     }
 }
 `
@@ -122,13 +115,16 @@ image Bad {
 			t.Fatalf("index diagnostics: %#v", ds)
 		}
 		_, diags := Check(index, modules)
-		if !hasCode(diags, diag.SEM0011) {
-			t.Fatalf("expected SEM0011, got %#v", diags)
+		if hasCode(diags, diag.SEM0011) {
+			t.Fatalf("unexpected legacy SEM0011 for shared driver path: %#v", diags)
+		}
+		if !hasCode(diags, diag.SEM0038) {
+			t.Fatalf("expected SEM0038, got %#v", diags)
 		}
 		wantStart := strings.LastIndex(src, "serial_path = serial_path")
 		for _, d := range diags {
-			if d.Code == diag.SEM0011 && d.Start != wantStart {
-				t.Fatalf("SEM0011 start = %d, want duplicate field binding start %d: %#v", d.Start, wantStart, d)
+			if d.Code == diag.SEM0038 && d.Start != wantStart {
+				t.Fatalf("SEM0038 start = %d, want duplicate field binding start %d: %#v", d.Start, wantStart, d)
 			}
 		}
 	})
@@ -137,13 +133,7 @@ image Bad {
 		src := `
 module index.path_unowned
 
-data ExecutorPlacement {
-    id: U64
-}
-
-driver path SerialWritePath {
-    owner: ExecutorPlacement
-}
+driver path SerialWritePath {}
 
 unique class OwnedHardware {}
 unique class DelegatedHardware {
@@ -160,7 +150,7 @@ image Bad {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+        let serial_path = SerialWritePath()
         while true {}
     }
 }
@@ -171,8 +161,8 @@ image Bad {
 			t.Fatalf("index diagnostics: %#v", ds)
 		}
 		_, diags := Check(index, modules)
-		if !hasCode(diags, diag.SEM0011) {
-			t.Fatalf("expected SEM0011 for unowned driver path, got %#v", diags)
+		if hasCode(diags, diag.SEM0011) {
+			t.Fatalf("unexpected legacy SEM0011 for unowned driver path, got %#v", diags)
 		}
 	})
 
@@ -180,13 +170,7 @@ image Bad {
 		src := `
 module index.path_direct_constructor
 
-data ExecutorPlacement {
-    id: U64
-}
-
-driver path SerialWritePath {
-    owner: ExecutorPlacement
-}
+driver path SerialWritePath {}
 
 executor A {
     serial_path: SerialWritePath
@@ -211,8 +195,8 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let a = A(serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0)))
-        a.run()
+        let a = A(serial_path = SerialWritePath())
+        while true {}
     }
 }
 `
@@ -231,13 +215,7 @@ image Good {
 		src := `
 module index.path_alias
 
-data ExecutorPlacement {
-    id: U64
-}
-
-driver path SerialWritePath {
-    owner: ExecutorPlacement
-}
+driver path SerialWritePath {}
 
 executor A {
     serial_path: SerialWritePath
@@ -262,10 +240,10 @@ image Good {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let original = SerialWritePath(owner = ExecutorPlacement(id = 0))
+        let original = SerialWritePath()
         let serial_path = original
         let a = A(serial_path = serial_path)
-        a.run()
+        while true {}
     }
 }
 `
@@ -284,16 +262,11 @@ image Good {
 		src := `
 module index.path_nested_owned
 
-data ExecutorPlacement {
-    id: U64
-}
-
 driver path Registers {
     port: U16
 }
 
 driver path SerialWritePath {
-    owner: ExecutorPlacement
     registers: Registers
 }
 
@@ -330,9 +303,9 @@ image Good {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let registers = Registers(port = 0x3F8)
         let serial_driver = SerialDriver(registers = registers).initialize()
-        let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0), registers = serial_driver.registers)
+        let serial_path = SerialWritePath(registers = serial_driver.registers)
         let a = A(serial_path = serial_path)
-        a.run()
+        while true {}
     }
 }
 `
@@ -351,13 +324,7 @@ image Good {
 		src := `
 module index.path_same_name_scopes
 
-data ExecutorPlacement {
-    id: U64
-}
-
-driver path SerialWritePath {
-    owner: ExecutorPlacement
-}
+driver path SerialWritePath {}
 
 executor A {
     serial_path: SerialWritePath
@@ -391,14 +358,12 @@ image Good {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         if true {
-            let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 0))
+            let serial_path = SerialWritePath()
             let a = A(serial_path = serial_path)
-            a.run()
         }
         if true {
-            let serial_path = SerialWritePath(owner = ExecutorPlacement(id = 1))
+            let serial_path = SerialWritePath()
             let b = B(serial_path = serial_path)
-            b.run()
         }
         while true {}
     }

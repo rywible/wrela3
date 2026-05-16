@@ -214,6 +214,7 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		"vector40_handler",
 		"vector41_handler",
 		"vector42_handler",
+		"vectorf0_handler",
 		"mov r14, vector41_handler",
 		"mov r15, vector42_handler",
 		"256",
@@ -223,6 +224,8 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 		"mov r13, r14",
 		"1072",
 		"mov r13, r15",
+		"3856",
+		"mov r13, vectorf0_handler",
 		"mov [r10 + 0], r11",
 		"mov [r10 + 8], 4112",
 		"mov rax, r10",
@@ -364,9 +367,9 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 	files = append(files, source.NewFile(source.FileID(len(files)+1), "uefi-test-harness.wrela", `
 module sem.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, ExecutorPlacement, IoPortAuthority } from machine.x86_64.cpu_state
+use { OwnedHardware, OwnedMemory, IoPortAuthority } from machine.x86_64.cpu_state
 use { MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
-use { MutableBytes, ExecutorMemory, Bytes } from machine.x86_64.executor_memory
+use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 
 image UefiSourceHarness {
     transitions { delegated_hardware -> owned_hardware }
@@ -374,19 +377,12 @@ image UefiSourceHarness {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let arena = MutableBytes(address = 0, length = 0)
         let owned_memory = OwnedMemory(arena = arena)
-        let exec_memory = ExecutorMemory(
-            arena_base = 0,
-            arena_length = 0,
-            next_offset = 0
-        )
-        let vcpu0 = ExecutorPlacement(id = 0, memory = exec_memory)
         let memory_plan = MemoryPlan(
             owned_memory = owned_memory,
             executor_arena = MutableBytes(address = 0, length = 0),
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            vcpu0 = vcpu0,
             owned_stack_top = 0,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),

@@ -2,6 +2,7 @@ package sem
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -37,11 +38,15 @@ type localOrigin struct {
 	MemoryOwnerLabel    string
 	TopicLabel          string
 	TopicKind           string
+	TopicDepth          uint64
 	PathLabel           string
+	PublishesInterrupts bool
 	EventType           string
 	EventFunctionSymbol string
 	VcpuID              int
 	HasVcpuID           bool
+	ExecutorBinding     string
+	TerminalVcpu        bool
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -572,8 +577,15 @@ func (c *checker) checkStmtList(moduleName string, stmts []ast.Stmt, scope *Scop
 		if c.checkStmt(moduleName, stmt, scope, expectedReturn, ctx) {
 			terminates = true
 		}
-		if ctx == ContextImagePhaseDirect && isVcpuEnterExprStmt(stmt) {
-			afterVcpuEnter = true
+		if ctx == ContextImagePhaseDirect {
+			if isVcpuEnterExprStmt(stmt) {
+				afterVcpuEnter = true
+				continue
+			}
+			if span, ok := stmtVcpuEnterSpan(stmt); ok {
+				c.error(span, diag.SEM0036, "vCPU enter must be the final reachable statement in the phase")
+				afterVcpuEnter = true
+			}
 		}
 	}
 	return terminates
@@ -586,6 +598,89 @@ func isVcpuEnterExprStmt(stmt ast.Stmt) bool {
 	}
 	call, ok := exprStmt.Expr.(*ast.CallExpr)
 	return ok && call.Method == "enter"
+}
+
+func stmtVcpuEnterSpan(stmt ast.Stmt) (source.Span, bool) {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		return exprVcpuEnterSpan(s.Expr)
+	case *ast.AssignStmt:
+		if span, ok := exprVcpuEnterSpan(s.Target); ok {
+			return span, true
+		}
+		return exprVcpuEnterSpan(s.Value)
+	case *ast.ReturnStmt:
+		return exprVcpuEnterSpan(s.Value)
+	case *ast.ExprStmt:
+		return exprVcpuEnterSpan(s.Expr)
+	case *ast.IfStmt:
+		if span, ok := exprVcpuEnterSpan(s.Cond); ok {
+			return span, true
+		}
+		if span, ok := stmtListVcpuEnterSpan(s.Then); ok {
+			return span, true
+		}
+		return stmtListVcpuEnterSpan(s.Else)
+	case *ast.WhileStmt:
+		if span, ok := exprVcpuEnterSpan(s.Cond); ok {
+			return span, true
+		}
+		return stmtListVcpuEnterSpan(s.Body)
+	case *ast.ForStmt:
+		if span, ok := exprVcpuEnterSpan(s.InExpr); ok {
+			return span, true
+		}
+		return stmtListVcpuEnterSpan(s.Body)
+	case *ast.WithStmt:
+		if span, ok := exprVcpuEnterSpan(s.Expr); ok {
+			return span, true
+		}
+		return stmtListVcpuEnterSpan(s.Body)
+	default:
+		return source.Span{}, false
+	}
+}
+
+func stmtListVcpuEnterSpan(stmts []ast.Stmt) (source.Span, bool) {
+	for _, stmt := range stmts {
+		if span, ok := stmtVcpuEnterSpan(stmt); ok {
+			return span, true
+		}
+	}
+	return source.Span{}, false
+}
+
+func exprVcpuEnterSpan(expr ast.Expr) (source.Span, bool) {
+	switch e := expr.(type) {
+	case nil:
+		return source.Span{}, false
+	case *ast.CallExpr:
+		if e.Method == "enter" {
+			return e.SpanV, true
+		}
+		if span, ok := exprVcpuEnterSpan(e.Receiver); ok {
+			return span, true
+		}
+		for _, arg := range e.Args {
+			if span, ok := exprVcpuEnterSpan(arg.Value); ok {
+				return span, true
+			}
+		}
+	case *ast.ConstructorExpr:
+		for _, arg := range e.Args {
+			if span, ok := exprVcpuEnterSpan(arg.Value); ok {
+				return span, true
+			}
+		}
+	case *ast.FieldExpr:
+		return exprVcpuEnterSpan(e.Base)
+	case *ast.BinaryExpr:
+		if span, ok := exprVcpuEnterSpan(e.Left); ok {
+			return span, true
+		}
+		return exprVcpuEnterSpan(e.Right)
+	}
+	return source.Span{}, false
 }
 
 func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {
@@ -724,8 +819,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 	case *ast.ExprStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
 		if ctx == ContextImagePhaseDirect {
-			c.recordGraphFromExprStmt(s.Expr, scope)
+			c.recordGraphFromExprStmt(moduleName, s.Expr, scope)
 		} else {
+			c.recordInterruptConfiguratorCall(moduleName, exprStmtCall(s.Expr), scope)
 			c.recordReliableTryPublishCall(moduleName, s.Expr, scope, false)
 			c.recordSubscriptionMethodCall(moduleName, s.Expr, scope)
 		}
@@ -846,20 +942,9 @@ func (c *checker) checkExecutorWiring() {
 			name = path.Type.Name
 		}
 		if len(owners) == 0 {
-			c.error(path.Span, diag.SEM0011, "driver path "+name+" is not assigned to an executor")
 			continue
 		}
-		c.error(secondDriverPathOwnerSpan(owners, path.Span), diag.SEM0011, "driver path "+name+" is assigned to more than one executor")
 		c.error(secondDriverPathOwnerSpan(owners, path.Span), diag.SEM0038, "driver path "+name+" is assigned to more than one executor")
-	}
-	for key, owners := range pathOwners {
-		if _, ok := constructedPaths[key]; ok {
-			continue
-		}
-		for _, owner := range owners {
-			c.error(owner.span, diag.SEM0011, "driver path assigned to executor "+owner.executor+" was not constructed in the image phase")
-			break
-		}
 	}
 }
 
@@ -898,6 +983,10 @@ func (c *checker) checkDuplicateGraphLabels() {
 	c.checkDuplicateLabels("executor slot", executorSlotLabels(c.graph.ExecutorSlots))
 	c.checkDuplicateLabels("path", pathLabels(c.graph.Paths))
 	c.checkDuplicateLabels("topic", topicLabels(c.graph.Topics))
+	c.checkDuplicateGeneratedLabels("executor slot", executorSlotLabels(c.graph.ExecutorSlots))
+	c.checkDuplicateGeneratedLabels("path", pathLabels(c.graph.Paths))
+	c.checkDuplicateGeneratedLabels("topic", topicLabels(c.graph.Topics))
+	c.checkCrossKindDuplicateLabels()
 }
 
 func (c *checker) checkDuplicateLabels(kind string, labels []graphLabel) {
@@ -912,6 +1001,35 @@ func (c *checker) checkDuplicateLabels(kind string, labels []graphLabel) {
 		}
 		seen[label.value] = label.span
 	}
+}
+
+func (c *checker) checkDuplicateGeneratedLabels(kind string, labels []graphLabel) {
+	seen := map[string]graphLabel{}
+	for _, label := range labels {
+		if label.value == "" {
+			continue
+		}
+		generated := graphGeneratedLabel(label.value)
+		if previous, ok := seen[generated]; ok && previous.value != label.value {
+			c.error(label.span, diag.SEM0033, "duplicate "+kind+" label "+label.value+" after symbol sanitization")
+			continue
+		}
+		if _, ok := seen[generated]; !ok {
+			seen[generated] = label
+		}
+	}
+}
+
+func graphGeneratedLabel(label string) string {
+	var b strings.Builder
+	for _, r := range label {
+		if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	return b.String()
 }
 
 type graphLabel struct {
@@ -943,10 +1061,41 @@ func topicLabels(topics []TopicNode) []graphLabel {
 	return out
 }
 
+func (c *checker) checkCrossKindDuplicateLabels() {
+	seen := map[string]string{}
+	for _, group := range []struct {
+		kind   string
+		labels []graphLabel
+	}{
+		{kind: "executor slot", labels: executorSlotLabels(c.graph.ExecutorSlots)},
+		{kind: "path", labels: pathLabels(c.graph.Paths)},
+		{kind: "topic", labels: topicLabels(c.graph.Topics)},
+	} {
+		for _, label := range group.labels {
+			if label.value == "" {
+				continue
+			}
+			kind, ok := seen[label.value]
+			if ok && kind != group.kind {
+				c.error(label.span, diag.SEM0033, "duplicate graph label "+label.value)
+				continue
+			}
+			if !ok {
+				seen[label.value] = group.kind
+			}
+		}
+	}
+}
+
 func (c *checker) checkSlotBindingsAndPlacements() {
 	execCounts := map[string]int{}
 	execSpans := map[string]source.Span{}
 	for _, exec := range c.graph.Executors {
+		if exec.Type != nil && exec.SlotLabel == "" {
+			if span, ok := executorSlotFieldSpan(exec); ok {
+				c.error(span, diag.SEM0035, "executor "+exec.Type.Name+" uses an unclaimed executor slot")
+			}
+		}
 		if exec.SlotLabel == "" {
 			continue
 		}
@@ -957,6 +1106,9 @@ func (c *checker) checkSlotBindingsAndPlacements() {
 	placementSpans := map[string]source.Span{}
 	for _, placement := range c.graph.VcpuPlacements {
 		if placement.SlotLabel == "" {
+			if placement.ExecutorBinding != "" {
+				c.error(placement.Span, diag.SEM0035, "executor "+placement.ExecutorBinding+" must declare an ExecutorSlot field")
+			}
 			continue
 		}
 		placementCounts[placement.SlotLabel]++
@@ -973,6 +1125,18 @@ func (c *checker) checkSlotBindingsAndPlacements() {
 			c.error(nonZeroSpan(placementSpans[slot.Label], slot.Span), diag.SEM0034, "executor slot "+slot.Label+" must be placed on exactly one vCPU")
 		}
 	}
+}
+
+func executorSlotFieldSpan(exec ExecutorNode) (source.Span, bool) {
+	if exec.Type == nil {
+		return source.Span{}, false
+	}
+	for _, field := range exec.Type.Fields {
+		if IsExecutorSlotType(field.Type) {
+			return nonZeroSpan(exec.FieldSpans[field.Name], exec.Span), true
+		}
+	}
+	return source.Span{}, false
 }
 
 func (c *checker) checkSubscriptionSlotBindings() {
@@ -999,7 +1163,17 @@ func (c *checker) checkSubscriptionSlotBindings() {
 
 func (c *checker) checkVcpuPlacements() {
 	byVcpu := map[int]VcpuPlacementNode{}
+	hasPlacement := false
+	hasBootstrapEnter := false
+	var firstSpan source.Span
 	for i, placement := range c.graph.VcpuPlacements {
+		if !hasPlacement {
+			firstSpan = placement.Span
+		}
+		hasPlacement = true
+		if placement.VcpuID == 0 && placement.Terminal {
+			hasBootstrapEnter = true
+		}
 		if i > 0 && c.graph.VcpuPlacements[i-1].Terminal {
 			c.error(placement.Span, diag.SEM0036, "vCPU enter must be the final reachable statement in the phase")
 		}
@@ -1007,23 +1181,53 @@ func (c *checker) checkVcpuPlacements() {
 			c.error(nonZeroSpan(placement.Span, previous.Span), diag.SEM0037, fmt.Sprintf("vCPU %d starts more than one executor", placement.VcpuID))
 			continue
 		}
+		if placement.VcpuID == 0 && !placement.Terminal {
+			c.error(placement.Span, diag.SEM0036, "vCPU 0 must enter its executor")
+		}
+		if placement.VcpuID != 0 && placement.Terminal {
+			c.error(placement.Span, diag.SEM0036, fmt.Sprintf("vCPU %d must start its executor", placement.VcpuID))
+		}
 		byVcpu[placement.VcpuID] = placement
+	}
+	if hasPlacement && !hasBootstrapEnter {
+		c.error(firstSpan, diag.SEM0036, "vCPU 0 must enter its executor")
 	}
 }
 
 func (c *checker) checkPublisherBindings() {
 	uses := map[string][]source.Span{}
+	publishers := map[string]TopicPublisherNode{}
+	for _, pub := range c.graph.TopicPublishers {
+		if pub.Binding != "" {
+			publishers[pub.Binding] = pub
+		}
+	}
+	topicUses := map[string][]source.Span{}
 	for _, exec := range c.graph.Executors {
 		for field, binding := range exec.FieldBindings {
 			if binding == "" || !IsTopicPublisherType(exec.BoundTypes[field]) {
 				continue
 			}
-			uses[binding] = append(uses[binding], nonZeroSpan(exec.FieldSpans[field], exec.Span))
+			span := nonZeroSpan(exec.FieldSpans[field], exec.Span)
+			uses[binding] = append(uses[binding], span)
+			if pub := publishers[binding]; pub.TopicLabel != "" {
+				topicUses[pub.TopicLabel] = append(topicUses[pub.TopicLabel], span)
+			}
+		}
+	}
+	for _, route := range c.graph.InterruptTopicRoutes {
+		if route.TopicLabel != "" {
+			topicUses[route.TopicLabel] = append(topicUses[route.TopicLabel], route.Span)
 		}
 	}
 	for binding, spans := range uses {
 		if len(spans) > 1 {
 			c.error(spans[1], diag.SEM0039, "publisher "+binding+" is assigned to more than one producer field")
+		}
+	}
+	for label, spans := range topicUses {
+		if len(spans) > 1 {
+			c.error(spans[1], diag.SEM0039, "topic "+label+" is assigned to more than one producer field")
 		}
 	}
 }
@@ -1096,17 +1300,52 @@ func (c *checker) checkReliableTryPublishCalls() {
 
 func (c *checker) checkExecutorMemoryOwners() {
 	for _, exec := range c.graph.Executors {
+		span, hasMemory := executorMemoryFieldSpan(exec)
+		if !hasMemory {
+			continue
+		}
+		if exec.SlotLabel != "" && exec.MemoryOwnerLabel == "" {
+			c.error(span, diag.SEM0047, "executor "+exec.Type.Name+" memory must be claimed for slot "+exec.SlotLabel)
+			continue
+		}
 		if exec.SlotLabel == "" || exec.MemoryOwnerLabel == "" || exec.SlotLabel == exec.MemoryOwnerLabel {
 			continue
 		}
-		c.error(exec.Span, diag.SEM0047, "executor "+exec.Type.Name+" memory is owned by "+exec.MemoryOwnerLabel+" but slot is "+exec.SlotLabel)
+		c.error(span, diag.SEM0047, "executor "+exec.Type.Name+" memory is owned by "+exec.MemoryOwnerLabel+" but slot is "+exec.SlotLabel)
 	}
+}
+
+func executorMemoryFieldSpan(exec ExecutorNode) (source.Span, bool) {
+	if exec.Type == nil {
+		return source.Span{}, false
+	}
+	for _, field := range exec.Type.Fields {
+		if qualifiedTypeName(field.Type) == "machine.x86_64.executor_memory.ExecutorMemory" {
+			return nonZeroSpan(exec.FieldSpans[field.Name], exec.Span), true
+		}
+	}
+	return source.Span{}, false
 }
 
 func (c *checker) checkPublishingIdentities() {
 	for _, path := range c.graph.Paths {
 		if path.PublishesInterrupts && path.Label == "" {
 			c.error(path.Span, diag.SEM0048, "publishing path "+path.Binding+" is missing identity")
+		}
+	}
+	for _, path := range c.graph.Paths {
+		if !path.PublishesInterrupts || path.Label == "" {
+			continue
+		}
+		hasRoute := false
+		for _, route := range c.graph.InterruptTopicRoutes {
+			if route.PathBinding == path.Binding {
+				hasRoute = true
+				break
+			}
+		}
+		if !hasRoute {
+			c.error(path.Span, diag.SEM0048, "publishing topic "+path.Binding+" is missing identity")
 		}
 	}
 	for _, pub := range c.graph.TopicPublishers {
@@ -1135,19 +1374,6 @@ func interruptVector(path *Type) (uint8, bool) {
 	case "machine.x86_64.edu.EduMsiPath":
 		return 0x41, true
 	case "machine.x86_64.ivshmem.IvshmemMsixPath":
-		return 0x42, true
-	default:
-		return 0, false
-	}
-}
-
-func vectorForInterruptTopicKind(kind string) (uint8, bool) {
-	switch kind {
-	case "serial_rx":
-		return 0x40, true
-	case "edu_interrupt":
-		return 0x41, true
-	case "ivshmem_doorbell":
 		return 0x42, true
 	default:
 		return 0, false
@@ -1417,11 +1643,17 @@ func namedArgExpr(args []ast.NamedArg, name string) ast.Expr {
 	return nil
 }
 
-func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
+func (c *checker) originForExprValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
 	switch e := expr.(type) {
 	case *ast.ConstructorExpr:
+		if valueType == nil {
+			valueType = c.exprStaticType(moduleName, expr, scope)
+		}
 		return c.originForConstructor(moduleName, e, valueType, scope)
 	case *ast.CallExpr:
+		if valueType == nil {
+			valueType = c.exprStaticType(moduleName, expr, scope)
+		}
 		return c.originForCall(moduleName, e, valueType, scope)
 	case *ast.NameExpr:
 		if origin, ok := scope.LookupOrigin(e.Name); ok {
@@ -1429,6 +1661,10 @@ func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType 
 		}
 	}
 	return localOrigin{Type: valueType}
+}
+
+func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
+	return c.originForExprValue(moduleName, expr, valueType, scope)
 }
 
 func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) localOrigin {
@@ -1448,9 +1684,17 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	}
 	if IsTopicType(typ) {
 		origin.TopicKind = topicKindForType(typ)
+		origin.TopicDepth = 64
 		if identity := constructorArg(expr, "identity"); identity != nil {
 			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
 				origin.TopicLabel, _ = stringLiteralArg(identityConstructor, "label")
+			}
+		}
+		if depth := constructorArg(expr, "depth"); depth != nil {
+			if value, ok := unsignedIntegerLiteral(depth); ok {
+				origin.TopicDepth = value
+			} else {
+				origin.TopicDepth = 0
 			}
 		}
 	}
@@ -1461,14 +1705,15 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 			}
 		}
 		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(typ)
-		if publisher := pathPublisherOrigin(expr, scope); publisher.Type != nil {
+		if publisher := c.pathPublisherOrigin(moduleName, expr, scope); publisher.Type != nil {
+			origin.PublishesInterrupts = true
 			origin.TopicLabel = publisher.TopicLabel
 			origin.TopicKind = publisher.TopicKind
 		}
 	}
 	if typ.Kind == KindExecutor {
-		origin.SlotLabel = slotLabelForExpr(constructorArg(expr, "slot"), scope)
-		origin.MemoryOwnerLabel = slotLabelForExpr(constructorArg(expr, "memory"), scope)
+		origin.SlotLabel = c.slotLabelForExpr(moduleName, constructorArg(expr, "slot"), scope)
+		origin.MemoryOwnerLabel = c.slotLabelForExpr(moduleName, constructorArg(expr, "memory"), scope)
 		if loopType := c.exprStaticType(moduleName, constructorArg(expr, "loop"), scope); loopType != nil {
 			origin.LoopPolicy = loopType.Name
 		}
@@ -1488,17 +1733,30 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		if cons, ok := identity.(*ast.ConstructorExpr); ok {
 			origin.SlotLabel, _ = stringLiteralArg(cons, "label")
 		}
-	case receiverType.Module == "machine.x86_64.executor_memory" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
-		origin.SlotLabel = slotLabelForExpr(namedArgExpr(expr.Args, "owner"), scope)
+	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
+		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
-		receiverOrigin := originForExpr(expr.Receiver, scope)
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
 		origin.TopicKind = receiverOrigin.TopicKind
-		origin.SlotLabel = slotLabelForExpr(namedArgExpr(expr.Args, "subscriber"), scope)
+		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case IsTopicType(receiverType) && expr.Method == "publisher":
-		receiverOrigin := originForExpr(expr.Receiver, scope)
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
 		origin.TopicKind = receiverOrigin.TopicKind
+	case receiverType.Module == "machine.x86_64.serial" && receiverType.Name == "SerialDriver" && expr.Method == "create_console_path" && valueType != nil && valueType.Kind == KindDriverPath:
+		origin.FieldBindings = map[string]string{}
+		if identity := namedArgExpr(expr.Args, "identity"); identity != nil {
+			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
+				origin.PathLabel, _ = stringLiteralArg(identityConstructor, "label")
+			}
+		}
+		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(valueType)
+		if publisher := c.publisherOriginForArg(moduleName, namedArgExpr(expr.Args, "rx"), scope); publisher.Type != nil {
+			origin.PublishesInterrupts = true
+			origin.TopicLabel = publisher.TopicLabel
+			origin.TopicKind = publisher.TopicKind
+		}
 	case IsVcpuType(receiverType) && (expr.Method == "start" || expr.Method == "enter"):
 		origin = c.vcpuOrigin(expr, scope)
 		origin.Type = valueType
@@ -1506,23 +1764,24 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 	return origin
 }
 
-func pathPublisherOrigin(expr *ast.ConstructorExpr, scope *Scope) localOrigin {
-	if origin := publisherOriginForArg(constructorArg(expr, "rx"), scope); origin.Type != nil {
+func (c *checker) pathPublisherOrigin(moduleName string, expr *ast.ConstructorExpr, scope *Scope) localOrigin {
+	if origin := c.publisherOriginForArg(moduleName, constructorArg(expr, "rx"), scope); origin.Type != nil {
 		return origin
 	}
-	if origin := publisherOriginForArg(constructorArg(expr, "irq"), scope); origin.Type != nil {
+	if origin := c.publisherOriginForArg(moduleName, constructorArg(expr, "irq"), scope); origin.Type != nil {
 		return origin
 	}
-	return publisherOriginForArg(constructorArg(expr, "interrupt"), scope)
+	return c.publisherOriginForArg(moduleName, constructorArg(expr, "interrupt"), scope)
 }
 
-func publisherOriginForArg(expr ast.Expr, scope *Scope) localOrigin {
+func (c *checker) publisherOriginForArg(moduleName string, expr ast.Expr, scope *Scope) localOrigin {
 	switch e := expr.(type) {
 	case *ast.NameExpr:
 		return originForExpr(e, scope)
 	case *ast.CallExpr:
 		if e.Method == "publisher" {
-			return originForExpr(e.Receiver, scope)
+			receiverType := c.exprStaticType(moduleName, e.Receiver, scope)
+			return c.originForExprValue(moduleName, e.Receiver, receiverType, scope)
 		}
 	}
 	return localOrigin{}
@@ -1533,16 +1792,24 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 		return
 	}
 	switch {
+	case origin.HasVcpuID:
+		c.graph.VcpuPlacements = append(c.graph.VcpuPlacements, VcpuPlacementNode{
+			VcpuID:          origin.VcpuID,
+			ExecutorBinding: origin.ExecutorBinding,
+			SlotLabel:       origin.SlotLabel,
+			Terminal:        origin.TerminalVcpu,
+			Span:            span,
+		})
 	case IsExecutorSlotType(origin.Type):
 		c.graph.ExecutorSlots = append(c.graph.ExecutorSlots, ExecutorSlotNode{Label: origin.SlotLabel, Binding: name, Span: span})
 	case IsTopicType(origin.Type):
-		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Binding: name, Span: span})
+		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Depth: origin.TopicDepth, Binding: name, Span: span})
 	case IsTopicPublisherType(origin.Type):
 		c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{TopicLabel: origin.TopicLabel, Binding: name, Span: span})
 	case IsTopicSubscriptionType(origin.Type):
 		c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{TopicLabel: origin.TopicLabel, SubscriberLabel: origin.SlotLabel, Binding: name, Span: span})
 	case origin.Type.Kind == KindDriverPath:
-		publishes := origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
+		publishes := origin.PublishesInterrupts || origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
 		if origin.EventType != "" && origin.TopicLabel != "" {
 			c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, InterruptTopicRouteNode{
@@ -1565,26 +1832,71 @@ func (c *checker) finalizeInterruptTopicRoutes() {
 	for i := range c.graph.InterruptTopicRoutes {
 		route := &c.graph.InterruptTopicRoutes[i]
 		route.SubscriberSlots = subscriberSlotsForTopic(c.graph.TopicSubscriptions, route.TopicLabel)
-		if vector, ok := vectorForInterruptTopicKind(route.TopicKind); ok {
-			route.Vector = int(vector)
+		for _, configurator := range c.graph.InterruptConfigurators {
+			if configurator.TopicKind == route.TopicKind {
+				route.Vector = configurator.Vector
+			}
 		}
 	}
 }
 
-func (c *checker) recordGraphFromExprStmt(expr ast.Expr, scope *Scope) {
+func (c *checker) recordGraphFromExprStmt(moduleName string, expr ast.Expr, scope *Scope) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return
 	}
+	c.recordInterruptConfiguratorCall(moduleName, call, scope)
 	if origin := c.vcpuOrigin(call, scope); origin.HasVcpuID {
 		c.graph.VcpuPlacements = append(c.graph.VcpuPlacements, VcpuPlacementNode{
 			VcpuID:          origin.VcpuID,
-			ExecutorBinding: executorBindingForCall(call),
+			ExecutorBinding: origin.ExecutorBinding,
 			SlotLabel:       origin.SlotLabel,
-			Terminal:        call.Method == "enter",
+			Terminal:        origin.TerminalVcpu,
 			Span:            call.SpanV,
 		})
 	}
+}
+
+func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.CallExpr, scope *Scope) {
+	if call == nil {
+		return
+	}
+	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	topicKind, vector, ok := interruptConfiguratorVector(receiverType, call)
+	if !ok {
+		return
+	}
+	c.graph.InterruptConfigurators = append(c.graph.InterruptConfigurators, InterruptConfiguratorNode{
+		TopicKind: topicKind,
+		Vector:    vector,
+		Span:      call.SpanV,
+	})
+}
+
+func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string, int, bool) {
+	switch qualifiedTypeName(receiverType) + "::" + call.Method {
+	case "machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive":
+		return "serial_rx", 0x40, true
+	case "machine.x86_64.pci.Q35PciInterruptConfigurator::configure_edu_msi_vector41":
+		return "edu_interrupt", 0x41, true
+	case "machine.x86_64.pci.Q35PciInterruptConfigurator::configure_ivshmem_msix_vector42":
+		vector := 0x42
+		if arg := namedArgExpr(call.Args, "vector"); arg != nil {
+			if literal, ok := arg.(*ast.IntLiteral); ok {
+				if parsed, err := strconv.ParseInt(literal.Value, 0, 32); err == nil {
+					vector = int(parsed)
+				}
+			}
+		}
+		return "ivshmem_doorbell", vector, true
+	default:
+		return "", 0, false
+	}
+}
+
+func exprStmtCall(expr ast.Expr) *ast.CallExpr {
+	call, _ := expr.(*ast.CallExpr)
+	return call
 }
 
 func (c *checker) recordReliableTryPublishCall(moduleName string, expr ast.Expr, scope *Scope, observed bool) {
@@ -1642,6 +1954,13 @@ func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) 
 	})
 }
 
+func syntheticExecutorFieldBinding(expr *ast.ConstructorExpr, field string, span source.Span) string {
+	if expr != nil {
+		return fmt.Sprintf("__executor_field_%d_%d_%s", expr.SpanV.Start, span.Start, field)
+	}
+	return fmt.Sprintf("__executor_field_%d_%s", span.Start, field)
+}
+
 func (c *checker) typeVcpuIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) {
 	if executor := vcpuExecutorArg(expr.Args); executor != nil {
 		c.typeExpr(moduleName, executor, scope, ctx)
@@ -1672,8 +1991,8 @@ func originForExpr(expr ast.Expr, scope *Scope) localOrigin {
 	return localOrigin{}
 }
 
-func slotLabelForExpr(expr ast.Expr, scope *Scope) string {
-	origin := originForExpr(expr, scope)
+func (c *checker) slotLabelForExpr(moduleName string, expr ast.Expr, scope *Scope) string {
+	origin := c.originForExprValue(moduleName, expr, c.exprStaticType(moduleName, expr, scope), scope)
 	return origin.SlotLabel
 }
 
@@ -1694,13 +2013,13 @@ func (c *checker) vcpuOrigin(call *ast.CallExpr, scope *Scope) localOrigin {
 	}
 	executorName, ok := vcpuExecutorArg(call.Args).(*ast.NameExpr)
 	if !ok {
-		return localOrigin{VcpuID: vcpuID, HasVcpuID: true}
+		return localOrigin{VcpuID: vcpuID, HasVcpuID: true, TerminalVcpu: call.Method == "enter"}
 	}
 	execOrigin, ok := scope.LookupOrigin(executorName.Name)
 	if !ok {
-		return localOrigin{VcpuID: vcpuID, HasVcpuID: true}
+		return localOrigin{VcpuID: vcpuID, HasVcpuID: true, ExecutorBinding: executorName.Name, TerminalVcpu: call.Method == "enter"}
 	}
-	return localOrigin{VcpuID: vcpuID, HasVcpuID: true, SlotLabel: execOrigin.SlotLabel}
+	return localOrigin{VcpuID: vcpuID, HasVcpuID: true, ExecutorBinding: executorName.Name, SlotLabel: execOrigin.SlotLabel, TerminalVcpu: call.Method == "enter"}
 }
 
 func vcpuExecutorArg(args []ast.NamedArg) ast.Expr {
@@ -1748,11 +2067,11 @@ func topicKindForType(typ *Type) string {
 func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) {
 	switch qualifiedTypeName(typ) {
 	case "machine.x86_64.serial.SerialConsolePath":
-		return "serial_rx", "machine.x86_64.serial.SerialPathInterrupt", "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt"
+		return "serial_rx", "machine.x86_64.serial.SerialPathInterrupt", "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt"
 	case "machine.x86_64.edu.EduMsiPath":
-		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_machine_x86_64_edu_EduMsiPath_interrupt"
+		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_fn_machine_x86_64_edu_EduMsiPath_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
-		return "ivshmem_doorbell", "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt", "_wrela_event_machine_x86_64_ivshmem_IvshmemDoorbellPath_interrupt"
+		return "ivshmem_doorbell", "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt", "_wrela_event_fn_machine_x86_64_ivshmem_IvshmemDoorbellPath_interrupt"
 	default:
 		return "", "", ""
 	}
@@ -1878,6 +2197,37 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			fieldBindings[arg.Name] = named.Name
 			boundTypes[arg.Name] = argType
 		}
+		if constructed.Kind == KindExecutor && IsTopicPublisherType(argType) {
+			if _, ok := fieldBindings[arg.Name]; !ok {
+				origin := c.originForLetValue(moduleName, arg.Value, argType, scope)
+				if origin.TopicLabel != "" {
+					binding := syntheticExecutorFieldBinding(expr, arg.Name, arg.SpanV)
+					fieldBindings[arg.Name] = binding
+					boundTypes[arg.Name] = argType
+					c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{
+						TopicLabel: origin.TopicLabel,
+						Binding:    binding,
+						Span:       arg.SpanV,
+					})
+				}
+			}
+		}
+		if constructed.Kind == KindExecutor && IsTopicSubscriptionType(argType) {
+			if _, ok := fieldBindings[arg.Name]; !ok {
+				origin := c.originForLetValue(moduleName, arg.Value, argType, scope)
+				if origin.TopicLabel != "" || origin.SlotLabel != "" {
+					binding := syntheticExecutorFieldBinding(expr, arg.Name, arg.SpanV)
+					fieldBindings[arg.Name] = binding
+					boundTypes[arg.Name] = argType
+					c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{
+						TopicLabel:      origin.TopicLabel,
+						SubscriberLabel: origin.SlotLabel,
+						Binding:         binding,
+						Span:            arg.SpanV,
+					})
+				}
+			}
+		}
 		if field.Type != nil && field.Type.Kind == KindDriverPath && argType != nil && argType.Kind == KindDriverPath {
 			if key := c.driverPathExprKey(arg.Value, scope); key != "" {
 				pathUses[arg.Name] = DriverPathUse{Key: key, Span: arg.SpanV}
@@ -1937,6 +2287,20 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		c.error(expr.SpanV, diag.SEM0029, "ArenaFrame can only be created by with arena.frame(length = ...)")
 		return
 	}
+	if IsTopicPublisherType(typ) {
+		if c.topicCapabilityFactoryAllowed("publisher") {
+			return
+		}
+		c.error(expr.SpanV, diag.SEM0039, "topic publisher must be created with topic.publisher()")
+		return
+	}
+	if IsTopicSubscriptionType(typ) {
+		if c.topicCapabilityFactoryAllowed("subscribe") {
+			return
+		}
+		c.error(expr.SpanV, diag.SEM0040, "topic subscription must be created with topic.subscribe(...)")
+		return
+	}
 	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "MutableBytes" {
 		if ctx != ContextImagePhaseDirect || c.currentPhase != "delegated_hardware" || !constructorArgsAreIntegerLiterals(expr, "address", "length") {
 			c.error(expr.SpanV, diag.SEM0028, "raw physical byte authority can only be created directly in delegated_hardware phase")
@@ -1944,6 +2308,10 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		}
 	}
 	if typ.Kind == KindData {
+		return
+	}
+	if c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr != expr && typ.Kind == KindClass && !typ.Unique {
+		c.error(expr.SpanV, diag.SEM0006, typ.Kind.String()+" construction is allowed only directly inside image phase bodies")
 		return
 	}
 	if c.allowPlaceConstructor != nil && !c.allowPlaceConstructor.used && c.allowPlaceConstructor.expr == expr && typ.Kind == KindClass && !typ.Unique {
@@ -1954,6 +2322,10 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		return
 	}
 	c.error(expr.SpanV, diag.SEM0006, typ.Kind.String()+" construction is allowed only directly inside image phase bodies")
+}
+
+func (c *checker) topicCapabilityFactoryAllowed(method string) bool {
+	return c.currentPhase == method && IsTopicType(c.currentType)
 }
 
 func (c *checker) canMintInContext(ctx ContextKind, typ *Type) bool {
@@ -1991,6 +2363,14 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 	if ctx == ContextOnHandler && c.isForbiddenOnHandlerCall(recvType, expr.Method) {
 		c.error(expr.SpanV, diag.SEM0016, "on handler cannot call runtime platform APIs")
+		return nil
+	}
+	if IsTopicType(recvType) && (expr.Method == "publisher" || expr.Method == "subscribe") && ctx != ContextImagePhaseDirect {
+		if expr.Method == "publisher" {
+			c.error(expr.SpanV, diag.SEM0039, "topic publisher must be created in image wiring")
+		} else {
+			c.error(expr.SpanV, diag.SEM0040, "topic subscription must be created in image wiring")
+		}
 		return nil
 	}
 	if IsArenaType(recvType) && (expr.Method == "place" || expr.Method == "reserve") {

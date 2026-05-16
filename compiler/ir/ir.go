@@ -110,6 +110,10 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *TopicTryNext:
 		return []Value{v}
+	case TopicIsWaitArmed:
+		return []Value{v}
+	case *TopicIsWaitArmed:
+		return []Value{v}
 	case VcpuStart:
 		return []Value{v}
 	case *VcpuStart:
@@ -360,26 +364,54 @@ func (ReliableTopicTryPublish) isValue()     {}
 func (ReliableTopicTryPublish) isOperation() {}
 
 type ReliableTopicWaitForAdvance struct {
-	TopicLabel string
+	TopicLabel    string
+	PublisherSlot string
 }
 
 func (ReliableTopicWaitForAdvance) isOperation() {}
 
 type TopicTryNext struct {
-	TopicLabel   string
-	Subscription Value
-	Type         Type
+	TopicLabel     string
+	SubscriberSlot string
+	Subscription   Value
+	Type           Type
 }
 
 func (TopicTryNext) isValue()     {}
 func (TopicTryNext) isOperation() {}
 
 type TopicArmWait struct {
-	TopicLabel   string
-	Subscription Value
+	TopicLabel     string
+	SubscriberSlot string
+	Subscription   Value
 }
 
 func (TopicArmWait) isOperation() {}
+
+type TopicIsWaitArmed struct {
+	TopicLabel     string
+	SubscriberSlot string
+	Subscription   Value
+	Type           Type
+}
+
+func (TopicIsWaitArmed) isValue()     {}
+func (TopicIsWaitArmed) isOperation() {}
+
+type TopicWaitIfArmed struct {
+	TopicLabel     string
+	SubscriberSlot string
+	Subscription   Value
+	Guards         []TopicWaitGuard
+}
+
+func (TopicWaitIfArmed) isOperation() {}
+
+type TopicWaitGuard struct {
+	TopicLabel     string
+	SubscriberSlot string
+	Subscription   Value
+}
 
 type TopicWait struct {
 	SlotLabel string
@@ -427,6 +459,7 @@ type InterruptContext struct {
 
 type InterruptContextStore struct {
 	ContextSymbol string
+	ContextOffset int
 	Source        Value
 	SourceType    Type
 	Size          int
@@ -480,6 +513,7 @@ type TopicLayout struct {
 	Label       string
 	Kind        string
 	Depth       uint64
+	Producers   []string
 	Subscribers []string
 }
 
@@ -487,6 +521,7 @@ type VcpuStartPlan struct {
 	VcpuID       int
 	SlotLabel    string
 	ExecutorType Type
+	EntrySymbol  string
 	Terminal     bool
 }
 

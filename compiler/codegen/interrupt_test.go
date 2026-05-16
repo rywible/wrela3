@@ -4,25 +4,29 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
 func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	t.Helper()
+	boolType := ir.Type{Name: "Bool", Module: "builtin", Kind: ir.TypeKindPrimitive}
 	u8 := ir.Type{Name: "U8", Module: "builtin", Kind: ir.TypeKindPrimitive}
 	eventType := ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.serial", Kind: ir.TypeKindData}
 	executorType := ir.Type{Name: "HelloWorld", Module: "examples.hello.program", Kind: ir.TypeKindExecutor}
 
+	eventHasByte := &ir.ConstInt{Symbol: "event_has_byte", Value: 1, Type: boolType}
 	eventByte := &ir.ConstInt{Symbol: "event_byte", Value: 0, Type: u8}
 	eventRet := &ir.Construct{
 		Symbol: "event_value",
 		Type:   eventType,
-		Fields: []ir.FieldValue{{Name: "byte", Value: eventByte}},
+		Fields: []ir.FieldValue{{Name: "has_byte", Value: eventHasByte}, {Name: "byte", Value: eventByte}},
 	}
 	eventFn := ir.Function{
 		Symbol: "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt",
 		Return: eventType,
 		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			eventHasByte,
 			eventByte,
 			eventRet,
 			&ir.Return{Value: eventRet},
@@ -45,17 +49,26 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				Align:       8,
 				StorageSize: 8,
 				Fields: map[string]ir.FieldInfo{
-					"byte": {
-						Name:          "byte",
-						Type:          u8,
+					"has_byte": {
+						Name:          "has_byte",
+						Type:          boolType,
 						Offset:        0,
 						StorageOffset: 0,
 						Size:          1,
 						StorageSize:   1,
 						Align:         1,
 					},
+					"byte": {
+						Name:          "byte",
+						Type:          u8,
+						Offset:        1,
+						StorageOffset: 1,
+						Size:          1,
+						StorageSize:   1,
+						Align:         1,
+					},
 				},
-				FieldOrder: []string{"byte"},
+				FieldOrder: []string{"has_byte", "byte"},
 			},
 			"HelloWorld": {
 				Name:        "HelloWorld",
@@ -132,6 +145,35 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	}
 }
 
+func interruptTopicProgramForCodegenTest(t *testing.T) *ir.Program {
+	t.Helper()
+	program := interruptProgramForCodegenTest(t)
+	program.Topics = []ir.TopicLayout{{
+		Label:       "console.com1.rx",
+		Kind:        "serial_rx",
+		Depth:       64,
+		Subscribers: []string{"console"},
+	}}
+	program.VcpuStarts = []ir.VcpuStartPlan{{
+		VcpuID:    2,
+		SlotLabel: "console",
+		ExecutorType: ir.Type{
+			Name:   "HelloWorld",
+			Module: "examples.hello.program",
+			Kind:   ir.TypeKindExecutor,
+		},
+	}}
+	program.InterruptBindings = program.InterruptBindings[:1]
+	program.InterruptBindings[0].HandlerSymbol = ""
+	program.InterruptBindings[0].HandlerFunctionSymbol = ""
+	program.InterruptBindings[0].TopicLabel = "console.com1.rx"
+	program.InterruptBindings[0].TopicKind = "serial_rx"
+	program.InterruptBindings[0].PublisherOwnerKind = "driver_path"
+	program.InterruptBindings[0].PublisherOwnerLabel = "console.com1"
+	program.InterruptBindings[0].SubscriberSlots = []string{"console"}
+	return program
+}
+
 func TestAsmMethodExternalBranchRelocation(t *testing.T) {
 	method := ir.AsmMethod{
 		Symbol: "_wrela_method_platform_uefi_transition_DelegatedHardware_capture_vector40_serial_handler",
@@ -165,7 +207,7 @@ func TestAsmMethodExternalBranchRelocation(t *testing.T) {
 }
 
 func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
-	program := interruptProgramForCodegenTest(t)
+	program := interruptTopicProgramForCodegenTest(t)
 	img, diags := Compile(program)
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
@@ -175,10 +217,16 @@ func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
 		"_wrela_interrupt_vector40_serial",
 		"_wrela_interrupt_vector41_edu_msi",
 		"_wrela_interrupt_vector42_ivshmem_msix",
+		"_wrela_interrupt_vectorf0_wake",
 	} {
 		if _, ok := img.Symbols[symbol]; !ok {
 			t.Fatalf("missing %s symbol", symbol)
 		}
+	}
+	for _, symbol := range []string{
+		"_wrela_interrupt_vector40_serial",
+		"_wrela_interrupt_vectorf0_wake",
+	} {
 		code := symbolBytes(t, img, symbol)
 		if !containsBytes(code, []byte{0x48, 0xCF}) {
 			t.Fatalf("%s missing iretq", symbol)
@@ -186,9 +234,36 @@ func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
 	}
 }
 
+func TestInterruptDispatchRejectsHandlerOnlyBinding(t *testing.T) {
+	_, diags := Compile(interruptProgramForCodegenTest(t))
+
+	if !hasCode(diags, diag.CG0001) {
+		t.Fatalf("Compile() diagnostics = %#v, want CG0001 for handler-only interrupt binding", diags)
+	}
+}
+
+func TestInterruptDispatchRejectsDuplicateVectorBindings(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	duplicate := program.InterruptBindings[0]
+	program.InterruptBindings = append(program.InterruptBindings, duplicate)
+
+	_, diags := Compile(program)
+	if !hasDiagnostic(diags, diag.CG0001, "duplicate interrupt binding vector 0x40") {
+		t.Fatalf("Compile() diagnostics = %#v, want CG0001 duplicate interrupt vector binding", diags)
+	}
+}
+
+func hasDiagnostic(ds []diag.Diagnostic, code, message string) bool {
+	for _, d := range ds {
+		if d.Code == code && d.Message == message {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCompileGeneratesTrapForUnboundKnownInterruptVector(t *testing.T) {
-	program := interruptProgramForCodegenTest(t)
-	program.InterruptBindings = program.InterruptBindings[:1]
+	program := interruptTopicProgramForCodegenTest(t)
 	img, diags := Compile(program)
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
@@ -207,13 +282,17 @@ func TestCompileGeneratesTrapForUnboundKnownInterruptVector(t *testing.T) {
 			t.Fatalf("%s missing fatal fallback trap: %#x", symbol, code)
 		}
 	}
+	wake := symbolBytes(t, img, "_wrela_interrupt_vectorf0_wake")
+	if !containsBytes(wake, []byte{0x48, 0xCF}) || containsBytes(wake, []byte{0xFA, 0xF4, 0xEB, 0xFD}) {
+		t.Fatalf("wake vector must EOI and return instead of trapping: %#x", wake)
+	}
 	if got := len(img.InterruptBindings); got != 1 {
 		t.Fatalf("image interrupt bindings = %d, want 1", got)
 	}
 }
 
 func TestInterruptContextSymbolStoresActiveExecutor(t *testing.T) {
-	program := interruptProgramForCodegenTest(t)
+	program := interruptTopicProgramForCodegenTest(t)
 	img, diags := Compile(program)
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
@@ -240,7 +319,7 @@ func TestInterruptContextSymbolStoresActiveExecutor(t *testing.T) {
 }
 
 func TestInterruptDispatchUsesContextRelocation(t *testing.T) {
-	img, diags := Compile(interruptProgramForCodegenTest(t))
+	img, diags := Compile(interruptTopicProgramForCodegenTest(t))
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
 	}
@@ -267,6 +346,112 @@ func TestInterruptDispatchUsesContextRelocation(t *testing.T) {
 	}
 }
 
+func TestInterruptTopicDispatchPublishesWithoutHandlerCall(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	targets := callTargetsForSymbol(t, img, "_wrela_interrupt_vector40_serial")
+	if !targets[program.InterruptBindings[0].EventFunctionSymbol] {
+		t.Fatalf("interrupt topic dispatch did not call event function: targets %#v", targets)
+	}
+	handler := "_wrela_on_fn_examples_hello_program_HelloWorld_serial_path_interrupt"
+	if targets[handler] {
+		t.Fatalf("interrupt topic dispatch must not call handler function: targets %#v", targets)
+	}
+
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+	topicAddress := make([]byte, 8)
+	binary.LittleEndian.PutUint64(topicAddress, runtimeImageBase+img.Symbols["_wrela_topic_console_com1_rx"])
+	if !containsBytes(code, topicAddress) {
+		t.Fatalf("interrupt topic dispatch missing topic data address: %#x", code)
+	}
+}
+
+func TestInterruptTopicDispatchWakesNonBspSubscriber(t *testing.T) {
+	img, diags := Compile(interruptTopicProgramForCodegenTest(t))
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+
+	destination := make([]byte, 4)
+	binary.LittleEndian.PutUint32(destination, 2<<24)
+	vector := make([]byte, 4)
+	binary.LittleEndian.PutUint32(vector, 0x00004000|0xF0)
+	if !containsBytes(code, destination) || !containsBytes(code, vector) {
+		t.Fatalf("interrupt topic dispatch missing LAPIC wake for vCPU 2/vector F0: %#x", code)
+	}
+}
+
+func TestInterruptTopicDispatchSkipsBspSelfWake(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.VcpuStarts[0].VcpuID = 0
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+
+	vector := make([]byte, 4)
+	binary.LittleEndian.PutUint32(vector, 0x00004000|0xF0)
+	if containsBytes(code, vector) {
+		t.Fatalf("interrupt topic dispatch must not self-IPI BSP subscriber with unbound wake vector: %#x", code)
+	}
+}
+
+func TestInterruptTopicDispatchResolvesConditionalJumps(t *testing.T) {
+	img, diags := Compile(interruptTopicProgramForCodegenTest(t))
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+	if containsBytes(code, []byte{0x0f, 0x84, 0, 0, 0, 0}) {
+		t.Fatalf("interrupt topic dispatch contains unresolved JE fixup: %#x", code)
+	}
+}
+
+func TestSerialRxInterruptTopicDispatchChecksHasByteField(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	info := program.Types["SerialPathInterrupt"]
+	hasByte := info.Fields["has_byte"]
+	hasByte.Offset = 1
+	hasByte.StorageOffset = 1
+	info.Fields["has_byte"] = hasByte
+	eventByte := info.Fields["byte"]
+	eventByte.Offset = 0
+	eventByte.StorageOffset = 0
+	info.Fields["byte"] = eventByte
+	info.FieldOrder = []string{"byte", "has_byte"}
+	program.Types["SerialPathInterrupt"] = info
+
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+	if !containsBytes(code, []byte{0x8a, 0x56, 0x01}) {
+		t.Fatalf("serial rx dispatch must load has_byte at payload offset 1 before publishing: %#x", code)
+	}
+	if containsBytes(code, []byte{0x8a, 0x16}) {
+		t.Fatalf("serial rx dispatch must not guard against zero byte payloads at offset 0: %#x", code)
+	}
+}
+
+func TestInterruptRuntimeDataSynthesizesTopicContextObject(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.InterruptContexts = nil
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if _, ok := img.Symbols["_wrela_interrupt_context_0"]; !ok {
+		t.Fatalf("topic interrupt context data object was not synthesized")
+	}
+}
+
 func sectionByName(img *Image, name string) *Section {
 	for i := range img.Sections {
 		if img.Sections[i].Name == name {
@@ -274,4 +459,41 @@ func sectionByName(img *Image, name string) *Section {
 		}
 	}
 	return nil
+}
+
+func callTargetsForSymbol(t *testing.T, img *Image, symbol string) map[string]bool {
+	t.Helper()
+	text := sectionByName(img, ".text")
+	if text == nil {
+		t.Fatal("missing .text section")
+	}
+	startRVA, ok := img.Symbols[symbol]
+	if !ok {
+		t.Fatalf("missing symbol %s", symbol)
+	}
+	start := int(startRVA - text.RVA)
+	end := len(text.Data)
+	for _, rva := range img.Symbols {
+		offset := int(rva - text.RVA)
+		if offset > start && offset < end {
+			end = offset
+		}
+	}
+	code := text.Data[start:end]
+	byRVA := map[uint64]string{}
+	for name, rva := range img.Symbols {
+		byRVA[rva] = name
+	}
+	out := map[string]bool{}
+	for i := 0; i+5 <= len(code); i++ {
+		if code[i] != 0xE8 {
+			continue
+		}
+		rel := int32(binary.LittleEndian.Uint32(code[i+1 : i+5]))
+		target := uint64(int64(startRVA) + int64(i+5) + int64(rel))
+		if name := byRVA[target]; name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }

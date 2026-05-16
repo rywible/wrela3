@@ -60,14 +60,27 @@ func TestArgsAllowsCPUOverride(t *testing.T) {
 func TestArgsIncludesSMPWhenRequested(t *testing.T) {
 	args := Args(Options{
 		ImagePath: "x.efi",
-		ESPDir:   "esp",
-		OVMFCode: "code.fd",
-		OVMFVars: "vars.fd",
-		SMP:      2,
+		ESPDir:    "esp",
+		OVMFCode:  "code.fd",
+		OVMFVars:  "vars.fd",
+		SMP:       2,
 	})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-smp 2") {
 		t.Fatalf("QEMU args missing -smp 2:\n%s", joined)
+	}
+}
+
+func TestArgsUsesSerialPipeWhenRequested(t *testing.T) {
+	args := strings.Join(Args(Options{
+		ImagePath:      "x.efi",
+		ESPDir:         "esp",
+		OVMFCode:       "code.fd",
+		OVMFVars:       "vars.fd",
+		SerialPipePath: "/tmp/wrela-serial",
+	}), " ")
+	if !strings.Contains(args, "-serial pipe:/tmp/wrela-serial") {
+		t.Fatalf("QEMU args missing serial pipe backend:\n%s", args)
 	}
 }
 
@@ -92,6 +105,43 @@ func TestRunWritesInputTextToQEMUStdin(t *testing.T) {
 		ImagePath:   image,
 		InputText:   "!",
 		SuccessText: "serial interrupt: !",
+	})
+	if err != nil {
+		t.Fatalf("Run error = %v, output:\n%s", err, out)
+	}
+	data, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	if string(data) != "!" {
+		t.Fatalf("stdin = %q, want !", data)
+	}
+}
+
+func TestRunCanKeepInputPipeOpenAfterWritingText(t *testing.T) {
+	tmp := t.TempDir()
+	seen := filepath.Join(tmp, "stdin.txt")
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	script := "#!/usr/bin/env sh\ndd bs=1 count=1 of=" + seen + " 2>/dev/null\necho 'serial interrupt: !'\n"
+	if err := os.WriteFile(fakeQEMU, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	out, err := Run(Options{
+		QEMUBinary:    fakeQEMU,
+		OVMFCode:      filepath.Join(tmp, "code.fd"),
+		OVMFVars:      filepath.Join(tmp, "vars.fd"),
+		ESPDir:        filepath.Join(tmp, "esp"),
+		ImagePath:     image,
+		InputText:     "!",
+		KeepInputOpen: true,
+		InputDelay:    time.Millisecond,
+		SuccessText:   "serial interrupt: !",
+		Timeout:       200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("Run error = %v, output:\n%s", err, out)

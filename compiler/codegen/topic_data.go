@@ -17,13 +17,15 @@ type topicDataSubscriberLayout struct {
 }
 
 type topicDataLayout struct {
-	Label       string
-	Kind        string
-	Depth       uint64
-	HeadOffset  uint64
-	SlotsOffset uint64
-	Subscribers []topicDataSubscriberLayout
-	TotalSize   uint64
+	Label                  string
+	Kind                   string
+	Depth                  uint64
+	HeadOffset             uint64
+	ProducerWaitlineOffset uint64
+	SlotsOffset            uint64
+	Producers              []string
+	Subscribers            []topicDataSubscriberLayout
+	TotalSize              uint64
 }
 
 func alignUp64(value uint64) uint64 {
@@ -39,9 +41,11 @@ func planTopicData(topic ir.TopicLayout) topicDataLayout {
 		Kind:       topic.Kind,
 		Depth:      topic.Depth,
 		HeadOffset: 0,
+		Producers:  append([]string{}, topic.Producers...),
 	}
 
-	next := uint64(cacheLineSize)
+	layout.ProducerWaitlineOffset = cacheLineSize
+	next := uint64(2 * cacheLineSize)
 	layout.Subscribers = make([]topicDataSubscriberLayout, 0, len(topic.Subscribers))
 	for _, subscriber := range topic.Subscribers {
 		layout.Subscribers = append(layout.Subscribers, topicDataSubscriberLayout{

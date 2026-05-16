@@ -2,11 +2,6 @@ module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 
-data ExecutorPlacement {
-    id: U64
-    memory: ExecutorMemory
-}
-
 data SlotIdentity {
     label: StringLiteral
 }
@@ -31,7 +26,6 @@ data MemoryPlan {
 }
 
 data CpuPlan {
-    vcpu0: ExecutorPlacement
     owned_stack_top: VirtualAddress
     gdt_descriptor: Bytes
     idt_descriptor: Bytes
@@ -58,7 +52,9 @@ class OwnedMemory {
     arena: MutableBytes
 
     fn claim_executor_arena(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
-        return ExecutorMemory(arena_base = self.arena.address, arena_length = length, next_offset = 0)
+        let arena_base = (self.arena.address + align - 1) & (0 - align)
+        self.arena.address = arena_base + length
+        return ExecutorMemory(arena_base = arena_base, arena_length = length, next_offset = 0)
     }
 }
 

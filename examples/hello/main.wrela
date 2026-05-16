@@ -2,13 +2,13 @@ module examples.hello.main
 
 use { HelloWorld } from examples.hello.program
 use { DelegatedHardware } from platform.uefi.transition
-use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
 use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
-use { SerialConsolePath, SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity } from machine.x86_64.topic_u64
 
 image HelloSerial {
@@ -18,14 +18,12 @@ image HelloSerial {
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let arena = MutableBytes(address = 0x200000, length = 0x200000)
-        let executor_memory = ExecutorMemory(arena_base = arena.address, arena_length = arena.length, next_offset = 0)
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = arena),
             executor_arena = arena,
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            vcpu0 = ExecutorPlacement(id = 0, memory = executor_memory),
             owned_stack_top = arena.address + arena.length,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),
@@ -56,10 +54,8 @@ image HelloSerial {
             identity = TopicIdentity(label = "hello.console.rx"),
             id = 0
         )
-        let serial_registers = serial_driver.registers
-        let serial_path = SerialConsolePath(
+        let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "hello.console"),
-            registers = serial_registers,
             rx = serial_rx_topic.publisher()
         )
         let pci_config = PciConfigPorts()
@@ -73,6 +69,11 @@ image HelloSerial {
         )
         let serial_rx = serial_rx_topic.subscribe(subscriber = hello_slot)
         let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = hello_slot)
+        let edu_path = EduMsiPath(
+            identity = PathIdentity(label = "hello.edu"),
+            mmio_base = pci_interrupts.edu_bar0(),
+            irq = edu_interrupt_topic.publisher()
+        )
         let hello = HelloWorld(
             slot = hello_slot,
             loop = EventSleepPolicy(),
@@ -84,11 +85,7 @@ image HelloSerial {
             pci_interrupts = pci_interrupts,
             serial_path = serial_path,
             serial_rx = serial_rx,
-            edu_path = EduMsiPath(
-                identity = PathIdentity(label = "hello.edu"),
-                mmio_base = pci_interrupts.edu_bar0(),
-                irq = edu_interrupt_topic.publisher()
-            ),
+            edu_path = edu_path,
             edu_interrupts = edu_interrupts
         )
         hardware.vcpu0.enter(executor = hello)

@@ -1,4 +1,4 @@
-// expect: SEM0019: interrupt events cannot be called directly
+// expect: SEM0042: executor on interrupt handlers are no longer supported; use path-owned interrupt topics
 module negative.interrupt_event_call
 
 data SerialInterrupt { vector: U8 }

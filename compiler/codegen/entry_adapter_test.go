@@ -208,32 +208,31 @@ func TestCompileEntryAdapterCallOrderAndHalt(t *testing.T) {
 	}
 
 	callOffsets := allOffsets(entry[setupEnd:], 0xE8)
-	if len(callOffsets) < 2 {
-		t.Fatalf("expected two adapter calls, got %d", len(callOffsets))
+	if len(callOffsets) < 3 {
+		t.Fatalf("expected three adapter calls, got %d", len(callOffsets))
 	}
 	for i := range callOffsets {
 		callOffsets[i] += setupEnd
 	}
 
 	firstCall := callOffsets[0]
-	gotFirst := int64(int32(binary.LittleEndian.Uint32(entry[firstCall+1 : firstCall+5])))
-	wantFirst := int64(int64(image.Symbols["image_delegated"]) - int64(image.Symbols["_wrela_efi_entry"]+uint64(firstCall)+5))
-	if gotFirst != wantFirst {
-		t.Fatalf("first rel32 = %d, want %d", gotFirst, wantFirst)
-	}
-	if !bytes.Equal(entry[firstCall+5:firstCall+8], []byte{0x48, 0x8B, 0xF8}) {
-		t.Fatalf("delegated return value should move rax to rdi")
+	if gotFirst := entryAdapterCallTarget(entry, image, firstCall); gotFirst != image.Symbols["image_delegated"] {
+		t.Fatalf("first call target = %#x, want image_delegated %#x", gotFirst, image.Symbols["image_delegated"])
 	}
 
-	secondCall := callOffsets[1]
-	gotSecond := int64(int32(binary.LittleEndian.Uint32(entry[secondCall+1 : secondCall+5])))
-	wantSecond := int64(int64(image.Symbols["image_owned"]) - int64(image.Symbols["_wrela_efi_entry"]+uint64(secondCall)+5))
-	if gotSecond != wantSecond {
-		t.Fatalf("second rel32 = %d, want %d", gotSecond, wantSecond)
+	installCall := callOffsets[1]
+	if gotInstall := entryAdapterCallTarget(entry, image, installCall); gotInstall != image.Symbols[apTrampolineInstallSymbol] {
+		t.Fatalf("second call target = %#x, want AP trampoline install %#x", gotInstall, image.Symbols[apTrampolineInstallSymbol])
 	}
 
-	if secondCall <= firstCall {
-		t.Fatalf("owned phase call should come after delegated call")
+	ownedCall := callOffsets[2]
+	if gotOwned := entryAdapterCallTarget(entry, image, ownedCall); gotOwned != image.Symbols["image_owned"] {
+		t.Fatalf("third call target = %#x, want image_owned %#x", gotOwned, image.Symbols["image_owned"])
+	}
+
+	moveReturnToOwned := bytes.Index(entry[installCall+5:ownedCall], []byte{0x48, 0x8B, 0xF8})
+	if moveReturnToOwned < 0 {
+		t.Fatalf("delegated return value should move rax to rdi after AP trampoline install")
 	}
 	if !bytes.Contains(entry, []byte{0xF4, 0xE9}) {
 		t.Fatalf("entry adapter should end in hlt loop")
@@ -299,6 +298,11 @@ func allOffsets(data []byte, value byte) []int {
 		}
 	}
 	return offsets
+}
+
+func entryAdapterCallTarget(entry []byte, image *Image, callOffset int) uint64 {
+	rel := int32(binary.LittleEndian.Uint32(entry[callOffset+1 : callOffset+5]))
+	return uint64(int64(image.Symbols["_wrela_efi_entry"]) + int64(callOffset) + 5 + int64(rel))
 }
 
 func mustEncode(t *testing.T, instr asm.Instruction) []byte {

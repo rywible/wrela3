@@ -186,7 +186,7 @@ image App {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker = Worker(memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0))
-        worker.run()
+        while true {}
     }
 }
 `)
@@ -220,7 +220,7 @@ image App {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker = Worker()
-        worker.run()
+        while true {}
     }
 }
 `)
@@ -352,7 +352,7 @@ image App {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker = Worker(memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0))
-        worker.run()
+        while true {}
     }
 }
 `)

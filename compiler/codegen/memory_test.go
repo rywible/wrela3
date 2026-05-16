@@ -81,7 +81,7 @@ func TestArenaPlaceStoresNestedDataFieldHandle(t *testing.T) {
 		t.Fatalf("compile diagnostics: %#v", diags)
 	}
 	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
-	want := []byte{0x48, 0x8B, 0xC6, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x89, 0x06}
+	want := []byte{0x4C, 0x8B, 0xD6, 0x49, 0x83, 0xC2, 0x08, 0x4C, 0x89, 0x16}
 	if !bytes.Contains(code, want) {
 		t.Fatalf("place must store nested Bytes handle into arena record field: want %x in %x", want, code)
 	}
@@ -94,7 +94,7 @@ func TestArenaPlaceCopiesNestedDataFieldWithEightByteStorage(t *testing.T) {
 		t.Fatalf("compile diagnostics: %#v", diags)
 	}
 	code := symbolBytes(t, image, "_wrela_method_test_Worker_run")
-	wantHandle := []byte{0x48, 0x8B, 0xC6, 0x48, 0x83, 0xC0, 0x08, 0x48, 0x89, 0x06}
+	wantHandle := []byte{0x4C, 0x8B, 0xD6, 0x49, 0x83, 0xC2, 0x08, 0x4C, 0x89, 0x16}
 	if !bytes.Contains(code, wantHandle) {
 		t.Fatalf("place must store nested Message handle into arena record field: want %x in %x", wantHandle, code)
 	}

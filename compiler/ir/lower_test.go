@@ -481,6 +481,45 @@ driver path SerialConsolePath {
 	}
 }
 
+func TestLowerInterruptTopicRouteAmbiguousVectorDiagnostic(t *testing.T) {
+	checked := checkedProgramForTest(t, `
+module machine.x86_64.serial
+
+data SerialPathInterrupt { byte: U8 }
+
+driver path SerialConsolePath {
+    interrupt receiver -> SerialPathInterrupt {
+        return SerialPathInterrupt(byte = 0)
+    }
+}
+`)
+	checked.ImageGraph.InterruptTopicRoutes = []sem.InterruptTopicRouteNode{{
+		Vector:              0x40,
+		PathLabel:           "console.a",
+		PathBinding:         "serial_a",
+		TopicLabel:          "console.a.rx",
+		TopicKind:           "serial_rx",
+		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
+	}, {
+		Vector:              0x40,
+		PathLabel:           "console.b",
+		PathBinding:         "serial_b",
+		TopicLabel:          "console.b.rx",
+		TopicKind:           "serial_rx",
+		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
+	}}
+
+	_, diags := Lower(checked)
+	if len(diags) != 1 {
+		t.Fatalf("Lower() diagnostics = %#v, want one", diags)
+	}
+	if diags[0].Code != diag.SEM0043 || diags[0].Message != "interrupt route vector is ambiguous" {
+		t.Fatalf("diagnostic = %#v, want SEM0043 interrupt route vector is ambiguous", diags[0])
+	}
+}
+
 func asmTestType(module, name string, methods ...string) *sem.Type {
 	typ := &sem.Type{Module: module, Name: name, Kind: sem.KindClass}
 	for _, method := range methods {

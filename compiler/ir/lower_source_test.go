@@ -125,6 +125,176 @@ func TestLowerExecutorStartMethodFromSourceBody(t *testing.T) {
 	)
 }
 
+func TestLowerNoReturnMethodCallUsesVoidType(t *testing.T) {
+	consoleType := &sem.Type{
+		Module: "test.void_call",
+		Name:   "Console",
+		Kind:   sem.KindClass,
+		Methods: []sem.Method{{
+			Name: "write",
+		}},
+	}
+	ownedType := &sem.Type{
+		Module: "test.void_call",
+		Name:   "OwnedHardware",
+		Kind:   sem.KindClass,
+		Fields: []sem.Field{{Name: "console", Type: consoleType}},
+		Methods: []sem.Method{{
+			Name: "launch",
+		}},
+	}
+	checked := &sem.CheckedProgram{
+		Modules: []*ast.Module{{
+			Name: "test.void_call",
+			Decls: []ast.Decl{
+				&ast.ClassDecl{
+					Name: "Console",
+					Methods: []ast.MethodDecl{{
+						Name: "write",
+					}},
+				},
+				&ast.ClassDecl{
+					Name: "OwnedHardware",
+					Fields: []ast.Field{{
+						Name: "console",
+						Type: "Console",
+					}},
+					Methods: []ast.MethodDecl{{
+						Name: "launch",
+						Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.CallExpr{
+							Receiver: &ast.FieldExpr{
+								Base:  &ast.NameExpr{Name: "self"},
+								Field: "console",
+							},
+							Method: "write",
+						}}},
+					}},
+				},
+			},
+		}},
+		Index: &sem.Index{ByModule: map[string]map[string]*sem.Type{
+			"test.void_call": {
+				"Console":       consoleType,
+				"OwnedHardware": ownedType,
+			},
+		}},
+		OwnedRoot: ownedType,
+	}
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+
+	fn := findFunction(program, symbolName("method", "test.void_call", "OwnedHardware", "launch"))
+	if fn == nil {
+		t.Fatal("missing OwnedHardware.launch")
+	}
+	call, ok := functionOp[*Call](*fn)
+	if !ok {
+		t.Fatalf("OwnedHardware.launch missing call: %#v", fn.Blocks)
+	}
+	if call.Type.Name != "void" {
+		t.Fatalf("no-return call type = %#v, want void", call.Type)
+	}
+}
+
+func TestLowerClaimExecutorArenaMaterializesInCaller(t *testing.T) {
+	checked := checkedProgramFromSourcesForTest(t, `
+module machine.x86_64.executor_memory
+
+data MutableBytes {
+    address: PhysicalAddress
+    length: U64
+}
+
+class ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+}
+
+module machine.x86_64.cpu_state
+
+use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+
+data ExecutorSlot {
+    id: U64
+}
+
+class OwnedMemory {
+    arena: MutableBytes
+
+    asm fn claim_executor_arena(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
+        ret
+    }
+}
+
+class Boot {
+    memory: OwnedMemory
+    slot: ExecutorSlot
+
+    fn run(self) {
+        let first = self.memory.claim_executor_arena(owner = self.slot, length = 4096, align = 4096)
+        let second = self.memory.claim_executor_arena(owner = self.slot, length = 8192, align = 4096)
+    }
+}
+`)
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+	fn := findFunction(program, symbolName("method", "machine.x86_64.cpu_state", "Boot", "run"))
+	if fn == nil {
+		t.Fatal("missing Boot.run")
+	}
+	if functionCalls(*fn, symbolName("method", "machine.x86_64.cpu_state", "OwnedMemory", "claim_executor_arena")) {
+		t.Fatalf("claim_executor_arena should lower as caller-side intrinsic: %#v", fn.Blocks)
+	}
+	var constructs []*Construct
+	var stores []*FieldStore
+	var addCount, andCount, subCount int
+	for _, block := range fn.Blocks {
+		for _, op := range block.Ops {
+			switch op := op.(type) {
+			case *Construct:
+				if op.Type.Name == "ExecutorMemory" {
+					constructs = append(constructs, op)
+				}
+			case *FieldStore:
+				if op.ObjectType == "MutableBytes" && op.Field == "address" {
+					stores = append(stores, op)
+				}
+			case *Binary:
+				switch op.Op {
+				case "add":
+					addCount++
+				case "and":
+					andCount++
+				case "sub":
+					subCount++
+				}
+			}
+		}
+	}
+	if len(constructs) != 2 {
+		t.Fatalf("Boot.run ExecutorMemory constructs = %d, want 2: %#v", len(constructs), fn.Blocks)
+	}
+	if len(stores) != 2 {
+		t.Fatalf("Boot.run arena address stores = %d, want 2: %#v", len(stores), fn.Blocks)
+	}
+	for _, construct := range constructs {
+		base := constructFieldValue(construct, "arena_base")
+		if binary, ok := base.(*Binary); !ok || binary.Op != "and" {
+			t.Fatalf("ExecutorMemory arena_base = %#v, want aligned arena address", base)
+		}
+	}
+	if addCount < 4 || andCount < 2 || subCount < 4 {
+		t.Fatalf("Boot.run missing alignment/allocation arithmetic: add=%d and=%d sub=%d ops=%#v", addCount, andCount, subCount, fn.Blocks)
+	}
+}
+
 func TestLowerUsesSourceAsmForDelegatedHardwareExitToOwnedHardware(t *testing.T) {
 	transitionSymbol := symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware")
 	sourceBody := "source_transfer_marker:\nret"
@@ -435,6 +605,15 @@ func functionCallSymbols(fn Function) []string {
 		}
 	}
 	return out
+}
+
+func constructFieldValue(construct *Construct, name string) Value {
+	for _, field := range construct.Fields {
+		if field.Name == name {
+			return field.Value
+		}
+	}
+	return nil
 }
 
 func hasDiagCode(diags []diag.Diagnostic, code string) bool {

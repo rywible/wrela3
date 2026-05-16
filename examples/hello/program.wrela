@@ -30,7 +30,6 @@ executor HelloWorld {
         }
         self.interrupts.initialize_for_com1_receive()
         self.pci_interrupts.configure_edu_msi_vector41()
-        self.serial_path.enable_receive_interrupts()
         self.interrupts.enable_cpu_interrupts()
         self.edu_path.raise_test_interrupt()
         while true {
@@ -65,7 +64,11 @@ executor HelloWorld {
             }
             if serial_retry.has_message == false {
                 if edu_retry.has_message == false {
-                    self.loop.wait()
+                    if self.serial_rx.is_wait_armed() {
+                        if self.edu_interrupts.is_wait_armed() {
+                            self.loop.wait()
+                        }
+                    }
                 }
             }
         }

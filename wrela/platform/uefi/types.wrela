@@ -370,7 +370,8 @@ class DelegatedMemory {
         fatal_handler: VirtualAddress,
         vector40_handler: VirtualAddress,
         vector41_handler: VirtualAddress,
-        vector42_handler: VirtualAddress
+        vector42_handler: VirtualAddress,
+        vectorf0_handler: VirtualAddress
     ) -> DelegatedBytes {
         push r12
         push r13
@@ -414,6 +415,11 @@ class DelegatedMemory {
         mov r12, r11
         add r12, 1072
         mov r13, r15
+        call write_idt_gate
+
+        mov r12, r11
+        add r12, 3856
+        mov r13, vectorf0_handler
         call write_idt_gate
 
         mov [r10 + 0], r11

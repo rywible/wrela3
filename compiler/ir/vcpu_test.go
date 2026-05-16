@@ -24,13 +24,11 @@ func TestLowerVcpuStartAndEnterToIntrinsicOps(t *testing.T) {
 module test.vcpu_lower
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { ExecutorMemory } from machine.x86_64.executor_memory
 use { TopicIdentity, U64GapSubscription, U64GapTopic, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-    memory: ExecutorMemory
     input: U64GapSubscription
     reliable_input: U64ReliableSubscription
     start fn run(self) -> never { while true {} }
@@ -48,8 +46,8 @@ image Img {
         let worker_reliable_input = commands.subscribe(subscriber = worker_slot)
         let hello_input = counter.subscribe(subscriber = hello_slot)
         let hello_reliable_input = commands.subscribe(subscriber = hello_slot)
-        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = worker_input, reliable_input = worker_reliable_input)
-        let hello = Worker(slot = hello_slot, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 4096, arena_length = 4096, next_offset = 0), input = hello_input, reliable_input = hello_reliable_input)
+        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), input = worker_input, reliable_input = worker_reliable_input)
+        let hello = Worker(slot = hello_slot, loop = EventSleepPolicy(), input = hello_input, reliable_input = hello_reliable_input)
         hardware.vcpu1.start(executor = worker)
         hardware.vcpu0.enter(executor = hello)
     }

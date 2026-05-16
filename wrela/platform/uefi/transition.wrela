@@ -54,7 +54,8 @@ unique class DelegatedHardware {
             fatal_handler = self.capture_fatal_idt_handler(),
             vector40_handler = self.capture_vector40_serial_handler(),
             vector41_handler = self.capture_vector41_edu_msi_handler(),
-            vector42_handler = self.capture_vector42_ivshmem_msix_handler()
+            vector42_handler = self.capture_vector42_ivshmem_msix_handler(),
+            vectorf0_handler = self.capture_vectorf0_wake_handler()
         )
         self.activate_owned_hardware(
             owned_stack_top = cpu_plan.owned_stack_top,
@@ -142,6 +143,16 @@ unique class DelegatedHardware {
     vector42_ivshmem_msix_handler:
         jmp _wrela_interrupt_vector42_ivshmem_msix
     vector42_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vectorf0_wake_handler(self) -> VirtualAddress {
+        // Capture the address of vectorf0_wake_handler without executing it.
+        call vectorf0_capture_return
+    vectorf0_wake_handler:
+        jmp _wrela_interrupt_vectorf0_wake
+    vectorf0_capture_return:
         pop rax
         ret
     }

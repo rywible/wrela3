@@ -16,12 +16,12 @@ class EduInterruptTopic {
     identity: TopicIdentity
     id: U64
 
-    asm fn publisher(self) -> EduInterruptPublisher {
-        ret
+    fn publisher(self) -> EduInterruptPublisher {
+        return EduInterruptPublisher(topic = self)
     }
 
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> EduInterruptSubscription {
-        ret
+    fn subscribe(self, subscriber: ExecutorSlot) -> EduInterruptSubscription {
+        return EduInterruptSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
     }
 }
 
@@ -54,7 +54,9 @@ driver path EduMsiPath {
     irq: EduInterruptPublisher
 
     interrupt receiver -> EduInterrupt {
-        return EduInterrupt(status = self.read32(offset = 0x24))
+        let status = self.read32(offset = 0x24)
+        self.write32(offset = 0x64, value = status)
+        return EduInterrupt(status = status)
     }
 
     asm fn read32(self, offset: U64) -> U32 {
@@ -77,6 +79,6 @@ driver path EduMsiPath {
     }
 
     fn ack_completed(self, event: EduInterrupt) {
-        self.write32(offset = 0x64, value = event.status)
+        // MSI completion is acknowledged in the interrupt receiver before topic publication.
     }
 }

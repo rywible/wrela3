@@ -328,7 +328,7 @@ topic.publish_or_wait(message = command)
 
 Reliable bounded backpressure wakes on subscriber cursor movement, not on new producer messages. The compiler may synthesize producer waitlines for subscriber cursor advancement, using the same cache-line wait abstraction and IPI fallback as subscriber wakeups.
 
-Reliable bounded topics are not part of milestone 1, but their surface must remain compatible with this explicit wait model.
+Implementation note: reliable bounded topics were pulled into the implementation milestone with this explicit wait model instead of remaining deferred.
 
 ### Idempotency
 
@@ -567,9 +567,9 @@ The migration target is:
 - generated ISR glue publishes into the path instance topic
 - executor slots subscribe to those topics, and executor constructors receive those subscriptions
 - executor loops drain subscriptions explicitly
-- direct `on path.interrupt` handlers are removed or lowered only as temporary compatibility wrappers around topic consumption
+- direct `on path.interrupt` handlers are removed
 
-Milestone 1 keeps `on path.interrupt` unchanged while building the vCPU/topic spine. Migrating one simple interrupt path, such as serial receive, to a path-owned topic is a stretch goal or the next implementation plan.
+Implementation note: the implementation plan hard-cuts interrupt topics into the main milestone instead of deferring them. The old `on path.interrupt` executor callback surface is intentionally removed without backwards compatibility.
 
 ## Memory Model
 
@@ -824,20 +824,21 @@ The first implementation milestone should prove the spine without solving every 
 - two executors, each explicitly started on one vCPU
 - two executor slots, each bound to exactly one executor
 - executor memory claimed independently from `OwnedHardware.memory`
-- one bounded gap-detecting SPMC topic
+- one bounded gap-detecting SPMC topic and one reliable bounded topic
 - one subscription naming the consumer executor slot
 - cache-line-isolated producer sequence and subscriber cursor
 - explicit executor loop using drain, arm, re-check, sleep
 - cache-line wait abstraction in source/backend shape
 - `HLT + IPI` fallback path
+- path-owned interrupt topics
 - compiler checks for vCPU count, one executor per vCPU, one start/enter per executor, and terminal current-vCPU entry ordering
 - e2e proof that the producer publishes N messages and the consumer observes N messages, then reports success through serial
 
-Device interrupt topics and reliable bounded topics follow after the vCPU/topic spine is working.
+Implementation note: the implementation plan hard-cuts interrupt topics and reliable bounded topics into the main milestone instead of deferring them. The old `on path.interrupt` executor callback surface is intentionally removed without backwards compatibility.
 
 Stretch goal:
 
-- migrate one simple interrupt path, such as serial receive, from `on path.interrupt` to a path-owned topic
+- none currently recorded for the implemented explicit-vCPU/SPMC topics milestone
 
 ## Non-Goals
 

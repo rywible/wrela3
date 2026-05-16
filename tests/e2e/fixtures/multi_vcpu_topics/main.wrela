@@ -1,9 +1,10 @@
 module tests.e2e.fixtures.multi_vcpu_topics.main
 
 use { DelegatedHardware } from platform.uefi.transition
-use { CpuPlan, DriverMemory, ExecutorPlacement, ExecutorSlot, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, ExecutorSlot, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
 use { SerialConsolePath, SerialDriver, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity, U64GapPublisher, U64GapSubscription, U64GapTopic, U64ReliablePublisher, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
 
@@ -11,12 +12,14 @@ executor Producer {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     memory: ExecutorMemory
+    interrupts: ApicInterruptController
     serial: SerialConsolePath
     serial_rx: SerialRxSubscription
     out: U64GapPublisher
     result_in: U64ReliableSubscription
 
     start fn run(self) -> never {
+        self.interrupts.initialize_for_com1_receive()
         let value = 0
         while value < 64 {
             self.out.publish(value = value)
@@ -92,14 +95,12 @@ image MultiVcpuTopics {
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let arena = MutableBytes(address = 0x200000, length = 0x400000)
-        let executor_memory = ExecutorMemory(arena_base = arena.address, arena_length = arena.length, next_offset = 0)
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = arena),
             executor_arena = arena,
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            vcpu0 = ExecutorPlacement(id = 0, memory = executor_memory),
             owned_stack_top = arena.address + arena.length,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),
@@ -121,10 +122,8 @@ image MultiVcpuTopics {
             identity = TopicIdentity(label = "multi.console.rx"),
             id = 2
         )
-        let serial_registers = serial_driver.registers
-        let serial_path = SerialConsolePath(
+        let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "multi.console"),
-            registers = serial_registers,
             rx = serial_rx_topic.publisher()
         )
 
@@ -156,6 +155,10 @@ image MultiVcpuTopics {
             slot = producer_slot,
             loop = EventSleepPolicy(),
             memory = producer_memory,
+            interrupts = ApicInterruptController(
+                local_apic = LocalApic(base = 0xFEE00000),
+                io_apic = IoApic(base = 0xFEC00000)
+            ),
             serial = serial_path,
             serial_rx = producer_serial_rx,
             out = counter_topic.publisher(),

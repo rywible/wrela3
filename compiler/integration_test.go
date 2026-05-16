@@ -154,6 +154,9 @@ func TestBuildHelloContainsInterruptBinding(t *testing.T) {
 	gotVectors := map[uint8]bool{}
 	for _, binding := range result.Image.InterruptBindings {
 		gotVectors[binding.Vector] = true
+		if binding.Vector == 0x40 && binding.TopicKind != "serial_rx" {
+			t.Fatalf("serial interrupt binding TopicKind = %q, want serial_rx: %#v", binding.TopicKind, binding)
+		}
 	}
 	for _, want := range []uint8{0x40, 0x41} {
 		if !gotVectors[want] {
@@ -181,6 +184,31 @@ func TestHelloTransitionFunctionsPreserveOwnedStackReturn(t *testing.T) {
 	}
 }
 
+func TestHelloInterruptTopicContextStoreUsesPathFieldOffset(t *testing.T) {
+	program := compileHelloProgram(t)
+	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
+	if fn == nil {
+		t.Fatalf("missing IR function %s", program.Entry.OwnedPhaseSymbol)
+	}
+	store, ok := operationInList[*ir.InterruptContextStore](fn.Blocks[0].Ops)
+	if !ok {
+		t.Fatalf("%s missing interrupt context store: %#v", fn.Symbol, fn.Blocks)
+	}
+	var serialBinding *ir.InterruptBinding
+	for i := range program.InterruptBindings {
+		if program.InterruptBindings[i].TopicKind == "serial_rx" {
+			serialBinding = &program.InterruptBindings[i]
+			break
+		}
+	}
+	if serialBinding == nil {
+		t.Fatalf("hello missing serial_rx interrupt binding: %#v", program.InterruptBindings)
+	}
+	if store.ContextSymbol != serialBinding.ContextSymbol || store.ContextOffset != serialBinding.PathFieldOffset {
+		t.Fatalf("context store = (%q, %d), want (%q, %d)", store.ContextSymbol, store.ContextOffset, serialBinding.ContextSymbol, serialBinding.PathFieldOffset)
+	}
+}
+
 func TestHelloOwnedPhaseEntersExecutor(t *testing.T) {
 	program := compileHelloProgram(t)
 	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
@@ -200,11 +228,13 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_bytes",
 		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_initialize_for_com1_receive",
 		"_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_edu_msi_vector41",
-		"_wrela_method_machine_x86_64_serial_SerialConsolePath_enable_receive_interrupts",
 		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_enable_cpu_interrupts",
 		"_wrela_method_machine_x86_64_edu_EduMsiPath_raise_test_interrupt",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
-		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_halt_forever",
+	)
+	assertFunctionCalls(t, program,
+		program.Entry.OwnedPhaseSymbol,
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_enable_receive_interrupts",
 	)
 	assertFunctionCalls(t, program,
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
@@ -247,6 +277,57 @@ func TestHelloSourceUsesArenaFrames(t *testing.T) {
 		if strings.Contains(mainSource, forbidden) {
 			t.Fatalf("hello main contains old executor wiring %q", forbidden)
 		}
+	}
+}
+
+func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
+	forbidden := []string{
+		"ExecutorPlacement",
+		"owner = hardware.vcpu0",
+		"hardware.vcpu0.memory",
+		"hello.run()",
+		"on serial_path.interrupt",
+	}
+	for _, root := range []string{"examples", filepath.Join("tests", "e2e", "fixtures"), "wrela"} {
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		repoRoot := filepath.Clean(filepath.Join(wd, ".."))
+		err = filepath.WalkDir(filepath.Join(repoRoot, root), func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".wrela" {
+				return nil
+			}
+			sourcePath, err := filepath.Rel(repoRoot, path)
+			if err != nil {
+				return err
+			}
+			source := readRepoFile(t, sourcePath)
+			for _, pattern := range forbidden {
+				if strings.Contains(source, pattern) {
+					t.Fatalf("%s contains old executor wiring %q", sourcePath, pattern)
+				}
+			}
+			if (root == "examples" || root == filepath.Join("tests", "e2e", "fixtures")) &&
+				(strings.Contains(source, "SerialConsolePath(") || strings.Contains(source, ".enable_receive_interrupts()")) {
+				t.Fatalf("%s contains old serial console source wiring", sourcePath)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
+func TestEduInterruptReceiverAcknowledgesBeforeTopicDelivery(t *testing.T) {
+	source := readRepoFile(t, "wrela/machine/x86_64/edu.wrela")
+	if !strings.Contains(source, "let status = self.read32(offset = 0x24)") ||
+		!strings.Contains(source, "self.write32(offset = 0x64, value = status)") {
+		t.Fatalf("EduMsiPath interrupt receiver must acknowledge device status before returning event")
 	}
 }
 

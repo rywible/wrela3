@@ -11,23 +11,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 type Options struct {
-	QEMUBinary  string
-	OVMFCode    string
-	OVMFVars    string
-	ESPDir      string
-	ImagePath   string
-	Memory      string
-	CPU         string
-	SMP         int
-	Timeout     time.Duration
-	SuccessText string
+	QEMUBinary     string
+	OVMFCode       string
+	OVMFVars       string
+	ESPDir         string
+	ImagePath      string
+	Memory         string
+	CPU            string
+	SMP            int
+	Timeout        time.Duration
+	SuccessText    string
+	UseSerialPipe  bool
+	SerialPipePath string
 
 	IvshmemServerBinary   string
 	InputText             string
+	KeepInputOpen         bool
 	EnableEdu             bool
 	EnableIvshmemMsix     bool
 	IvshmemSocketPath     string
@@ -64,6 +68,10 @@ func Args(opts Options) []string {
 	if cpu == "" {
 		cpu = "Haswell-v3"
 	}
+	serial := "stdio"
+	if opts.SerialPipePath != "" {
+		serial = "pipe:" + opts.SerialPipePath
+	}
 	args := []string{
 		"-machine", "q35",
 		"-cpu", cpu,
@@ -71,7 +79,7 @@ func Args(opts Options) []string {
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + opts.OVMFCode,
 		"-drive", "if=pflash,format=raw,file=" + opts.OVMFVars,
 		"-drive", "format=raw,file=fat:rw:" + opts.ESPDir,
-		"-serial", "stdio",
+		"-serial", serial,
 		"-display", "none",
 		"-no-reboot",
 	}
@@ -137,6 +145,34 @@ func Run(opts Options) (string, error) {
 	if err := StageESP(opts.ImagePath, opts.ESPDir); err != nil {
 		return "", err
 	}
+	var serialTmpDir string
+	serialInputPath := ""
+	serialOutputPath := ""
+	if opts.UseSerialPipe {
+		pipePath := opts.SerialPipePath
+		if pipePath == "" {
+			tmpDir, err := os.MkdirTemp("", "wrela-serial-")
+			if err != nil {
+				return "", err
+			}
+			serialTmpDir = tmpDir
+			pipePath = filepath.Join(tmpDir, "serial")
+			opts.SerialPipePath = pipePath
+		}
+		defer func() {
+			if serialTmpDir != "" {
+				_ = os.RemoveAll(serialTmpDir)
+			}
+		}()
+		for _, suffix := range []string{".in", ".out"} {
+			_ = os.Remove(pipePath + suffix)
+			if err := syscall.Mkfifo(pipePath+suffix, 0o600); err != nil {
+				return "", err
+			}
+		}
+		serialInputPath = pipePath + ".in"
+		serialOutputPath = pipePath + ".out"
+	}
 	bin := opts.QEMUBinary
 	if bin == "" {
 		bin = "qemu-system-x86_64"
@@ -178,17 +214,32 @@ func Run(opts Options) (string, error) {
 
 	cmd := exec.CommandContext(ctx, bin, Args(opts)...)
 	var output bytes.Buffer
+	var serialOutput bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	var stdin io.WriteCloser
 	if opts.InputText != "" {
-		pipe, err := cmd.StdinPipe()
-		if err != nil {
-			return "", err
+		if serialInputPath == "" {
+			pipe, err := cmd.StdinPipe()
+			if err != nil {
+				return "", err
+			}
+			stdin = pipe
 		}
-		stdin = pipe
 	}
+	var serialDone chan struct{}
 	err := cmd.Start()
+	if err == nil && serialOutputPath != "" {
+		serialDone = make(chan struct{})
+		go func() {
+			outputPipe, openErr := os.OpenFile(serialOutputPath, os.O_RDONLY, 0)
+			if openErr == nil {
+				_, _ = io.Copy(&serialOutput, outputPipe)
+				_ = outputPipe.Close()
+			}
+			close(serialDone)
+		}()
+	}
 	if err == nil && stdin != nil {
 		delay := opts.InputDelay
 		if delay == 0 {
@@ -200,7 +251,30 @@ func Run(opts Options) (string, error) {
 				_ = stdin.Close()
 			case <-time.After(delay):
 				_, _ = stdin.Write([]byte(opts.InputText))
-				_ = stdin.Close()
+				if !opts.KeepInputOpen {
+					_ = stdin.Close()
+				}
+			}
+		}()
+	}
+	if err == nil && opts.InputText != "" && serialInputPath != "" {
+		delay := opts.InputDelay
+		if delay == 0 {
+			delay = 2 * time.Second
+		}
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-time.After(delay):
+				input, openErr := os.OpenFile(serialInputPath, os.O_WRONLY, 0)
+				if openErr != nil {
+					return
+				}
+				_, _ = input.Write([]byte(opts.InputText))
+				if opts.KeepInputOpen {
+					<-ctx.Done()
+				}
+				_ = input.Close()
 			}
 		}()
 	}
@@ -210,7 +284,10 @@ func Run(opts Options) (string, error) {
 	if ivshmemServer != nil {
 		stopIvshmemServer(ivshmemServer)
 	}
-	out := output.String()
+	if serialDone != nil {
+		<-serialDone
+	}
+	out := output.String() + serialOutput.String()
 	if opts.SuccessText != "" && strings.Contains(out, opts.SuccessText) {
 		return out, nil
 	}

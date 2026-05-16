@@ -4,6 +4,7 @@ import "github.com/ryanwible/wrela3/compiler/asm"
 
 const (
 	lapicBase    = 0xFEE00000
+	lapicSVR     = 0xF0
 	lapicICRLow  = 0x300
 	lapicICRHigh = 0x310
 )

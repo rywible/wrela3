@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,18 +35,24 @@ func TestLowerTopicCallsToIntrinsicOps(t *testing.T) {
 module test.topic_lower
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { ExecutorMemory } from machine.x86_64.executor_memory
-use { TopicIdentity, U64GapSubscription, U64GapTopic, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
+use { TopicIdentity, U64GapSubscription, U64GapTopic, U64ReliablePublisher, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-    memory: ExecutorMemory
     input: U64GapSubscription
     reliable_input: U64ReliableSubscription
+    reliable_output: U64ReliablePublisher
     start fn run(self) -> never {
         let next = self.input.try_next()
         self.input.arm_wait()
+        let armed = self.input.is_wait_armed()
+        self.reliable_output.publish_or_wait(value = 42)
+        if self.input.is_wait_armed() {
+            if self.reliable_input.is_wait_armed() {
+                self.loop.wait()
+            }
+        }
         self.loop.wait()
         while true {}
     }
@@ -61,12 +68,12 @@ image Img {
         let commands = U64ReliableTopic(identity = TopicIdentity(label = "commands"), id = 1, depth = 64)
         let command_pub = commands.publisher()
         let reliable_input = commands.subscribe(subscriber = worker_slot)
-        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = input, reliable_input = reliable_input)
+        let results = U64ReliableTopic(identity = TopicIdentity(label = "results"), id = 2, depth = 64)
+        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), input = input, reliable_input = reliable_input, reliable_output = results.publisher())
         counter.publisher().publish(value = 1)
         let result = command_pub.try_publish(value = 2)
         command_pub.wait_for_subscriber_advance()
-        hardware.vcpu1.start(executor = worker)
-        while true {}
+        hardware.vcpu0.enter(executor = worker)
     }
 }`)
 	program, diags := Lower(checked)
@@ -79,16 +86,38 @@ image Img {
 		t.Fatal("missing lowered worker")
 	}
 	tryNext, ok := functionOp[TopicTryNext](*worker)
-	if !ok || tryNext.TopicLabel != "counter" {
+	if !ok || tryNext.TopicLabel != "counter" || tryNext.SubscriberSlot != "worker" {
 		t.Fatalf("worker missing TopicTryNext: %#v", worker.Blocks)
 	}
 	armWait, ok := functionOp[TopicArmWait](*worker)
-	if !ok || armWait.TopicLabel != "counter" {
+	if !ok || armWait.TopicLabel != "counter" || armWait.SubscriberSlot != "worker" {
 		t.Fatalf("worker missing TopicArmWait: %#v", worker.Blocks)
+	}
+	isArmed, ok := functionOp[TopicIsWaitArmed](*worker)
+	if !ok || isArmed.TopicLabel != "counter" || isArmed.SubscriberSlot != "worker" {
+		t.Fatalf("worker missing TopicIsWaitArmed: %#v", worker.Blocks)
 	}
 	topicWait, ok := functionOp[TopicWait](*worker)
 	if !ok || topicWait.SlotLabel != "worker" || topicWait.Policy != "EventSleepPolicy" {
 		t.Fatalf("worker missing TopicWait: %#v", worker.Blocks)
+	}
+	waitIfArmed, ok := functionOp[*TopicWaitIfArmed](*worker)
+	if !ok || waitIfArmed.TopicLabel != "counter" || waitIfArmed.SubscriberSlot != "worker" {
+		t.Fatalf("worker missing TopicWaitIfArmed: %#v", worker.Blocks)
+	}
+	if len(waitIfArmed.Guards) != 2 || waitIfArmed.Guards[0].TopicLabel != "counter" || waitIfArmed.Guards[1].TopicLabel != "commands" {
+		t.Fatalf("TopicWaitIfArmed guards = %#v, want counter and commands", waitIfArmed.Guards)
+	}
+	workerTryPublish, ok := functionOp[*ReliableTopicTryPublish](*worker)
+	if !ok || workerTryPublish.TopicLabel != "results" {
+		t.Fatalf("worker missing lowered publish_or_wait try-publish: %#v", worker.Blocks)
+	}
+	workerWaitAdvance, ok := functionOp[*ReliableTopicWaitForAdvance](*worker)
+	if !ok || workerWaitAdvance.TopicLabel != "results" || workerWaitAdvance.PublisherSlot != "worker" {
+		t.Fatalf("worker missing lowered publish_or_wait wait: %#v", worker.Blocks)
+	}
+	if call, ok := functionOp[*Call](*worker); ok && strings.Contains(call.Symbol, "publish_or_wait") {
+		t.Fatalf("worker kept publish_or_wait as ordinary call: %#v", call)
 	}
 
 	owned := findFunction(program, "_wrela_phase_test_topic_lower_Img_owned_hardware")
@@ -107,9 +136,148 @@ image Img {
 	if !ok || waitAdvance.TopicLabel != "commands" {
 		t.Fatalf("owned phase missing ReliableTopicWaitForAdvance: %#v", owned.Blocks)
 	}
-	if len(program.Topics) != 2 {
-		t.Fatalf("program topics = %#v, want two topic layouts", program.Topics)
+	if len(program.Topics) != 3 {
+		t.Fatalf("program topics = %#v, want three topic layouts", program.Topics)
 	}
+	for _, topic := range program.Topics {
+		if topic.Depth != 64 {
+			t.Fatalf("topic %q depth = %d, want 64", topic.Label, topic.Depth)
+		}
+	}
+}
+
+func TestLowerSpecializesTopicOpsForSameExecutorTypePlacements(t *testing.T) {
+	checked := checkedProgramFromSourcesForTest(t, topicContractForTest(), `
+module test.same_type_topic_lower
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+use { EventSleepPolicy } from machine.x86_64.executor_loop
+use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+
+executor Worker {
+    slot: ExecutorSlot
+    loop: EventSleepPolicy
+    input: U64GapSubscription
+    start fn run(self) -> never {
+        let next = self.input.try_next()
+        if next.has_message {
+        }
+        while true {}
+    }
+}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "worker.a"))
+        let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "worker.b"))
+        let topic_a = U64GapTopic(identity = TopicIdentity(label = "topic.a"), id = 0, depth = 64)
+        let topic_b = U64GapTopic(identity = TopicIdentity(label = "topic.b"), id = 1, depth = 64)
+        let input_a = topic_a.subscribe(subscriber = slot_a)
+        let input_b = topic_b.subscribe(subscriber = slot_b)
+        let worker_a = Worker(slot = slot_a, loop = EventSleepPolicy(), input = input_a)
+        let worker_b = Worker(slot = slot_b, loop = EventSleepPolicy(), input = input_b)
+        hardware.vcpu1.start(executor = worker_a)
+        hardware.vcpu0.enter(executor = worker_b)
+    }
+}`)
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", diags)
+	}
+
+	got := map[string]string{}
+	for _, fn := range program.Functions {
+		if !strings.HasPrefix(fn.Symbol, "_wrela_method_test_same_type_topic_lower_Worker_run") {
+			continue
+		}
+		next, ok := functionOp[TopicTryNext](fn)
+		if !ok {
+			continue
+		}
+		got[next.SubscriberSlot] = next.TopicLabel
+	}
+	want := map[string]string{"worker.a": "topic.a", "worker.b": "topic.b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("specialized worker topic ops = %#v, want %#v", got, want)
+	}
+}
+
+func TestLowerSerialRxNextMessageFieldUsesIRHandleOffset(t *testing.T) {
+	checked := checkedProgramFromSourcesForTest(t, `
+module machine.x86_64.serial
+data SerialPathInterrupt {
+    has_byte: Bool
+    byte: U8
+}
+
+data SerialRxNext {
+    has_message: Bool
+    message: SerialPathInterrupt
+}
+
+module test.serial_next
+use { SerialRxNext } from machine.x86_64.serial
+
+executor Worker {
+    start fn run(self, next: SerialRxNext) -> never {
+        if next.has_message {
+            let byte = next.message.byte
+        }
+        while true {}
+    }
+}
+`)
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", diags)
+	}
+
+	nextInfo := program.Types["machine.x86_64.serial.SerialRxNext"]
+	messageOffset := nextInfo.Fields["message"].Offset
+	if messageOffset != 8 {
+		t.Fatalf("SerialRxNext.message IR offset = %d, want 8", messageOffset)
+	}
+
+	worker := findFunction(program, "_wrela_method_test_serial_next_Worker_run")
+	if worker == nil {
+		t.Fatalf("missing worker run function")
+	}
+	messageLoad := fieldLoadByName(worker.Blocks[0].Ops, "message")
+	if messageLoad == nil {
+		t.Fatalf("worker missing next.message FieldLoad: %#v", worker.Blocks)
+	}
+	if messageLoad.Offset != messageOffset {
+		t.Fatalf("next.message FieldLoad offset = %d, want IR offset %d", messageLoad.Offset, messageOffset)
+	}
+}
+
+func fieldLoadByName(ops []Operation, name string) *FieldLoad {
+	for _, op := range ops {
+		if load, ok := op.(*FieldLoad); ok && load.Field == name {
+			return load
+		}
+		switch nested := op.(type) {
+		case *If:
+			if load := fieldLoadByName(nested.ConditionOps, name); load != nil {
+				return load
+			}
+			if load := fieldLoadByName(nested.Then, name); load != nil {
+				return load
+			}
+			if load := fieldLoadByName(nested.Else, name); load != nil {
+				return load
+			}
+		case *While:
+			if load := fieldLoadByName(nested.ConditionOps, name); load != nil {
+				return load
+			}
+			if load := fieldLoadByName(nested.Body, name); load != nil {
+				return load
+			}
+		}
+	}
+	return nil
 }
 
 func checkedProgramFromSourcesForTest(t *testing.T, sources ...string) *sem.CheckedProgram {
@@ -273,6 +441,13 @@ class U64ReliableTopic {
 class U64ReliablePublisher {
     topic: U64ReliableTopic
     asm fn try_publish(self, value: U64) -> U64PublishResult { ret }
+    fn publish_or_wait(self, value: U64) {
+        let result = self.try_publish(value = value)
+        while result.full {
+            self.wait_for_subscriber_advance()
+            result = self.try_publish(value = value)
+        }
+    }
     asm fn wait_for_subscriber_advance(self) { hlt; ret }
 }
 class U64ReliableSubscription {
