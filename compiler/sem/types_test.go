@@ -933,3 +933,75 @@ image Bad {
 		t.Fatalf("expected SEM0020, got %#v", diags)
 	}
 }
+
+func TestExecutorTopicSourceSurface(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index := mustBuildIndex(t, modules)
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "SlotIdentity"), map[string]string{
+		"label": "StringLiteral",
+	})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "ExecutorSlot"), map[string]string{
+		"id": "U64",
+	})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "Vcpu"), map[string]string{
+		"id": "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.cpu_state", "ExecutorRegistry"), "claim")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "TopicIdentity"), map[string]string{
+		"label": "StringLiteral",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"depth":    "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"depth":    "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "try_publish")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "publish_or_wait")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableSubscription"), "try_next")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
+		"label": "StringLiteral",
+	})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"id":       "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "publisher")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxSubscription"), "try_next")
+}
+
+func assertMethodExists(t *testing.T, typ *Type, name string) {
+	t.Helper()
+	if typ == nil {
+		t.Fatalf("nil type, missing method %s", name)
+	}
+	for _, method := range typ.Methods {
+		if method.Name == name {
+			return
+		}
+	}
+	t.Fatalf("%s.%s missing method %s", typ.Module, typ.Name, name)
+}
+
+func assertTypeFields(t *testing.T, typ *Type, want map[string]string) {
+	t.Helper()
+	if typ == nil {
+		t.Fatal("nil type")
+	}
+	got := map[string]string{}
+	for _, field := range typ.Fields {
+		if field.Type != nil {
+			got[field.Name] = field.Type.Name
+		}
+	}
+	for name, wantType := range want {
+		if got[name] != wantType {
+			t.Fatalf("%s.%s field %s = %q, want %q", typ.Module, typ.Name, name, got[name], wantType)
+		}
+	}
+}

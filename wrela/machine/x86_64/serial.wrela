@@ -1,7 +1,8 @@
 module machine.x86_64.serial
 
 use { Bytes } from machine.x86_64.executor_memory
-use { DriverMemory, ExecutorPlacement } from machine.x86_64.cpu_state
+use { DriverMemory, ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -42,9 +43,51 @@ data SerialPathInterrupt {
     byte: U8
 }
 
+data SerialRxNext {
+    has_message: Bool
+    message: SerialPathInterrupt
+}
+
+class SerialRxTopic {
+    identity: TopicIdentity
+    id: U64
+
+    fn publisher(self) -> SerialRxPublisher {
+        return SerialRxPublisher(topic = self)
+    }
+
+    fn subscribe(self, subscriber: ExecutorSlot) -> SerialRxSubscription {
+        return SerialRxSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    }
+}
+
+class SerialRxPublisher {
+    topic: SerialRxTopic
+}
+
+class SerialRxSubscription {
+    topic: SerialRxTopic
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+
+    asm fn try_next(self) -> SerialRxNext {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.armed = true
+    }
+
+    fn is_wait_armed(self) -> Bool {
+        return self.armed
+    }
+}
+
 driver path SerialConsolePath {
-    owner: ExecutorPlacement
+    identity: PathIdentity
     registers: SerialWriterRegisters
+    rx: SerialRxPublisher
 
     interrupt receiver -> SerialPathInterrupt {
         let status = self.registers.read8(offset = 5)
@@ -88,7 +131,6 @@ driver path SerialConsolePath {
 }
 
 driver path SerialWritePath {
-    owner: ExecutorPlacement
     registers: SerialWriterRegisters
 
     fn write(self, bytes: Bytes) {

@@ -7,6 +7,23 @@ data ExecutorPlacement {
     memory: ExecutorMemory
 }
 
+data SlotIdentity {
+    label: StringLiteral
+}
+
+data PathIdentity {
+    label: StringLiteral
+}
+
+data ExecutorSlot {
+    id: U64
+}
+
+data VcpuStartStatus {
+    started: Bool
+    id: U64
+}
+
 data MemoryPlan {
     owned_memory: OwnedMemory
     executor_arena: MutableBytes
@@ -45,6 +62,16 @@ class DriverMemory {
     region: MutableBytes
 }
 
+class ExecutorRegistry {
+    next_id: U64
+
+    fn claim(self, identity: SlotIdentity) -> ExecutorSlot {
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        return ExecutorSlot(id = id)
+    }
+}
+
 data Com1IoPortClaim {
     port_base: U16
 }
@@ -55,8 +82,14 @@ class IoPortAuthority {
     }
 }
 
+class Vcpu {
+    id: U64
+}
+
 unique class OwnedHardware {
     memory: OwnedMemory
     io_ports: IoPortAuthority
-    vcpu0: ExecutorPlacement
+    executors: ExecutorRegistry
+    vcpu0: Vcpu
+    vcpu1: Vcpu
 }

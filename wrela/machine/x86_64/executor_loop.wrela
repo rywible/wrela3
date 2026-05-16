@@ -1,0 +1,51 @@
+module machine.x86_64.executor_loop
+
+class HotPollPolicy {
+    fn wait(self) {
+        self.pause()
+    }
+
+    asm fn pause(self) {
+        pause
+        ret
+    }
+}
+
+class EventSleepPolicy {
+    asm fn wait(self) {
+        hlt
+        ret
+    }
+}
+
+class AdaptiveLoopPolicy {
+    spins_before_sleep: U64
+
+    fn wait(self) {
+        let spins = self.spins_before_sleep
+        while spins > 0 {
+            self.pause()
+            spins = spins - 1
+        }
+        self.sleep()
+    }
+
+    asm fn pause(self) {
+        pause
+        ret
+    }
+
+    asm fn sleep(self) {
+        hlt
+        ret
+    }
+}
+
+class TimerSleepPolicy {
+    deadline_ticks: U64
+
+    asm fn wait(self) {
+        hlt
+        ret
+    }
+}
