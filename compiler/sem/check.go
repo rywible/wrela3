@@ -25,6 +25,23 @@ type Scope struct {
 	lifetimes        map[string]Lifetime
 	driverPathKeys   map[string]string
 	driverPathFields map[string]map[string]string
+	origins          map[string]localOrigin
+}
+
+type localOrigin struct {
+	Type                *Type
+	Constructor         *ast.ConstructorExpr
+	FieldBindings       map[string]string
+	SlotLabel           string
+	LoopPolicy          string
+	MemoryOwnerLabel    string
+	TopicLabel          string
+	TopicKind           string
+	PathLabel           string
+	EventType           string
+	EventFunctionSymbol string
+	VcpuID              int
+	HasVcpuID           bool
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -34,6 +51,7 @@ func NewScope(parent *Scope) *Scope {
 		lifetimes:        map[string]Lifetime{},
 		driverPathKeys:   map[string]string{},
 		driverPathFields: map[string]map[string]string{},
+		origins:          map[string]localOrigin{},
 	}
 }
 
@@ -75,6 +93,26 @@ func (s *Scope) LookupLifetime(name string) (Lifetime, bool) {
 		return s.parent.LookupLifetime(name)
 	}
 	return Lifetime{}, false
+}
+
+func (s *Scope) DefineOrigin(name string, origin localOrigin) {
+	if s == nil {
+		return
+	}
+	s.origins[name] = origin
+}
+
+func (s *Scope) LookupOrigin(name string) (localOrigin, bool) {
+	if s == nil {
+		return localOrigin{}, false
+	}
+	if origin, ok := s.origins[name]; ok {
+		return origin, true
+	}
+	if s.parent != nil {
+		return s.parent.LookupOrigin(name)
+	}
+	return localOrigin{}, false
 }
 
 func (s *Scope) DefineDriverPath(name, key string) {
@@ -539,6 +577,11 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
 		valueLifetime := c.lifetimeOfExpr(s.Expr, scope)
 		scope.Define(s.Name, valueType)
+		origin := c.originForLetValue(moduleName, s.Expr, valueType, scope)
+		scope.DefineOrigin(s.Name, origin)
+		if ctx == ContextImagePhaseDirect {
+			c.recordGraphFromLet(s.Name, origin, s.SpanV)
+		}
 		c.rememberLocalLifetime(scope, s.Name, valueLifetime)
 		if ctx == ContextImagePhaseDirect && valueType != nil && valueType.Kind == KindDriverPath {
 			c.bindDriverPath(s.Name, s.Expr, scope)
@@ -658,7 +701,11 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		c.checkOwnedDelegatedCrossing(s.Value.Span(), got)
 		return true
 	case *ast.ExprStmt:
-		return isNeverType(c.typeExpr(moduleName, s.Expr, scope, ctx))
+		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		if ctx == ContextImagePhaseDirect {
+			c.recordGraphFromExprStmt(s.Expr, scope)
+		}
+		return isNeverType(valueType)
 	default:
 		c.error(s.Span(), diag.CG0001, "unsupported statement")
 	}
@@ -1023,6 +1070,286 @@ func (c *checker) exprStaticType(moduleName string, expr ast.Expr, scope *Scope)
 	return nil
 }
 
+func stringLiteralArg(expr *ast.ConstructorExpr, name string) (string, bool) {
+	for _, arg := range expr.Args {
+		if arg.Name != name {
+			continue
+		}
+		lit, ok := arg.Value.(*ast.StringLiteral)
+		if !ok {
+			return "", false
+		}
+		return lit.Value, true
+	}
+	return "", false
+}
+
+func namedArgExpr(args []ast.NamedArg, name string) ast.Expr {
+	for _, arg := range args {
+		if arg.Name == name {
+			return arg.Value
+		}
+	}
+	return nil
+}
+
+func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
+	switch e := expr.(type) {
+	case *ast.ConstructorExpr:
+		return c.originForConstructor(moduleName, e, valueType, scope)
+	case *ast.CallExpr:
+		return c.originForCall(moduleName, e, valueType, scope)
+	case *ast.NameExpr:
+		if origin, ok := scope.LookupOrigin(e.Name); ok {
+			return origin
+		}
+	}
+	return localOrigin{Type: valueType}
+}
+
+func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) localOrigin {
+	_ = moduleName
+	origin := localOrigin{
+		Type:          typ,
+		Constructor:   expr,
+		FieldBindings: map[string]string{},
+	}
+	for _, arg := range expr.Args {
+		if named, ok := arg.Value.(*ast.NameExpr); ok {
+			origin.FieldBindings[arg.Name] = named.Name
+		}
+	}
+	if typ == nil {
+		return origin
+	}
+	if IsTopicType(typ) {
+		origin.TopicKind = topicKindForType(typ)
+		if identity := constructorArg(expr, "identity"); identity != nil {
+			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
+				origin.TopicLabel, _ = stringLiteralArg(identityConstructor, "label")
+			}
+		}
+	}
+	if typ.Kind == KindDriverPath {
+		if identity := constructorArg(expr, "identity"); identity != nil {
+			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
+				origin.PathLabel, _ = stringLiteralArg(identityConstructor, "label")
+			}
+		}
+		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(typ)
+	}
+	if typ.Kind == KindExecutor {
+		origin.SlotLabel = slotLabelForExpr(constructorArg(expr, "slot"), scope)
+		origin.MemoryOwnerLabel = slotLabelForExpr(constructorArg(expr, "memory"), scope)
+		if loopType := c.exprStaticType(moduleName, constructorArg(expr, "loop"), scope); loopType != nil {
+			origin.LoopPolicy = loopType.Name
+		}
+	}
+	return origin
+}
+
+func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType *Type, scope *Scope) localOrigin {
+	origin := localOrigin{Type: valueType}
+	receiverType := c.exprStaticType(moduleName, expr.Receiver, scope)
+	if receiverType == nil {
+		return origin
+	}
+	switch {
+	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "ExecutorRegistry" && expr.Method == "claim":
+		identity := namedArgExpr(expr.Args, "identity")
+		if cons, ok := identity.(*ast.ConstructorExpr); ok {
+			origin.SlotLabel, _ = stringLiteralArg(cons, "label")
+		}
+	case receiverType.Module == "machine.x86_64.executor_memory" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
+		origin.SlotLabel = slotLabelForExpr(namedArgExpr(expr.Args, "owner"), scope)
+	case IsTopicType(receiverType) && expr.Method == "subscribe":
+		receiverOrigin := originForExpr(expr.Receiver, scope)
+		origin.TopicLabel = receiverOrigin.TopicLabel
+		origin.TopicKind = receiverOrigin.TopicKind
+		origin.SlotLabel = slotLabelForExpr(namedArgExpr(expr.Args, "subscriber"), scope)
+	case IsTopicType(receiverType) && expr.Method == "publisher":
+		receiverOrigin := originForExpr(expr.Receiver, scope)
+		origin.TopicLabel = receiverOrigin.TopicLabel
+		origin.TopicKind = receiverOrigin.TopicKind
+	case IsVcpuType(receiverType) && (expr.Method == "start" || expr.Method == "enter"):
+		origin = c.vcpuOrigin(expr, scope)
+		origin.Type = valueType
+	}
+	return origin
+}
+
+func (c *checker) recordGraphFromLet(name string, origin localOrigin, span source.Span) {
+	if origin.Type == nil {
+		return
+	}
+	switch {
+	case IsExecutorSlotType(origin.Type):
+		c.graph.ExecutorSlots = append(c.graph.ExecutorSlots, ExecutorSlotNode{Label: origin.SlotLabel, Binding: name, Span: span})
+	case IsTopicType(origin.Type):
+		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Binding: name, Span: span})
+	case IsTopicPublisherType(origin.Type):
+		c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{TopicLabel: origin.TopicLabel, Binding: name, Span: span})
+	case IsTopicSubscriptionType(origin.Type):
+		c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{TopicLabel: origin.TopicLabel, SubscriberLabel: origin.SlotLabel, Binding: name, Span: span})
+	case origin.Type.Kind == KindDriverPath:
+		publishes := origin.FieldBindings["rx"] != "" || origin.FieldBindings["interrupt"] != ""
+		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
+	case origin.Type.Kind == KindExecutor:
+		c.updateExecutorGraphNode(origin, span)
+	}
+}
+
+func (c *checker) recordGraphFromExprStmt(expr ast.Expr, scope *Scope) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	if origin := c.vcpuOrigin(call, scope); origin.HasVcpuID {
+		c.graph.VcpuPlacements = append(c.graph.VcpuPlacements, VcpuPlacementNode{
+			VcpuID:          origin.VcpuID,
+			ExecutorBinding: executorBindingForCall(call),
+			SlotLabel:       origin.SlotLabel,
+			Terminal:        call.Method == "enter",
+			Span:            call.SpanV,
+		})
+	}
+}
+
+func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) {
+	for i := range c.graph.Executors {
+		if c.graph.Executors[i].Span.Start == origin.Constructor.SpanV.Start && c.graph.Executors[i].Span.End == origin.Constructor.SpanV.End {
+			c.graph.Executors[i].SlotLabel = origin.SlotLabel
+			c.graph.Executors[i].LoopPolicy = origin.LoopPolicy
+			c.graph.Executors[i].MemoryOwnerLabel = origin.MemoryOwnerLabel
+			return
+		}
+	}
+	c.graph.Executors = append(c.graph.Executors, ExecutorNode{
+		Type:             origin.Type,
+		Span:             span,
+		FieldBindings:    origin.FieldBindings,
+		SlotLabel:        origin.SlotLabel,
+		LoopPolicy:       origin.LoopPolicy,
+		MemoryOwnerLabel: origin.MemoryOwnerLabel,
+	})
+}
+
+func (c *checker) typeVcpuIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) {
+	if executor := vcpuExecutorArg(expr.Args); executor != nil {
+		c.typeExpr(moduleName, executor, scope, ctx)
+		return
+	}
+	c.error(expr.SpanV, diag.CG0001, "missing call argument executor")
+}
+
+func constructorArg(expr *ast.ConstructorExpr, name string) ast.Expr {
+	if expr == nil {
+		return nil
+	}
+	for _, arg := range expr.Args {
+		if arg.Name == name {
+			return arg.Value
+		}
+	}
+	return nil
+}
+
+func originForExpr(expr ast.Expr, scope *Scope) localOrigin {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if origin, ok := scope.LookupOrigin(e.Name); ok {
+			return origin
+		}
+	}
+	return localOrigin{}
+}
+
+func slotLabelForExpr(expr ast.Expr, scope *Scope) string {
+	origin := originForExpr(expr, scope)
+	return origin.SlotLabel
+}
+
+func executorBindingForCall(call *ast.CallExpr) string {
+	if named, ok := vcpuExecutorArg(call.Args).(*ast.NameExpr); ok {
+		return named.Name
+	}
+	return ""
+}
+
+func (c *checker) vcpuOrigin(call *ast.CallExpr, scope *Scope) localOrigin {
+	if call == nil || (call.Method != "start" && call.Method != "enter") {
+		return localOrigin{}
+	}
+	vcpuID, ok := vcpuIDForReceiver(call.Receiver)
+	if !ok {
+		return localOrigin{}
+	}
+	executorName, ok := vcpuExecutorArg(call.Args).(*ast.NameExpr)
+	if !ok {
+		return localOrigin{VcpuID: vcpuID, HasVcpuID: true}
+	}
+	execOrigin, ok := scope.LookupOrigin(executorName.Name)
+	if !ok {
+		return localOrigin{VcpuID: vcpuID, HasVcpuID: true}
+	}
+	return localOrigin{VcpuID: vcpuID, HasVcpuID: true, SlotLabel: execOrigin.SlotLabel}
+}
+
+func vcpuExecutorArg(args []ast.NamedArg) ast.Expr {
+	if expr := namedArgExpr(args, "executor"); expr != nil {
+		return expr
+	}
+	if len(args) == 1 && args[0].Name == "" {
+		return args[0].Value
+	}
+	return nil
+}
+
+func vcpuIDForReceiver(expr ast.Expr) (int, bool) {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok {
+		return 0, false
+	}
+	switch field.Field {
+	case "vcpu0":
+		return 0, true
+	case "vcpu1":
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
+func topicKindForType(typ *Type) string {
+	switch qualifiedTypeName(typ) {
+	case "machine.x86_64.topic_u64.U64GapTopic":
+		return "gap_u64"
+	case "machine.x86_64.topic_u64.U64ReliableTopic":
+		return "reliable_u64"
+	case "machine.x86_64.serial.SerialRxTopic":
+		return "serial_rx"
+	case "machine.x86_64.edu.EduInterruptTopic":
+		return "edu_interrupt"
+	case "machine.x86_64.ivshmem.IvshmemDoorbellTopic":
+		return "ivshmem_doorbell"
+	default:
+		return ""
+	}
+}
+
+func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) {
+	switch qualifiedTypeName(typ) {
+	case "machine.x86_64.serial.SerialConsolePath":
+		return "serial_rx", "machine.x86_64.serial.SerialPathInterrupt", "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt"
+	case "machine.x86_64.edu.EduMsiPath":
+		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_machine_x86_64_edu_EduMsiPath_interrupt"
+	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
+		return "ivshmem_doorbell", "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt", "_wrela_event_machine_x86_64_ivshmem_IvshmemDoorbellPath_interrupt"
+	default:
+		return "", "", ""
+	}
+}
+
 func (c *checker) checkTypeAssign(span source.Span, targetType, valueType *Type) {
 	if targetType == nil || valueType == nil {
 		return
@@ -1250,6 +1577,13 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 	if IsArenaType(recvType) && (expr.Method == "place" || expr.Method == "reserve") {
 		return c.typeArenaIntrinsicCall(moduleName, expr, scope, ctx)
+	}
+	if IsVcpuType(recvType) && (expr.Method == "start" || expr.Method == "enter") {
+		c.typeVcpuIntrinsicCall(moduleName, expr, scope, ctx)
+		if expr.Method == "start" {
+			return c.mustType("machine.x86_64.cpu_state", "VcpuStartStatus")
+		}
+		return c.mustType(moduleName, "never")
 	}
 	method, errSpan := c.lookupMethod(recvType, expr.Method, expr.SpanV)
 	if method == nil {
