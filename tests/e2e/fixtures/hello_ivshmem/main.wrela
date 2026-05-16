@@ -1,14 +1,15 @@
 module tests.e2e.fixtures.hello_ivshmem.main
 
 use { HelloWorld } from tests.e2e.fixtures.hello_ivshmem.program
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
+use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
-use { CpuPlan, DriverMemory, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { Bytes, MutableBytes } from machine.x86_64.executor_memory
+use { Bytes } from machine.x86_64.executor_memory
 use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
-use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
+use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
 use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellTopic } from machine.x86_64.ivshmem
-use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
 use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity } from machine.x86_64.topic_u64
 
@@ -18,22 +19,45 @@ image HelloSerial {
     }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let arena = MutableBytes(address = 0x200000, length = 0x200000)
+        let root = PlatformDiscoveryRoot(panic = BootPanic())
+        let discovery = root.from_uefi(hardware = hardware)
+        let memory_region = discovery.memory.require_usable_region(
+            min_base = 0x200000,
+            length = 0x600000,
+            align = 4096
+        )
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let interrupts = discovery.interrupts
+        let pci = discovery.pci
+        let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
+        let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
+        let ivshmem_tx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 1)
+        let hardware_plan = HardwarePlan(
+            cpus = cpus,
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlan(
+                edu_bar0 = edu.claim_mmio_bar(index = 0),
+                edu_msi = edu.claim_msi(),
+                ivshmem_rx_bar0 = ivshmem_rx.claim_mmio_bar(index = 0),
+                ivshmem_rx_msix = ivshmem_rx.claim_msix(table_bar_index = 1),
+                ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0)
+            )
+        )
         let memory_plan = MemoryPlan(
-            owned_memory = OwnedMemory(arena = arena),
-            executor_arena = arena,
+            owned_memory = OwnedMemory(arena = memory_region),
+            executor_arena = memory_region,
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            owned_stack_top = arena.address + arena.length,
+            owned_stack_top = memory_region.address + memory_region.length,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),
-            cr3 = arena.address
+            cr3 = memory_region.address
         )
-        return hardware.exit_to_owned_hardware(
-            memory_plan = memory_plan,
-            cpu_plan = cpu_plan
-        )
+        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
@@ -57,17 +81,10 @@ image HelloSerial {
         )
         let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "hello.ivshmem.console"),
+            route = hardware.hardware_plan.interrupts.serial_irq4,
             rx = serial_rx_topic.publisher()
         )
-        let pci_config = PciConfigPorts()
-        let pci_probe = Q35PciInterruptConfigurator(
-            config = pci_config,
-            ivshmem_msix_table = MsixTable(base = 0)
-        )
-        let pci_interrupts = Q35PciInterruptConfigurator(
-            config = pci_config,
-            ivshmem_msix_table = MsixTable(base = pci_probe.ivshmem_rx_bar1())
-        )
+        serial_path.write(hello_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
         let edu_interrupt_topic = EduInterruptTopic(
             identity = TopicIdentity(label = "hello.ivshmem.edu.interrupt"),
             id = 1
@@ -81,30 +98,28 @@ image HelloSerial {
         let ivshmem_events = ivshmem_topic.subscribe(subscriber = hello_slot)
         let edu_path = EduMsiPath(
             identity = PathIdentity(label = "hello.ivshmem.edu"),
-            mmio_base = pci_probe.edu_bar0(),
+            mmio = hardware.hardware_plan.pci.edu_bar0,
             irq = edu_interrupt_topic.publisher()
         )
         let ivshmem_rx = IvshmemDoorbellPath(
             identity = PathIdentity(label = "hello.ivshmem.rx"),
-            registers_base = pci_probe.ivshmem_rx_bar0(),
+            registers = hardware.hardware_plan.pci.ivshmem_rx_bar0,
             irq = ivshmem_topic.publisher()
         )
         let hello = HelloWorld(
             slot = hello_slot,
             loop = EventSleepPolicy(),
             memory = hello_memory,
-            interrupts = ApicInterruptController(
-                local_apic = LocalApic(base = 0xFEE00000),
-                io_apic = IoApic(base = 0xFEC00000)
-            ),
-            pci_interrupts = pci_interrupts,
+            interrupts = ApicInterruptController(local_apic = hardware.hardware_plan.interrupts.local_apic),
+            edu_msi = hardware.hardware_plan.pci.edu_msi,
+            ivshmem_msix = hardware.hardware_plan.pci.ivshmem_rx_msix,
             serial_path = serial_path,
             serial_rx = serial_rx,
             edu_path = edu_path,
             edu_interrupts = edu_interrupts,
             ivshmem_rx = ivshmem_rx,
             ivshmem_events = ivshmem_events,
-            ivshmem_tx = IvshmemDoorbellPeerPath(registers_base = pci_probe.ivshmem_tx_bar0())
+            ivshmem_tx = IvshmemDoorbellPeerPath(registers = hardware.hardware_plan.pci.ivshmem_tx_bar0)
         )
         hardware.vcpu0.enter(executor = hello)
     }

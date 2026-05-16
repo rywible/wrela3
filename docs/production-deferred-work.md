@@ -11,12 +11,12 @@
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.
 - v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, ivshmem-doorbell via MSI-X, AP startup, and explicit vCPU placement on QEMU lab hardware.
 - v0 still exposes no CPU traps.
-- Production work remains for ACPI discovery, PCI enumeration, shared interrupts, timers, interrupt queues, x2APIC, and hardware-derived multiprocessor routing beyond the static q35 two-vCPU shape. Real-hardware AP startup also needs calibrated PIT/TSC delays instead of fixed spin loops, explicit high-CR3 trampoline support or a documented low-page-table contract, and an interrupt save policy if Wrela ever emits FPU/SSE/AVX instructions.
+- Production work remains for shared interrupts, timers, interrupt queues, x2APIC, richer topology placement, and hardware-derived multiprocessor routing beyond the current two-vCPU examples. Real-hardware AP startup also needs calibrated PIT/TSC delays instead of fixed spin loops, explicit high-CR3 trampoline support or a documented low-page-table contract, and an interrupt save policy if Wrela ever emits FPU/SSE/AVX instructions.
 
 ## Hardware discovery
 - This is required for production and not optional because ACPI, PCIe, and framebuffer discovery are expected for realistic boots and platform integration.
-- v0 exclusion reason: the current implementation focuses on identity-mapped execution and serial output only, with no platform-agnostic probe graph yet.
-- v0 must not block: the deferred discovery path should consume the same `platform.uefi.types` and machine/module boundaries as this release so future modules can be added without rewrites.
+- Implemented direction: UEFI roots, ACPI RSDP/RSDT/XSDT lookup, MADT CPU/interrupt facts, MCFG ECAM windows, PCI BAR/MSI/MSI-X claims, and required-hardware boot fatal paths are source-visible Wrela authorities.
+- Remaining production work: multiple ECAM windows, PCI bridge bus walking, richer PCI capability coverage, framebuffer discovery, IOMMU/DMA policy, robust firmware quirk handling, and broader hardware-in-loop coverage.
 
 ## Drivers and IO
 - This is required for production and not optional because storage, network, and frame-buffer paths depend on robust driver abstractions, not toy I/O.

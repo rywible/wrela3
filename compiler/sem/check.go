@@ -1769,7 +1769,9 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		}
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
-	case receiverType.Module == "machine.x86_64.pci" && receiverType.Name == "PciDeviceSet" && expr.Method == "require_device":
+	case receiverType.Module == "machine.x86_64.pci" &&
+		(receiverType.Name == "PciDeviceSet" || receiverType.Name == "PcieEcamWindows") &&
+		expr.Method == "require_device":
 		origin.PciDeviceKey = pciDeviceKeyFromRequireDevice(expr)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
@@ -1972,18 +1974,6 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 	switch qualifiedTypeName(receiverType) + "::" + call.Method {
 	case "machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive":
 		return "serial_rx", 0x40, true
-	case "machine.x86_64.pci.Q35PciInterruptConfigurator::configure_edu_msi_vector41":
-		return "edu_interrupt", 0x41, true
-	case "machine.x86_64.pci.Q35PciInterruptConfigurator::configure_ivshmem_msix_vector42":
-		vector := 0x42
-		if arg := namedArgExpr(call.Args, "vector"); arg != nil {
-			if literal, ok := arg.(*ast.IntLiteral); ok {
-				if parsed, err := strconv.ParseInt(literal.Value, 0, 32); err == nil {
-					vector = int(parsed)
-				}
-			}
-		}
-		return "ivshmem_doorbell", vector, true
 	case "machine.x86_64.pci.MsiCapability::route":
 		if vector, ok := interruptVectorValueArg(call); ok {
 			return "edu_interrupt", vector, true
@@ -2630,11 +2620,9 @@ func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
 		"machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive",
 		"machine.x86_64.interrupts.LocalApic::enable",
 		"machine.x86_64.interrupts.IoApic::route_gsi4_to_vector40",
-		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_edu_msi_vector41",
-		"machine.x86_64.pci.Q35PciInterruptConfigurator::configure_ivshmem_msix_vector42",
-		"machine.x86_64.pci.Q35PciInterruptConfigurator::write_config32",
-		"machine.x86_64.pci.PciConfigPorts::write32",
-		"machine.x86_64.pci.MsixTable::write_entry0",
+		"machine.x86_64.pci.PciDevice::write_config32",
+		"machine.x86_64.pci.MsiCapability::route",
+		"machine.x86_64.pci.MsixCapability::route_entry",
 		"machine.x86_64.edu.EduMsiPath::raise_test_interrupt",
 		"machine.x86_64.edu.EduMsiPath::write32",
 		"machine.x86_64.ivshmem.IvshmemDoorbellPeerPath::ring_peer",

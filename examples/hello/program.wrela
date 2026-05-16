@@ -4,8 +4,8 @@ use { ExecutorSlot } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { EduInterruptSubscription, EduMsiPath } from machine.x86_64.edu
-use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
-use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
+use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
+use { MsiCapability } from machine.x86_64.pci
 use { SerialConsolePath, SerialRxSubscription } from machine.x86_64.serial
 
 data RunScratch {
@@ -17,7 +17,7 @@ executor HelloWorld {
     loop: EventSleepPolicy
     memory: ExecutorMemory
     interrupts: ApicInterruptController
-    pci_interrupts: Q35PciInterruptConfigurator
+    edu_msi: MsiCapability
     serial_path: SerialConsolePath
     serial_rx: SerialRxSubscription
     edu_path: EduMsiPath
@@ -29,7 +29,7 @@ executor HelloWorld {
             self.serial_path.write(scratch.hello)
         }
         self.interrupts.initialize_for_com1_receive()
-        self.pci_interrupts.configure_edu_msi_vector41()
+        self.edu_msi.route(vector = InterruptVector(value = 0x41), target = self.interrupts.local_apic)
         self.interrupts.enable_cpu_interrupts()
         self.edu_path.raise_test_interrupt()
         while true {

@@ -148,13 +148,24 @@ func TestAcpiRootRequireTableLowersChecksumAndOffsets(t *testing.T) {
 	if requireTable == nil {
 		t.Fatalf("missing AcpiRoot.require_table")
 	}
-	for _, want := range []uint64{36, 8} {
+	for _, want := range []uint64{36, 8, 0xAC010005} {
 		if !functionHasConstInt(requireTable, want) {
 			t.Fatalf("AcpiRoot.require_table missing constant %#x", want)
 		}
 	}
 	if !functionCalls(requireTable, "_wrela_method_platform_acpi_tables_AcpiHelpers_checksum_ok") {
 		t.Fatalf("AcpiRoot.require_table must validate table checksums")
+	}
+	rootSource := readCodegenRepoFile(t, "wrela/platform/acpi/root.wrela")
+	for _, want := range []string{
+		"let table_bytes = PhysicalBytes(address = found_table.address, length = found_table.length, panic = self.panic).bounded()",
+		"helpers.checksum_ok(bytes = table_bytes)",
+		"self.panic.fail(code = 0xAC010005)",
+		"return found_table",
+	} {
+		if !strings.Contains(rootSource, want) {
+			t.Fatalf("AcpiRoot.require_table source missing matched-table checksum path %q", want)
+		}
 	}
 	requireMadt := findIRFunction(program, "_wrela_method_platform_acpi_root_AcpiRoot_require_madt")
 	if requireMadt == nil || !functionHasConstInt(requireMadt, 0x43495041) {
@@ -319,8 +330,8 @@ func TestInterruptPlatformSourceCodegen(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	methods := []ir.AsmMethod{
 		asmMethodFromSem(t, checked, "machine.x86_64.interrupts", "ApicInterruptController", "enable_cpu_interrupts"),
-		asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "write32"),
-		asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "read32"),
+		asmMethodFromSem(t, checked, "machine.x86_64.serial", "SerialWriterRegisters", "write8"),
+		asmMethodFromSem(t, checked, "machine.x86_64.serial", "SerialWriterRegisters", "read8"),
 	}
 	var allText []byte
 	for _, method := range methods {
@@ -330,7 +341,7 @@ func TestInterruptPlatformSourceCodegen(t *testing.T) {
 		}
 		allText = append(allText, unit.Bytes...)
 	}
-	for _, want := range [][]byte{{0xFB}, {0xEF}, {0xED}} {
+	for _, want := range [][]byte{{0xFB}, {0xEE}, {0xEC}} {
 		if !containsBytes(allText, want) {
 			t.Fatalf("compiled platform source asm missing bytes %#x", want)
 		}
@@ -731,6 +742,19 @@ func parseUEFIModulesForCodegen(t *testing.T) []*ast.Module {
 	}
 	repoRoot := filepath.Clean(filepath.Join(workdir, "..", ".."))
 	return parseUEFIModuleFiles(t, repoRoot)
+}
+
+func readCodegenRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+	workdir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(workdir, "..", "..", rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return string(raw)
 }
 
 func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {

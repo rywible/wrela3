@@ -1,9 +1,12 @@
 module tests.e2e.cache_memory
 
 use { DelegatedHardware } from platform.uefi.transition
+use { BootPanic } from platform.hardware.panic
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { CacheArena } from machine.x86_64.cache_memory
-use { CpuPlan, DriverMemory, ExecutorSlot, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
-use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { ClaimedPciPlanBuilder, CpuPlan, DriverMemory, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
+use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
+use { InterruptVector } from machine.x86_64.interrupts
 use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
 
 executor CacheMemoryProbe {
@@ -89,21 +92,36 @@ image CacheMemorySmoke {
     }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let arena = MutableBytes(address = 0x200000, length = 0x200000)
+        let root = PlatformDiscoveryRoot(panic = BootPanic())
+        let discovery = root.from_uefi(hardware = hardware)
+        let memory_region = discovery.memory.require_usable_region(
+            min_base = 0x200000,
+            length = 0x400000,
+            align = 4096
+        )
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = discovery.interrupts.local_apic,
+                serial_irq4 = discovery.interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlanBuilder(panic = discovery.panic).empty()
+        )
         let memory_plan = MemoryPlan(
-            owned_memory = OwnedMemory(arena = arena),
-            executor_arena = arena,
+            owned_memory = OwnedMemory(arena = memory_region),
+            executor_arena = memory_region,
             io_ports = IoPortAuthority()
         )
         let cpu_plan = CpuPlan(
-            owned_stack_top = arena.address + arena.length,
+            owned_stack_top = memory_region.address + memory_region.length,
             gdt_descriptor = Bytes(address = 0, length = 0),
             idt_descriptor = Bytes(address = 0, length = 0),
-            cr3 = arena.address
+            cr3 = memory_region.address
         )
         return hardware.exit_to_owned_hardware(
             memory_plan = memory_plan,
-            cpu_plan = cpu_plan
+            cpu_plan = cpu_plan,
+            hardware_plan = hardware_plan
         )
     }
 
@@ -117,6 +135,7 @@ image CacheMemorySmoke {
         let serial_path = SerialWritePath(registers = serial_driver.registers)
         let slot = hardware.executors.claim(identity = SlotIdentity(label = "cache"))
         let executor_memory = hardware.memory.claim_executor_arena(owner = slot, length = 0x200000, align = 4096)
+        serial_path.write(executor_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
         let storage = executor_memory.reserve(length = 40, align = 8)
         let zero_storage = executor_memory.reserve(length = 24, align = 8)
         let short_storage = executor_memory.reserve(length = 39, align = 8)

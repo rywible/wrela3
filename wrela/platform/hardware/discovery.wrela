@@ -4,15 +4,55 @@ use { AcpiLocator, AcpiRoot } from platform.acpi.root
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
 use { UefiMemoryMap } from platform.uefi.types
+use { HardwarePlan } from machine.x86_64.cpu_state
+use { MutableBytes } from machine.x86_64.executor_memory
 use { InterruptAuthority } from machine.x86_64.interrupts
-use { PciDeviceSet } from machine.x86_64.pci
+use { PcieEcamWindows } from machine.x86_64.pci
 
-class DiscoveredHardware {
+data DiscoveredHardware {
     memory: UefiMemoryMap
     acpi: AcpiRoot
     interrupts: InterruptAuthority
-    pci: PciDeviceSet
+    pci: PcieEcamWindows
     panic: BootPanic
+
+    fn report(self, memory: MutableBytes, hardware_plan: HardwarePlan) -> DiscoveryReport {
+        let pci_device_count = 0
+        if hardware_plan.pci.edu_bar0.length != 0 {
+            pci_device_count = pci_device_count + 1
+        }
+        if hardware_plan.pci.ivshmem_rx_bar0.length != 0 {
+            pci_device_count = pci_device_count + 1
+        }
+        if hardware_plan.pci.ivshmem_tx_bar0.length != 0 {
+            pci_device_count = pci_device_count + 1
+        }
+        return DiscoveryReport(
+            memory_base = memory.address,
+            memory_length = memory.length,
+            bootstrap_apic_id = hardware_plan.cpus.bootstrap.apic_id,
+            secondary_apic_id = hardware_plan.cpus.secondary.apic_id,
+            local_apic_base = hardware_plan.interrupts.local_apic.base,
+            io_apic_base = hardware_plan.interrupts.serial_irq4.io_apic.address,
+            serial_gsi = hardware_plan.interrupts.serial_irq4.gsi,
+            pci_device_count = pci_device_count,
+            edu_bar0 = hardware_plan.pci.edu_bar0.address,
+            ivshmem_rx_bar0 = hardware_plan.pci.ivshmem_rx_bar0.address
+        )
+    }
+}
+
+data DiscoveryReport {
+    memory_base: PhysicalAddress
+    memory_length: U64
+    bootstrap_apic_id: U32
+    secondary_apic_id: U32
+    local_apic_base: PhysicalAddress
+    io_apic_base: PhysicalAddress
+    serial_gsi: U32
+    pci_device_count: U64
+    edu_bar0: PhysicalAddress
+    ivshmem_rx_bar0: PhysicalAddress
 }
 
 class PlatformDiscoveryRoot {
@@ -28,7 +68,7 @@ class PlatformDiscoveryRoot {
             memory = memory,
             acpi = acpi,
             interrupts = madt.interrupt_authority(),
-            pci = mcfg.ecam_windows().enumerate(),
+            pci = mcfg.ecam_windows(),
             panic = self.panic
         )
     }

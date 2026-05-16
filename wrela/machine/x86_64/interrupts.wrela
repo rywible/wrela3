@@ -14,7 +14,7 @@ data InterruptOverride {
     flags: U16
 }
 
-class InterruptOverrideSet {
+data InterruptOverrideSet {
     count: U64
     override0: InterruptOverride
     override1: InterruptOverride
@@ -85,7 +85,7 @@ class InterruptOverrideSet {
     }
 }
 
-class LocalApic {
+data LocalApic {
     base: PhysicalAddress
     apic_id: U32
     panic: BootPanic
@@ -107,7 +107,7 @@ class LocalApic {
     }
 }
 
-class IoApicDiscovered {
+data IoApicDiscovered {
     id: U8
     address: PhysicalAddress
     gsi_base: U32
@@ -124,7 +124,7 @@ class IoApicDiscovered {
     }
 }
 
-class IoApicSet {
+data IoApicSet {
     count: U64
     io_apic0: IoApicDiscovered
 
@@ -136,7 +136,7 @@ class IoApicSet {
     }
 }
 
-class IoApicRoute {
+data IoApicRoute {
     io_apic: IoApicDiscovered
     gsi: U32
     flags: U16
@@ -145,6 +145,9 @@ class IoApicRoute {
 
     fn program(self) {
         let redir = (self.gsi - self.io_apic.gsi_base) << 1
+        if self.gsi >= self.io_apic.gsi_base + self.io_apic.redirection_count() {
+            self.io_apic.panic.fail(code = 0xAC050002)
+        }
         let low = self.vector.value
         if (self.flags & 0x0003) == 0x0003 {
             low = low | (1 << 13)
@@ -159,7 +162,7 @@ class IoApicRoute {
     }
 }
 
-class InterruptAuthority {
+data InterruptAuthority {
     local_apic: LocalApic
     io_apics: IoApicSet
     overrides: InterruptOverrideSet
@@ -171,9 +174,6 @@ class InterruptAuthority {
         let io_apic = self.io_apics.io_apic0
         if gsi < io_apic.gsi_base {
             self.panic.fail(code = 0xAC050001)
-        }
-        if gsi >= io_apic.gsi_base + io_apic.redirection_count() {
-            self.panic.fail(code = 0xAC050002)
         }
         return IoApicRoute(io_apic = io_apic, gsi = gsi, flags = flags, vector = InterruptVector(value = vector.value), destination_apic_id = self.local_apic.apic_id)
     }

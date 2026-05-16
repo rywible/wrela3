@@ -107,6 +107,45 @@ func TestBuildReturnsResolvedRelativeOutputPath(t *testing.T) {
 	}
 }
 
+func TestHelloUsesHardwareDiscoverySource(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "examples", "hello", "main.wrela"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, forbidden := range []string{
+		"Q35" + "PciInterruptConfigurator",
+		"Pci" + "ConfigPorts",
+		"0xFEE00000",
+		"0xFEC" + "00000",
+		"MutableBytes(address = " + "0x200000",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("hello source still contains %q", forbidden)
+		}
+	}
+	for _, required := range []string{"PlatformDiscoveryRoot", "require_usable_region", "require_device", "claim_msi", "discovery.report"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("hello source missing %q", required)
+		}
+	}
+}
+
+func TestNoLegacyQ35DiscoveryAssumptions(t *testing.T) {
+	forbidden := []string{
+		"Q35" + "PciInterruptConfigurator",
+		"Pci" + "ConfigPorts",
+		"0xFEC" + "00000",
+		"MutableBytes(address = " + "0x200000",
+		"LocalApic(base = " + "0xFEE00000",
+		"lapicBase",
+		"emitLapicWrite(e, lapic",
+	}
+	for _, root := range []string{"examples", "tests/e2e/fixtures", "wrela", "compiler/codegen"} {
+		scanRepoSourceTree(t, root, forbidden)
+	}
+}
+
 func TestBuildHelloImageContainsRuntimeSignals(t *testing.T) {
 	tmp := t.TempDir()
 	out := filepath.Join(tmp, "hello.efi")
@@ -269,7 +308,7 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 		"_wrela_method_examples_hello_program_HelloWorld_run",
 		"_wrela_method_machine_x86_64_executor_memory_ExecutorMemory_bytes",
 		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_initialize_for_com1_receive",
-		"_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_edu_msi_vector41",
+		"_wrela_method_machine_x86_64_pci_MsiCapability_route",
 		"_wrela_method_machine_x86_64_interrupts_ApicInterruptController_enable_cpu_interrupts",
 		"_wrela_method_machine_x86_64_edu_EduMsiPath_raise_test_interrupt",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
@@ -367,8 +406,8 @@ func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 
 func TestEduInterruptReceiverAcknowledgesBeforeTopicDelivery(t *testing.T) {
 	source := readRepoFile(t, "wrela/machine/x86_64/edu.wrela")
-	if !strings.Contains(source, "let status = self.read32(offset = 0x24)") ||
-		!strings.Contains(source, "self.write32(offset = 0x64, value = status)") {
+	if !strings.Contains(source, "let status = self.mmio.read32(offset = 0x24)") ||
+		!strings.Contains(source, "self.mmio.write32(offset = 0x64, value = status)") {
 		t.Fatalf("EduMsiPath interrupt receiver must acknowledge device status before returning event")
 	}
 }
@@ -583,6 +622,45 @@ func hexBytes(bytes []byte) string {
 		b.WriteByte(digits[by&0xf])
 	}
 	return b.String()
+}
+
+func scanRepoSourceTree(t *testing.T, root string, forbidden []string) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(wd, ".."))
+	if err := filepath.WalkDir(filepath.Join(repoRoot, root), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		switch filepath.Ext(path) {
+		case ".go", ".wrela":
+		default:
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(raw)
+		rel, err := filepath.Rel(repoRoot, path)
+		if err != nil {
+			rel = path
+		}
+		for _, needle := range forbidden {
+			if strings.Contains(text, needle) {
+				t.Fatalf("%s contains legacy hardware assumption %q", rel, needle)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readRepoFile(t *testing.T, path string) string {

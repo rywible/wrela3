@@ -92,7 +92,7 @@ data EnabledCpu {
     apic_id: U32
 }
 
-class EnabledCpuSet {
+data EnabledCpuSet {
     count: U64
     cpu0: EnabledCpu
     cpu1: EnabledCpu
@@ -131,7 +131,7 @@ data CpuTopology {
     }
 }
 
-class Vcpu {
+data Vcpu {
     id: U64
     apic_id: U32
     local_apic_base: PhysicalAddress

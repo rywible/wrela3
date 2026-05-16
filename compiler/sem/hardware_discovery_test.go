@@ -23,9 +23,29 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	if fieldTypeName(t, owned, "hardware_plan") != "HardwarePlan" {
 		t.Fatalf("OwnedHardware.hardware_plan must be HardwarePlan")
 	}
+	discovered := moduleType(t, index, "platform.hardware.discovery", "DiscoveredHardware")
+	if fieldTypeName(t, discovered, "pci") != "PcieEcamWindows" {
+		t.Fatalf("DiscoveredHardware.pci must be lazy PcieEcamWindows")
+	}
+	report := moduleType(t, index, "platform.hardware.discovery", "DiscoveryReport")
+	for _, field := range []string{
+		"memory_base",
+		"memory_length",
+		"bootstrap_apic_id",
+		"secondary_apic_id",
+		"local_apic_base",
+		"io_apic_base",
+		"serial_gsi",
+		"pci_device_count",
+		"edu_bar0",
+		"ivshmem_rx_bar0",
+	} {
+		_ = fieldTypeName(t, report, field)
+	}
+	assertMethodExists(t, discovered, "report")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_madt")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_mcfg")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet"), "require_device")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows"), "require_device")
 	root := moduleType(t, index, "platform.acpi.root", "AcpiRoot")
 	assertMethodExists(t, root, "require_table")
 	assertMethodExists(t, root, "require_madt")
@@ -52,7 +72,8 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, madt, "interrupt_authority")
 
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.mcfg", "McfgTable"), "ecam_windows")
-	_ = moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
+	windows := moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
+	assertMethodExists(t, windows, "require_device")
 	pci := moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet")
 	assertMethodExists(t, pci, "require_device")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")

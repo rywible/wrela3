@@ -4,7 +4,7 @@ use { BoundedBytes, PhysicalBytes } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 
 data AcpiTable {
-    bytes: BoundedBytes
+    address: PhysicalAddress
     signature: U32
     length: U32
 }
@@ -16,7 +16,7 @@ class AcpiHelpers {
         let header = PhysicalBytes(address = address, length = 36, panic = self.panic).bounded()
         let length = header.read_u32(offset = 4)
         let bytes = PhysicalBytes(address = address, length = length, panic = self.panic).bounded()
-        return AcpiTable(bytes = bytes, signature = bytes.read_u32(offset = 0), length = length)
+        return AcpiTable(address = address, signature = bytes.read_u32(offset = 0), length = length)
     }
 
     fn checksum_ok(self, bytes: BoundedBytes) -> Bool {

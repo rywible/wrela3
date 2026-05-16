@@ -4,119 +4,6 @@ use { IoPortRegion, MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { InterruptVector, LocalApic } from machine.x86_64.interrupts
 
-class PciConfigPorts {
-    asm fn write32(self, address: U32, value: U32) {
-        mov r10d, value
-        mov dx, 0x0CF8
-        mov eax, address
-        out dx, eax
-        mov dx, 0x0CFC
-        mov eax, r10d
-        out dx, eax
-        ret
-    }
-
-    asm fn read32(self, address: U32) -> U32 {
-        mov dx, 0x0CF8
-        mov eax, address
-        out dx, eax
-        mov dx, 0x0CFC
-        in eax, dx
-        ret
-    }
-}
-
-class MsixTable {
-    base: VirtualAddress
-
-    asm fn write_entry0(self, message_address: U32, message_data: U32) {
-        mov r11, self.base
-        mov eax, message_address
-        mov [r11 + 0], eax
-        mov eax, 0
-        mov [r11 + 4], eax
-        mov eax, message_data
-        mov [r11 + 8], eax
-        mov eax, 0
-        mov [r11 + 12], eax
-        ret
-    }
-}
-
-class Q35PciInterruptConfigurator {
-    config: PciConfigPorts
-    ivshmem_msix_table: MsixTable
-
-    fn config_address(self, slot: U32, offset: U32) -> U32 {
-        return 0x80000000 | (slot << 11) | (offset & 0xFC)
-    }
-
-    fn read_config32(self, slot: U32, offset: U32) -> U32 {
-        return self.config.read32(address = self.config_address(slot = slot, offset = offset))
-    }
-
-    fn write_config32(self, slot: U32, offset: U32, value: U32) {
-        self.config.write32(address = self.config_address(slot = slot, offset = offset), value = value)
-    }
-
-    fn find_capability(self, slot: U32, capability_id: U32) -> U32 {
-        let ptr = self.read_config32(slot = slot, offset = 0x34) & 0xFC
-        let remaining = 48
-        while remaining != 0 {
-            if ptr == 0 {
-                return 0
-            }
-            let header = self.read_config32(slot = slot, offset = ptr)
-            if (header & 0xFF) == capability_id {
-                return ptr
-            }
-            ptr = (header >> 8) & 0xFC
-            remaining = remaining - 1
-        }
-        return 0
-    }
-
-    fn edu_bar0(self) -> VirtualAddress {
-        return self.read_config32(slot = 5, offset = 0x10) & 0xFFFFFFF0
-    }
-
-    fn ivshmem_rx_bar0(self) -> VirtualAddress {
-        return self.read_config32(slot = 6, offset = 0x10) & 0xFFFFFFF0
-    }
-
-    fn ivshmem_rx_bar1(self) -> VirtualAddress {
-        return self.read_config32(slot = 6, offset = 0x14) & 0xFFFFFFF0
-    }
-
-    fn ivshmem_tx_bar0(self) -> VirtualAddress {
-        return self.read_config32(slot = 7, offset = 0x10) & 0xFFFFFFF0
-    }
-
-    fn configure_edu_msi_vector41(self) {
-        let command_status = self.read_config32(slot = 5, offset = 0x04)
-        self.write_config32(slot = 5, offset = 0x04, value = command_status | 0x00000006)
-        let cap = self.find_capability(slot = 5, capability_id = 0x05)
-        let header = self.read_config32(slot = 5, offset = cap)
-        let enabled_header = header | 0x00010000
-        let control = (header >> 16) & 0xFFFF
-        self.write_config32(slot = 5, offset = cap + 4, value = 0xFEE00000)
-        if (control & 0x80) != 0 {
-            self.write_config32(slot = 5, offset = cap + 8, value = 0)
-            self.write_config32(slot = 5, offset = cap + 12, value = 0x00000041)
-        } else {
-            self.write_config32(slot = 5, offset = cap + 8, value = 0x00000041)
-        }
-        self.write_config32(slot = 5, offset = cap + 0, value = enabled_header)
-    }
-
-    fn configure_ivshmem_msix_vector42(self) {
-        let cap = self.find_capability(slot = 6, capability_id = 0x11)
-        let header = self.read_config32(slot = 6, offset = cap)
-        self.ivshmem_msix_table.write_entry0(message_address = 0xFEE00000, message_data = 0x42)
-        self.write_config32(slot = 6, offset = cap + 0, value = header | 0x80000000)
-    }
-}
-
 data PciDeviceIdentity {
     segment: U16
     bus: U8
@@ -133,7 +20,7 @@ data PciInterruptRoute {
     vector: InterruptVector
 }
 
-class PcieEcamWindow {
+data PcieEcamWindow {
     base: PhysicalAddress
     segment: U16
     start_bus: U8
@@ -160,10 +47,70 @@ class PcieEcamWindow {
     }
 }
 
-class PcieEcamWindows {
+data PcieEcamWindows {
     count: U64
     window0: PcieEcamWindow
     panic: BootPanic
+
+    fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
+        let seen = 0
+        let bus = self.window0.start_bus
+        while bus <= self.window0.end_bus {
+            let device = 0
+            while device < 32 {
+                let function = 0
+                let scan_more_functions = true
+                while function < 8 {
+                    let vendor_device = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0)
+                    if (vendor_device & 0xFFFF) != 0xFFFF {
+                        if (vendor_device & 0xFFFF) == vendor_id {
+                            if (vendor_device >> 16) == device_id {
+                                if seen == occurrence {
+                                    let class_reg = self.window0.read_config32(bus = bus, device = device, function = function, offset = 8)
+                                    return PciDevice(
+                                        window = self.window0,
+                                        identity = PciDeviceIdentity(
+                                            segment = self.window0.segment,
+                                            bus = bus,
+                                            device = device,
+                                            function = function,
+                                            vendor_id = vendor_device & 0xFFFF,
+                                            device_id = vendor_device >> 16,
+                                            class_code = class_reg >> 24,
+                                            subclass = (class_reg >> 16) & 0xFF,
+                                            prog_if = (class_reg >> 8) & 0xFF
+                                        ),
+                                        panic = self.panic
+                                    )
+                                }
+                                seen = seen + 1
+                            }
+                        }
+                        if function == 0 {
+                            let header = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
+                            if (header & 0x00800000) == 0 {
+                                scan_more_functions = false
+                            }
+                        }
+                    } else {
+                        if function == 0 {
+                            scan_more_functions = false
+                        }
+                    }
+                    if scan_more_functions == false {
+                        function = 8
+                    }
+                    function = function + 1
+                }
+                device = device + 1
+            }
+            if bus == self.window0.end_bus {
+                self.panic.fail(code = 0xAC060010)
+            }
+            bus = bus + 1
+        }
+        self.panic.fail(code = 0xAC060010)
+    }
 
     fn enumerate(self) -> PciDeviceSet {
         let devices = PciDeviceSetBuilder(panic = self.panic).empty()
@@ -172,14 +119,31 @@ class PcieEcamWindows {
             let device = 0
             while device < 32 {
                 let function = 0
+                let scan_more_functions = true
                 while function < 8 {
                     let vendor_device = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0)
                     if (vendor_device & 0xFFFF) != 0xFFFF {
                         devices.append(window = self.window0, bus = bus, device = device, function = function)
+                        if function == 0 {
+                            let header = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
+                            if (header & 0x00800000) == 0 {
+                                scan_more_functions = false
+                            }
+                        }
+                    } else {
+                        if function == 0 {
+                            scan_more_functions = false
+                        }
+                    }
+                    if scan_more_functions == false {
+                        function = 8
                     }
                     function = function + 1
                 }
                 device = device + 1
+            }
+            if bus == self.window0.end_bus {
+                return devices
             }
             bus = bus + 1
         }
@@ -194,7 +158,7 @@ class PcieEcamWindows {
     }
 }
 
-class PciDevice {
+data PciDevice {
     window: PcieEcamWindow
     identity: PciDeviceIdentity
     panic: BootPanic
@@ -289,7 +253,7 @@ class PciDevice {
     }
 }
 
-class MsiCapability {
+data MsiCapability {
     device: PciDevice
     capability_offset: U16
 
@@ -310,7 +274,7 @@ class MsiCapability {
     }
 }
 
-class MsixCapability {
+data MsixCapability {
     device: PciDevice
     capability_offset: U16
     table: MmioRegion
@@ -329,7 +293,7 @@ class MsixCapability {
     }
 }
 
-class PciDeviceSet {
+data PciDeviceSet {
     count: U64
     device0: PciDevice
     device1: PciDevice

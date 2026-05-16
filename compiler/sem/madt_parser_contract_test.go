@@ -30,7 +30,7 @@ func TestMadtSyntheticEntryOffsetContract(t *testing.T) {
 		"read_u32(offset = offset + 4)",
 		"read_u32(offset = offset + 8)",
 		"read_u32(offset = offset + 12)",
-		"out.append(uid = self.table.bytes.read_u32(offset = offset + 12), apic_id = self.table.bytes.read_u32(offset = offset + 4))",
+		"out.append(uid = bytes.read_u32(offset = offset + 12), apic_id = bytes.read_u32(offset = offset + 4))",
 	} {
 		if !strings.Contains(sourceText, want) {
 			t.Fatalf("MADT source missing %q", want)

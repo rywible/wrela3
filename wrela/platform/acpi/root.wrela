@@ -31,7 +31,7 @@ class AcpiLocator {
     }
 }
 
-class AcpiRoot {
+data AcpiRoot {
     root_address: PhysicalAddress
     use_xsdt: Bool
     panic: BootPanic
@@ -43,7 +43,8 @@ class AcpiRoot {
     fn require_table(self, signature: U32) -> AcpiTable {
         let helpers = AcpiHelpers(panic = self.panic)
         let root = self.root_table()
-        if helpers.checksum_ok(bytes = root.bytes) == false {
+        let root_bytes = PhysicalBytes(address = root.address, length = root.length, panic = self.panic).bounded()
+        if helpers.checksum_ok(bytes = root_bytes) == false {
             self.panic.fail(code = 0xAC010004)
         }
         let entry_size = 4
@@ -55,28 +56,39 @@ class AcpiRoot {
             count = (root.length - 36) >> 3
         }
         let index = 0
+        let found_address = self.root_address & 0
         while index < count {
-            let address = root.bytes.read_u32(offset = 36 + (index << 2))
+            let address = root_bytes.read_u32(offset = 36 + (index << 2))
             if self.use_xsdt {
-                address = root.bytes.read_u64(offset = 36 + (index << 3))
+                address = root_bytes.read_u64(offset = 36 + (index << 3))
             }
             let table = helpers.table_at(address = address)
-            if table.signature == signature {
-                if helpers.checksum_ok(bytes = table.bytes) == false {
-                    self.panic.fail(code = 0xAC010005)
-                }
-                return table
+            let table_signature = table.signature & 0xFFFFFFFF
+            let required_signature = signature & 0xFFFFFFFF
+            if table_signature == required_signature {
+                found_address = address
+                index = count
             }
             index = index + 1
         }
-        self.panic.fail(code = 0xAC010006)
+        if found_address == 0 {
+            self.panic.fail(code = 0xAC010006)
+        }
+        let found_table = helpers.table_at(address = found_address)
+        let table_bytes = PhysicalBytes(address = found_table.address, length = found_table.length, panic = self.panic).bounded()
+        if helpers.checksum_ok(bytes = table_bytes) == false {
+            self.panic.fail(code = 0xAC010005)
+        }
+        return found_table
     }
 
     fn require_madt(self) -> MadtTable {
-        return MadtTable(table = self.require_table(signature = 0x43495041), panic = self.panic)
+        let table = self.require_table(signature = 0x43495041)
+        return MadtTable(address = table.address, length = table.length, panic = self.panic)
     }
 
     fn require_mcfg(self) -> McfgTable {
-        return McfgTable(table = self.require_table(signature = 0x4746434D), panic = self.panic)
+        let table = self.require_table(signature = 0x4746434D)
+        return McfgTable(address = table.address, length = table.length, panic = self.panic)
     }
 }

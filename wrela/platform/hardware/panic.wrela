@@ -1,8 +1,122 @@
 module platform.hardware.panic
 
-class BootPanic {
+data BootPanic {
     asm fn fail(self, code: U64) -> never {
         cli
+        mov dx, 0x03f8
+        mov al, 0x70
+        out dx, al
+        mov al, 0x61
+        out dx, al
+        mov al, 0x6E
+        out dx, al
+        mov al, 0x69
+        out dx, al
+        mov al, 0x63
+        out dx, al
+        mov al, 0x3A
+        out dx, al
+        mov al, 0x20
+        out dx, al
+
+        mov r11, 0xF
+        mov rax, code
+        shr rax, 28
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_7
+        add rax, 0x37
+        jmp panic_emit_7
+    panic_digit_7:
+        add rax, 0x30
+    panic_emit_7:
+        out dx, al
+
+        mov rax, code
+        shr rax, 24
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_6
+        add rax, 0x37
+        jmp panic_emit_6
+    panic_digit_6:
+        add rax, 0x30
+    panic_emit_6:
+        out dx, al
+
+        mov rax, code
+        shr rax, 20
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_5
+        add rax, 0x37
+        jmp panic_emit_5
+    panic_digit_5:
+        add rax, 0x30
+    panic_emit_5:
+        out dx, al
+
+        mov rax, code
+        shr rax, 16
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_4
+        add rax, 0x37
+        jmp panic_emit_4
+    panic_digit_4:
+        add rax, 0x30
+    panic_emit_4:
+        out dx, al
+
+        mov rax, code
+        shr rax, 12
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_3
+        add rax, 0x37
+        jmp panic_emit_3
+    panic_digit_3:
+        add rax, 0x30
+    panic_emit_3:
+        out dx, al
+
+        mov rax, code
+        shr rax, 8
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_2
+        add rax, 0x37
+        jmp panic_emit_2
+    panic_digit_2:
+        add rax, 0x30
+    panic_emit_2:
+        out dx, al
+
+        mov rax, code
+        shr rax, 4
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_1
+        add rax, 0x37
+        jmp panic_emit_1
+    panic_digit_1:
+        add rax, 0x30
+    panic_emit_1:
+        out dx, al
+
+        mov rax, code
+        and rax, r11
+        cmp rax, 9
+        jle panic_digit_0
+        add rax, 0x37
+        jmp panic_emit_0
+    panic_digit_0:
+        add rax, 0x30
+    panic_emit_0:
+        out dx, al
+
+        mov al, 0x0A
+        out dx, al
     panic_loop:
         hlt
         jmp panic_loop

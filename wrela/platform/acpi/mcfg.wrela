@@ -1,23 +1,25 @@
 module platform.acpi.mcfg
 
-use { AcpiTable } from platform.acpi.tables
+use { PhysicalBytes } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { PcieEcamWindow, PcieEcamWindows } from machine.x86_64.pci
 
-class McfgTable {
-    table: AcpiTable
+data McfgTable {
+    address: PhysicalAddress
+    length: U32
     panic: BootPanic
 
     fn ecam_windows(self) -> PcieEcamWindows {
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
         let windows = PcieEcamWindows(count = 0, window0 = empty_window, panic = self.panic)
         let offset = 44
-        while offset < self.table.length {
+        while offset < self.length {
             windows.append(window = PcieEcamWindow(
-                base = self.table.bytes.read_u64(offset = offset),
-                segment = self.table.bytes.read_u16(offset = offset + 8),
-                start_bus = self.table.bytes.read_u8(offset = offset + 10),
-                end_bus = self.table.bytes.read_u8(offset = offset + 11),
+                base = bytes.read_u64(offset = offset),
+                segment = bytes.read_u16(offset = offset + 8),
+                start_bus = bytes.read_u8(offset = offset + 10),
+                end_bus = bytes.read_u8(offset = offset + 11),
                 panic = self.panic
             ))
             offset = offset + 16

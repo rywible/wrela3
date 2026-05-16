@@ -1,34 +1,37 @@
 module platform.acpi.madt
 
-use { AcpiTable } from platform.acpi.tables
+use { PhysicalBytes } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { CpuTopology, EnabledCpu, EnabledCpuSet } from machine.x86_64.cpu_state
 use { InterruptAuthority, InterruptOverride, InterruptOverrideSet, IoApicDiscovered, IoApicSet, LocalApic } from machine.x86_64.interrupts
 
-class MadtTable {
-    table: AcpiTable
+data MadtTable {
+    address: PhysicalAddress
+    length: U32
     panic: BootPanic
 
     fn local_apic_base(self) -> PhysicalAddress {
-        return self.table.bytes.read_u32(offset = 36)
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
+        return bytes.read_u32(offset = 36)
     }
 
     fn enabled_cpus(self) -> EnabledCpuSet {
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
         let out = EnabledCpuSet(count = 0, cpu0 = EnabledCpu(uid = 0, apic_id = 0), cpu1 = EnabledCpu(uid = 0, apic_id = 0))
         let offset = 44
-        while offset < self.table.length {
-            let entry_type = self.table.bytes.read_u8(offset = offset)
-            let entry_length = self.table.bytes.read_u8(offset = offset + 1)
+        while offset < self.length {
+            let entry_type = bytes.read_u8(offset = offset)
+            let entry_length = bytes.read_u8(offset = offset + 1)
             if entry_type == 0 {
-                let flags = self.table.bytes.read_u32(offset = offset + 4)
+                let flags = bytes.read_u32(offset = offset + 4)
                 if (flags & 1) != 0 {
-                    out.append(uid = self.table.bytes.read_u8(offset = offset + 2), apic_id = self.table.bytes.read_u8(offset = offset + 3))
+                    out.append(uid = bytes.read_u8(offset = offset + 2), apic_id = bytes.read_u8(offset = offset + 3))
                 }
             }
             if entry_type == 9 {
-                let flags = self.table.bytes.read_u32(offset = offset + 8)
+                let flags = bytes.read_u32(offset = offset + 8)
                 if (flags & 1) != 0 {
-                    out.append(uid = self.table.bytes.read_u32(offset = offset + 12), apic_id = self.table.bytes.read_u32(offset = offset + 4))
+                    out.append(uid = bytes.read_u32(offset = offset + 12), apic_id = bytes.read_u32(offset = offset + 4))
                 }
             }
             offset = offset + entry_length
@@ -37,13 +40,14 @@ class MadtTable {
     }
 
     fn io_apics(self) -> IoApicSet {
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
         let out = IoApicSet(count = 0, io_apic0 = IoApicDiscovered(id = 0, address = 0, gsi_base = 0, panic = self.panic))
         let offset = 44
-        while offset < self.table.length {
-            let entry_type = self.table.bytes.read_u8(offset = offset)
-            let entry_length = self.table.bytes.read_u8(offset = offset + 1)
+        while offset < self.length {
+            let entry_type = bytes.read_u8(offset = offset)
+            let entry_length = bytes.read_u8(offset = offset + 1)
             if entry_type == 1 {
-                out.append(id = self.table.bytes.read_u8(offset = offset + 2), address = self.table.bytes.read_u32(offset = offset + 4), gsi_base = self.table.bytes.read_u32(offset = offset + 8), panic = self.panic)
+                out.append(id = bytes.read_u8(offset = offset + 2), address = bytes.read_u32(offset = offset + 4), gsi_base = bytes.read_u32(offset = offset + 8), panic = self.panic)
             }
             offset = offset + entry_length
         }
@@ -51,18 +55,19 @@ class MadtTable {
     }
 
     fn interrupt_source_overrides(self) -> InterruptOverrideSet {
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
         let zero = InterruptOverride(bus = 0, source = 0, gsi = 0, flags = 0)
         let out = InterruptOverrideSet(count = 0, override0 = zero, override1 = zero, override2 = zero, override3 = zero, override4 = zero, override5 = zero, override6 = zero, override7 = zero)
         let offset = 44
-        while offset < self.table.length {
-            let entry_type = self.table.bytes.read_u8(offset = offset)
-            let entry_length = self.table.bytes.read_u8(offset = offset + 1)
+        while offset < self.length {
+            let entry_type = bytes.read_u8(offset = offset)
+            let entry_length = bytes.read_u8(offset = offset + 1)
             if entry_type == 2 {
                 out.append(
-                    bus = self.table.bytes.read_u8(offset = offset + 2),
-                    source = self.table.bytes.read_u8(offset = offset + 3),
-                    gsi = self.table.bytes.read_u32(offset = offset + 4),
-                    flags = self.table.bytes.read_u16(offset = offset + 8)
+                    bus = bytes.read_u8(offset = offset + 2),
+                    source = bytes.read_u8(offset = offset + 3),
+                    gsi = bytes.read_u32(offset = offset + 4),
+                    flags = bytes.read_u16(offset = offset + 8)
                 )
             }
             offset = offset + entry_length
