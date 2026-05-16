@@ -82,8 +82,9 @@ func parseExpectedHeader(t *testing.T, path, src string) (expectedDiag, string) 
 
 func parseFixtureForHarness(t *testing.T, path, src string) []*ast.Module {
 	t.Helper()
+	files := fixtureSourceFiles(path, src)
 	modules, ds := parse.ParseGraph(source.Graph{
-		Files: []*source.File{source.NewFile(1, path, src)},
+		Files: files,
 	})
 	if len(ds) != 0 {
 		t.Fatalf("parse fixture %s: %#v", path, ds)
@@ -92,6 +93,32 @@ func parseFixtureForHarness(t *testing.T, path, src string) []*ast.Module {
 		t.Fatalf("parse fixture %s: no modules", path)
 	}
 	return modules
+}
+
+func fixtureSourceFiles(path, src string) []*source.File {
+	parts := splitFixtureModules(src)
+	files := make([]*source.File, 0, len(parts))
+	for i, part := range parts {
+		files = append(files, source.NewFile(source.FileID(i+1), path, part))
+	}
+	return files
+}
+
+func splitFixtureModules(src string) []string {
+	lines := strings.Split(src, "\n")
+	var parts []string
+	var current []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "module ") && len(current) != 0 {
+			parts = append(parts, strings.Join(current, "\n"))
+			current = nil
+		}
+		current = append(current, line)
+	}
+	if len(current) != 0 {
+		parts = append(parts, strings.Join(current, "\n"))
+	}
+	return parts
 }
 
 func preludeModules(modules []*ast.Module) {

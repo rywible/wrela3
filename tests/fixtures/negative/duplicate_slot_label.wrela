@@ -1,0 +1,18 @@
+// expect: SEM0033: duplicate executor slot label worker
+module negative.duplicate_slot_label
+
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+data VcpuStartStatus { started: Bool; id: U64 }
+class ExecutorRegistry { fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) } }
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let a = ExecutorRegistry().claim(identity = SlotIdentity(label = "worker"))
+        let b = ExecutorRegistry().claim(identity = SlotIdentity(label = "worker"))
+        while true {}
+    }
+}

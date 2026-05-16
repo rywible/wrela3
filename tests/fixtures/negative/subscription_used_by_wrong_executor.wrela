@@ -1,0 +1,40 @@
+// expect: SEM0040: subscription for slot worker used from executor Other
+module negative.subscription_used_by_wrong_executor
+
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+class ExecutorRegistry { asm fn claim(self, identity: SlotIdentity) -> ExecutorSlot { ret } }
+
+module machine.x86_64.topic_u64
+use { ExecutorSlot } from machine.x86_64.cpu_state
+data TopicIdentity { label: StringLiteral }
+class U64GapTopic { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret } }
+class U64GapSubscription { subscriber: ExecutorSlot; asm fn poll(self) -> Bool { ret } }
+
+module negative.subscription_used_by_wrong_executor.app
+use { ExecutorRegistry, ExecutorSlot, SlotIdentity } from machine.x86_64.cpu_state
+use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+
+executor Other {
+    slot: ExecutorSlot
+    input: U64GapSubscription
+    start fn run(self) -> never {
+        let ready = self.input.poll()
+        while true {}
+    }
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let registry = ExecutorRegistry()
+        let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
+        let other_slot = registry.claim(identity = SlotIdentity(label = "other"))
+        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let sub = topic.subscribe(subscriber = worker_slot)
+        let other = Other(slot = other_slot, input = sub)
+        while true {}
+    }
+}

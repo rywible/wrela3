@@ -1,0 +1,31 @@
+// expect: SEM0037: vCPU 0 starts more than one executor
+module negative.vcpu_overcommit
+
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+data VcpuStartStatus { started: Bool; id: U64 }
+class ExecutorRegistry { fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) } }
+class Vcpu {}
+class OwnedHardware { vcpu0: Vcpu }
+unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardware { return OwnedHardware(vcpu0 = Vcpu()) } }
+
+executor Worker {
+    slot: ExecutorSlot
+    start fn run(self) -> never { while true {} }
+}
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let registry = ExecutorRegistry()
+        let a_slot = registry.claim(identity = SlotIdentity(label = "a"))
+        let b_slot = registry.claim(identity = SlotIdentity(label = "b"))
+        let a = Worker(slot = a_slot)
+        let b = Worker(slot = b_slot)
+        hardware.vcpu0.start(executor = a)
+        hardware.vcpu0.start(executor = b)
+        while true {}
+    }
+}

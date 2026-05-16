@@ -1,0 +1,23 @@
+// expect: SEM0036: vCPU enter must be the final reachable statement in the phase
+module negative.invalid_vcpu_enter_order
+
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+class ExecutorRegistry { fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) } }
+class Vcpu {}
+class OwnedHardware { vcpu0: Vcpu }
+unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardware { return OwnedHardware(vcpu0 = Vcpu()) } }
+
+executor Worker { slot: ExecutorSlot; start fn run(self) -> never { while true {} } }
+
+image Bad {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let slot = ExecutorRegistry().claim(identity = SlotIdentity(label = "worker"))
+        let worker = Worker(slot = slot)
+        hardware.vcpu0.enter(executor = worker)
+        while true {}
+    }
+}

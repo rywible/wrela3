@@ -229,6 +229,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkDelegatedOnlyCrossing()
 	c.checkUniqueConstructors()
 	c.checkExecutorWiring()
+	c.checkExecutorTopicGraph()
 	c.checkInterruptRuntimeSupport()
 
 	return &CheckedProgram{
@@ -563,18 +564,39 @@ func isEdgeCapabilityModule(moduleName string) bool {
 
 func (c *checker) checkStmtList(moduleName string, stmts []ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {
 	terminates := false
+	afterVcpuEnter := false
 	for _, stmt := range stmts {
+		if afterVcpuEnter && ctx == ContextImagePhaseDirect {
+			c.error(stmt.Span(), diag.SEM0036, "vCPU enter must be the final reachable statement in the phase")
+			afterVcpuEnter = false
+		}
 		if c.checkStmt(moduleName, stmt, scope, expectedReturn, ctx) {
 			terminates = true
 		}
+		if ctx == ContextImagePhaseDirect && isVcpuEnterExprStmt(stmt) {
+			afterVcpuEnter = true
+		}
 	}
 	return terminates
+}
+
+func isVcpuEnterExprStmt(stmt ast.Stmt) bool {
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := exprStmt.Expr.(*ast.CallExpr)
+	return ok && call.Method == "enter"
 }
 
 func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expectedReturn *Type, ctx ContextKind) bool {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		if ctx != ContextImagePhaseDirect {
+			c.recordReliableTryPublishCall(moduleName, s.Expr, scope, true)
+			c.recordSubscriptionMethodCall(moduleName, s.Expr, scope)
+		}
 		valueLifetime := c.lifetimeOfExpr(s.Expr, scope)
 		scope.Define(s.Name, valueType)
 		origin := c.originForLetValue(moduleName, s.Expr, valueType, scope)
@@ -704,6 +726,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
 		if ctx == ContextImagePhaseDirect {
 			c.recordGraphFromExprStmt(s.Expr, scope)
+		} else {
+			c.recordReliableTryPublishCall(moduleName, s.Expr, scope, false)
+			c.recordSubscriptionMethodCall(moduleName, s.Expr, scope)
 		}
 		return isNeverType(valueType)
 	default:
@@ -826,6 +851,7 @@ func (c *checker) checkExecutorWiring() {
 			continue
 		}
 		c.error(secondDriverPathOwnerSpan(owners, path.Span), diag.SEM0011, "driver path "+name+" is assigned to more than one executor")
+		c.error(secondDriverPathOwnerSpan(owners, path.Span), diag.SEM0038, "driver path "+name+" is assigned to more than one executor")
 	}
 	for key, owners := range pathOwners {
 		if _, ok := constructedPaths[key]; ok {
@@ -836,6 +862,268 @@ func (c *checker) checkExecutorWiring() {
 			break
 		}
 	}
+}
+
+func (c *checker) checkExecutorTopicGraph() {
+	c.checkDuplicateGraphLabels()
+	c.checkSlotBindingsAndPlacements()
+	c.checkSubscriptionSlotBindings()
+	c.checkSharedPathUses()
+	c.checkVcpuPlacements()
+	c.checkPublisherBindings()
+	c.checkSubscriptionUses()
+	c.checkTopicPolicies()
+	c.checkReliableTryPublishCalls()
+	c.checkExecutorMemoryOwners()
+	c.checkPublishingIdentities()
+}
+
+func (c *checker) checkSharedPathUses() {
+	uses := map[string][]source.Span{}
+	for _, exec := range c.graph.Executors {
+		for _, use := range exec.PathUses {
+			if use.Key == "" {
+				continue
+			}
+			uses[use.Key] = append(uses[use.Key], nonZeroSpan(use.Span, exec.Span))
+		}
+	}
+	for _, spans := range uses {
+		if len(spans) > 1 {
+			c.error(spans[1], diag.SEM0038, "driver path is assigned to more than one executor")
+		}
+	}
+}
+
+func (c *checker) checkDuplicateGraphLabels() {
+	c.checkDuplicateLabels("executor slot", executorSlotLabels(c.graph.ExecutorSlots))
+	c.checkDuplicateLabels("path", pathLabels(c.graph.Paths))
+	c.checkDuplicateLabels("topic", topicLabels(c.graph.Topics))
+}
+
+func (c *checker) checkDuplicateLabels(kind string, labels []graphLabel) {
+	seen := map[string]source.Span{}
+	for _, label := range labels {
+		if label.value == "" {
+			continue
+		}
+		if _, ok := seen[label.value]; ok {
+			c.error(label.span, diag.SEM0033, "duplicate "+kind+" label "+label.value)
+			continue
+		}
+		seen[label.value] = label.span
+	}
+}
+
+type graphLabel struct {
+	value string
+	span  source.Span
+}
+
+func executorSlotLabels(slots []ExecutorSlotNode) []graphLabel {
+	out := make([]graphLabel, 0, len(slots))
+	for _, slot := range slots {
+		out = append(out, graphLabel{value: slot.Label, span: slot.Span})
+	}
+	return out
+}
+
+func pathLabels(paths []PathNode) []graphLabel {
+	out := make([]graphLabel, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, graphLabel{value: path.Label, span: path.Span})
+	}
+	return out
+}
+
+func topicLabels(topics []TopicNode) []graphLabel {
+	out := make([]graphLabel, 0, len(topics))
+	for _, topic := range topics {
+		out = append(out, graphLabel{value: topic.Label, span: topic.Span})
+	}
+	return out
+}
+
+func (c *checker) checkSlotBindingsAndPlacements() {
+	execCounts := map[string]int{}
+	execSpans := map[string]source.Span{}
+	for _, exec := range c.graph.Executors {
+		if exec.SlotLabel == "" {
+			continue
+		}
+		execCounts[exec.SlotLabel]++
+		execSpans[exec.SlotLabel] = exec.Span
+	}
+	placementCounts := map[string]int{}
+	placementSpans := map[string]source.Span{}
+	for _, placement := range c.graph.VcpuPlacements {
+		if placement.SlotLabel == "" {
+			continue
+		}
+		placementCounts[placement.SlotLabel]++
+		placementSpans[placement.SlotLabel] = placement.Span
+	}
+	for _, slot := range c.graph.ExecutorSlots {
+		if slot.Label == "" {
+			continue
+		}
+		if execCounts[slot.Label] != 1 {
+			c.error(nonZeroSpan(execSpans[slot.Label], slot.Span), diag.SEM0034, "executor slot "+slot.Label+" must be bound to exactly one executor")
+		}
+		if placementCounts[slot.Label] != 1 {
+			c.error(nonZeroSpan(placementSpans[slot.Label], slot.Span), diag.SEM0034, "executor slot "+slot.Label+" must be placed on exactly one vCPU")
+		}
+	}
+}
+
+func (c *checker) checkSubscriptionSlotBindings() {
+	subscriptions := map[string]TopicSubscriptionNode{}
+	for _, sub := range c.graph.TopicSubscriptions {
+		if sub.Binding != "" {
+			subscriptions[sub.Binding] = sub
+		}
+	}
+	for _, exec := range c.graph.Executors {
+		for field, binding := range exec.FieldBindings {
+			if !IsTopicSubscriptionType(exec.BoundTypes[field]) {
+				continue
+			}
+			sub, ok := subscriptions[binding]
+			if !ok || sub.SubscriberLabel == "" || exec.SlotLabel == "" || sub.SubscriberLabel == exec.SlotLabel {
+				continue
+			}
+			span := exec.FieldSpans[field]
+			c.error(nonZeroSpan(span, exec.Span), diag.SEM0035, "subscription "+binding+" belongs to slot "+sub.SubscriberLabel+" but executor "+exec.Type.Name+" uses slot "+exec.SlotLabel)
+		}
+	}
+}
+
+func (c *checker) checkVcpuPlacements() {
+	byVcpu := map[int]VcpuPlacementNode{}
+	for i, placement := range c.graph.VcpuPlacements {
+		if i > 0 && c.graph.VcpuPlacements[i-1].Terminal {
+			c.error(placement.Span, diag.SEM0036, "vCPU enter must be the final reachable statement in the phase")
+		}
+		if previous, ok := byVcpu[placement.VcpuID]; ok {
+			c.error(nonZeroSpan(placement.Span, previous.Span), diag.SEM0037, fmt.Sprintf("vCPU %d starts more than one executor", placement.VcpuID))
+			continue
+		}
+		byVcpu[placement.VcpuID] = placement
+	}
+}
+
+func (c *checker) checkPublisherBindings() {
+	uses := map[string][]source.Span{}
+	for _, exec := range c.graph.Executors {
+		for field, binding := range exec.FieldBindings {
+			if binding == "" || !IsTopicPublisherType(exec.BoundTypes[field]) {
+				continue
+			}
+			uses[binding] = append(uses[binding], nonZeroSpan(exec.FieldSpans[field], exec.Span))
+		}
+	}
+	for binding, spans := range uses {
+		if len(spans) > 1 {
+			c.error(spans[1], diag.SEM0039, "publisher "+binding+" is assigned to more than one producer field")
+		}
+	}
+}
+
+func (c *checker) checkSubscriptionUses() {
+	subscriptions := map[string]TopicSubscriptionNode{}
+	for _, sub := range c.graph.TopicSubscriptions {
+		if sub.Binding != "" {
+			subscriptions[sub.Binding] = sub
+		}
+	}
+	for _, use := range c.graph.SubscriptionUses {
+		if use.SubscriberLabel == "" || use.CurrentSlotLabel == "" || use.SubscriberLabel == use.CurrentSlotLabel {
+			continue
+		}
+		if c.checkExecutorSubscriptionUse(use, subscriptions) {
+			continue
+		}
+		c.error(use.Span, diag.SEM0040, "subscription for slot "+use.SubscriberLabel+" used from executor "+use.CurrentSlotLabel)
+	}
+}
+
+func (c *checker) checkExecutorSubscriptionUse(use SubscriptionUseNode, subscriptions map[string]TopicSubscriptionNode) bool {
+	reported := false
+	for _, exec := range c.graph.Executors {
+		if exec.Type == nil || exec.Type.Name != use.CurrentSlotLabel {
+			continue
+		}
+		binding := exec.FieldBindings[use.SubscriberLabel]
+		sub := subscriptions[binding]
+		if sub.SubscriberLabel == "" || exec.SlotLabel == "" || sub.SubscriberLabel == exec.SlotLabel {
+			continue
+		}
+		c.error(use.Span, diag.SEM0040, "subscription for slot "+sub.SubscriberLabel+" used from executor "+exec.Type.Name)
+		reported = true
+	}
+	return reported
+}
+
+func (c *checker) checkTopicPolicies() {
+	for _, exec := range c.graph.Executors {
+		if exec.LoopPolicy == "EventSleepPolicy" && exec.SlotLabel != "" && !c.graph.HasWakeSource(exec.SlotLabel) {
+			c.error(exec.Span, diag.SEM0044, "EventSleepPolicy executor "+exec.Type.Name+" has no wake source")
+		}
+		if exec.LoopPolicy != "NoGapRequiredPolicy" {
+			continue
+		}
+		for _, sub := range c.graph.TopicSubscriptions {
+			if sub.SubscriberLabel != exec.SlotLabel {
+				continue
+			}
+			topic := c.graph.TopicByLabel(sub.TopicLabel)
+			if strings.HasPrefix(topic.Kind, "gap") {
+				c.error(nonZeroSpan(sub.Span, exec.Span), diag.SEM0041, "gap topic "+sub.TopicLabel+" requires a gap-tolerant executor policy")
+			}
+		}
+	}
+}
+
+func (c *checker) checkReliableTryPublishCalls() {
+	for _, call := range c.graph.ReliableTryPublishCalls {
+		if !call.ResultObserved {
+			c.error(call.Span, diag.SEM0045, "reliable try_publish result must be observed")
+		}
+	}
+}
+
+func (c *checker) checkExecutorMemoryOwners() {
+	for _, exec := range c.graph.Executors {
+		if exec.SlotLabel == "" || exec.MemoryOwnerLabel == "" || exec.SlotLabel == exec.MemoryOwnerLabel {
+			continue
+		}
+		c.error(exec.Span, diag.SEM0047, "executor "+exec.Type.Name+" memory is owned by "+exec.MemoryOwnerLabel+" but slot is "+exec.SlotLabel)
+	}
+}
+
+func (c *checker) checkPublishingIdentities() {
+	for _, path := range c.graph.Paths {
+		if path.PublishesInterrupts && path.Label == "" {
+			c.error(path.Span, diag.SEM0048, "publishing path "+path.Binding+" is missing identity")
+		}
+	}
+	for _, pub := range c.graph.TopicPublishers {
+		if pub.TopicLabel != "" {
+			continue
+		}
+		name := pub.Binding
+		if name == "" {
+			name = "topic"
+		}
+		c.error(pub.Span, diag.SEM0048, "publishing topic "+name+" is missing identity")
+	}
+}
+
+func nonZeroSpan(span, fallback source.Span) source.Span {
+	if span.End == 0 {
+		return fallback
+	}
+	return span
 }
 
 func interruptVector(path *Type) (uint8, bool) {
@@ -1213,6 +1501,42 @@ func (c *checker) recordGraphFromExprStmt(expr ast.Expr, scope *Scope) {
 			Span:            call.SpanV,
 		})
 	}
+}
+
+func (c *checker) recordReliableTryPublishCall(moduleName string, expr ast.Expr, scope *Scope, observed bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.Method != "try_publish" {
+		return
+	}
+	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	if qualifiedTypeName(receiverType) != "machine.x86_64.topic_u64.U64ReliablePublisher" {
+		return
+	}
+	c.graph.ReliableTryPublishCalls = append(c.graph.ReliableTryPublishCalls, ReliableTryPublishCallNode{ResultObserved: observed, Span: call.SpanV})
+}
+
+func (c *checker) recordSubscriptionMethodCall(moduleName string, expr ast.Expr, scope *Scope) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || c.currentType == nil || c.currentType.Kind != KindExecutor {
+		return
+	}
+	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	if !IsTopicSubscriptionType(receiverType) {
+		return
+	}
+	field, ok := call.Receiver.(*ast.FieldExpr)
+	if !ok {
+		return
+	}
+	base, ok := field.Base.(*ast.NameExpr)
+	if !ok || base.Name != "self" {
+		return
+	}
+	c.graph.SubscriptionUses = append(c.graph.SubscriptionUses, SubscriptionUseNode{
+		SubscriberLabel:  field.Field,
+		CurrentSlotLabel: c.currentType.Name,
+		Span:             call.SpanV,
+	})
 }
 
 func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) {
