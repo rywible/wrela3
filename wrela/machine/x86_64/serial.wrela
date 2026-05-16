@@ -37,6 +37,12 @@ unique driver SerialDriver {
         self.registers.write8(offset = 4, value = 0x03)
         return self
     }
+
+    fn create_console_path(self, identity: PathIdentity, rx: SerialRxPublisher) -> SerialConsolePath {
+        let console_path = SerialConsolePath(identity = identity, registers = self.registers, rx = rx)
+        console_path.enable_receive_interrupts()
+        return console_path
+    }
 }
 
 data SerialPathInterrupt {

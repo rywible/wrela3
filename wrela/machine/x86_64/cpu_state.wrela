@@ -56,6 +56,10 @@ class CpuPlanner {
 
 class OwnedMemory {
     arena: MutableBytes
+
+    fn claim_executor_arena(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
+        return ExecutorMemory(arena_base = self.arena.address, arena_length = length, next_offset = 0)
+    }
 }
 
 class DriverMemory {

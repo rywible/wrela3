@@ -307,6 +307,17 @@ func TestCacheMemorySourceShape(t *testing.T) {
 	}
 }
 
+func TestExecutorArenaAndConsolePathFactoriesExist(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.cpu_state", "OwnedMemory"), "claim_executor_arena")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialDriver"), "create_console_path")
+}
+
 func TestMachineX64InterruptSupportAsmIsAllowed(t *testing.T) {
 	_, ds := checkModuleForTest(t, `
 module machine.x86_64.interrupts
