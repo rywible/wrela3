@@ -125,8 +125,11 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
-	if len(program.WritableData) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 {
-		section, offsets := buildData(program)
+	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 {
+		section, offsets, ds := buildData(program)
+		if len(ds) != 0 {
+			return nil, ds
+		}
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
 	if len(dataSections) > 0 {
@@ -312,11 +315,17 @@ type builtDataSection struct {
 	Offsets map[string]uint64
 }
 
-func buildData(program *ir.Program) (Section, map[string]uint64) {
+func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnostic) {
 	writable := append([]ir.DataObject{}, program.WritableData...)
+	topicObjects, ds := topicDataObjects(program)
+	if len(ds) != 0 {
+		return Section{}, nil, ds
+	}
+	writable = append(writable, topicObjects...)
 	writable = append(writable, vcpuStartupData(program)...)
 	writable = append(writable, interruptRuntimeData(program)...)
-	return buildDataSection(".data", writable, 0xC0000040)
+	section, offsets := buildDataSection(".data", writable, 0xC0000040)
+	return section, offsets, nil
 }
 
 func interruptRuntimeData(program *ir.Program) []ir.DataObject {
