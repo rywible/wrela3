@@ -222,6 +222,46 @@ func TestHelloInterruptsQEMU(t *testing.T) {
 	}
 }
 
+func TestMultiVcpuTopicsQEMU(t *testing.T) {
+	qemuBin, err := exec.LookPath("qemu-system-x86_64")
+	if err != nil {
+		t.Fatalf("qemu-system-x86_64 not found in PATH: %v", err)
+	}
+	firmware, err := qemu.ResolveFirmware(qemuBin)
+	if err != nil {
+		t.Fatalf("resolve QEMU firmware: %v", err)
+	}
+	tmp := t.TempDir()
+	vars := filepath.Join(tmp, "OVMF_VARS.fd")
+	copyFile(t, firmware.Vars, vars)
+	image := filepath.Join(tmp, "multi-vcpu-topics.efi")
+	_, err = compiler.Build(compiler.BuildOptions{
+		Mode:       compiler.ModeDev,
+		RootPath:   "tests/e2e/fixtures/multi_vcpu_topics/main.wrela",
+		OutputPath: image,
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("build multi vcpu image: %v", err)
+	}
+	out, err := qemu.Run(qemu.Options{
+		QEMUBinary:  qemuBin,
+		OVMFCode:    firmware.Code,
+		OVMFVars:    vars,
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		SuccessText: "consumer received 64",
+		Timeout:     qemuTimeout(),
+		SMP:         2,
+	})
+	if err != nil {
+		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "producer published 64") || !strings.Contains(out, "consumer received 64") {
+		t.Fatalf("missing multi-vcpu topic output:\n%s", out)
+	}
+}
+
 func copyFile(t *testing.T, src, dst string) {
 	t.Helper()
 	data, err := os.ReadFile(src)

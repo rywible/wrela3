@@ -181,9 +181,16 @@ func TestHelloTransitionFunctionsPreserveOwnedStackReturn(t *testing.T) {
 	}
 }
 
-func TestHelloOwnedPhaseCallsExecutorRun(t *testing.T) {
+func TestHelloOwnedPhaseEntersExecutor(t *testing.T) {
 	program := compileHelloProgram(t)
-	assertFunctionCalls(t, program, program.Entry.OwnedPhaseSymbol, "_wrela_method_examples_hello_program_HelloWorld_run")
+	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
+	if fn == nil {
+		t.Fatalf("missing IR function %s", program.Entry.OwnedPhaseSymbol)
+	}
+	enter, ok := functionOp[ir.VcpuEnter](*fn)
+	if !ok || enter.VcpuID != 0 || enter.SlotLabel != "hello" {
+		t.Fatalf("%s missing VcpuEnter for hello on vCPU0: %#v", program.Entry.OwnedPhaseSymbol, fn.Blocks)
+	}
 }
 
 func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
@@ -229,6 +236,17 @@ func TestHelloSourceUsesArenaFrames(t *testing.T) {
 	}
 	if strings.Contains(source, "allocate_bytes") || strings.Contains(source, "static_bytes") {
 		t.Fatalf("hello program must not use old memory vocabulary")
+	}
+	for _, forbidden := range []string{"owner = hardware.vcpu0", "hardware.vcpu0.memory", "hello.run()", "on serial_path.interrupt"} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("hello program contains old executor wiring %q", forbidden)
+		}
+	}
+	mainSource := readRepoFile(t, "examples/hello/main.wrela")
+	for _, forbidden := range []string{"owner = hardware.vcpu0", "hardware.vcpu0.memory", "hello.run()", "on serial_path.interrupt"} {
+		if strings.Contains(mainSource, forbidden) {
+			t.Fatalf("hello main contains old executor wiring %q", forbidden)
+		}
 	}
 }
 
@@ -309,6 +327,52 @@ func collectCalls(ops []ir.Operation, out map[string]bool) {
 			collectCalls(v.Body, out)
 		}
 	}
+}
+
+func functionOp[T ir.Operation](fn ir.Function) (T, bool) {
+	var zero T
+	for _, block := range fn.Blocks {
+		if op, ok := operationInList[T](block.Ops); ok {
+			return op, true
+		}
+	}
+	return zero, false
+}
+
+func operationInList[T ir.Operation](ops []ir.Operation) (T, bool) {
+	var zero T
+	for _, op := range ops {
+		if typed, ok := op.(T); ok {
+			return typed, true
+		}
+		switch v := op.(type) {
+		case *ir.If:
+			if typed, ok := operationInList[T](v.ConditionOps); ok {
+				return typed, true
+			}
+			if typed, ok := operationInList[T](v.Then); ok {
+				return typed, true
+			}
+			if typed, ok := operationInList[T](v.Else); ok {
+				return typed, true
+			}
+		case *ir.While:
+			if typed, ok := operationInList[T](v.ConditionOps); ok {
+				return typed, true
+			}
+			if typed, ok := operationInList[T](v.Body); ok {
+				return typed, true
+			}
+		case *ir.ForBytes:
+			if typed, ok := operationInList[T](v.IterableOps); ok {
+				return typed, true
+			}
+			if typed, ok := operationInList[T](v.Body); ok {
+				return typed, true
+			}
+		}
+	}
+	return zero, false
 }
 
 func compileHelloProgram(t *testing.T) *ir.Program {

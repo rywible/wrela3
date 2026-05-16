@@ -1,7 +1,7 @@
 module tests.e2e.arena_memory
 
 use { DelegatedHardware } from platform.uefi.transition
-use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, ExecutorPlacement, ExecutorSlot, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
 
@@ -15,6 +15,7 @@ data SliceOffset {
 }
 
 executor ArenaMemoryProbe {
+    slot: ExecutorSlot
     memory: ExecutorMemory
     serial_path: SerialWritePath
 
@@ -74,11 +75,14 @@ image ArenaMemorySmoke {
             registers = registers,
             memory = DriverMemory(region = hardware.memory.arena)
             ).initialize()
-        let serial_path = SerialWritePath(owner = hardware.vcpu0, registers = serial_driver.registers)
+        let serial_path = SerialWritePath(registers = serial_driver.registers)
+        let slot = hardware.executors.claim(identity = SlotIdentity(label = "arena"))
+        let memory = hardware.memory.claim_executor_arena(owner = slot, length = 0x200000, align = 4096)
         let probe = ArenaMemoryProbe(
-            memory = hardware.vcpu0.memory,
+            slot = slot,
+            memory = memory,
             serial_path = serial_path
         )
-        probe.run()
+        hardware.vcpu0.enter(executor = probe)
     }
 }

@@ -2,12 +2,14 @@ module examples.hello.main
 
 use { HelloWorld } from examples.hello.program
 use { DelegatedHardware } from platform.uefi.transition
-use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
-use { EduMsiPath } from machine.x86_64.edu
+use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
 use { MsixTable, PciConfigPorts, Q35PciInterruptConfigurator } from machine.x86_64.pci
-use { SerialConsolePath, SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialConsolePath, SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { TopicIdentity } from machine.x86_64.topic_u64
 
 image HelloSerial {
     transitions {
@@ -42,22 +44,53 @@ image HelloSerial {
             registers = registers,
             memory = DriverMemory(region = hardware.memory.arena)
             ).initialize()
-        let serial_path = SerialConsolePath(owner = hardware.vcpu0, registers = serial_driver.registers)
+        let hello_slot = hardware.executors.claim(
+            identity = SlotIdentity(label = "hello")
+        )
+        let hello_memory = hardware.memory.claim_executor_arena(
+            owner = hello_slot,
+            length = 0x200000,
+            align = 4096
+        )
+        let serial_rx_topic = SerialRxTopic(
+            identity = TopicIdentity(label = "hello.console.rx"),
+            id = 0
+        )
+        let serial_registers = serial_driver.registers
+        let serial_path = SerialConsolePath(
+            identity = PathIdentity(label = "hello.console"),
+            registers = serial_registers,
+            rx = serial_rx_topic.publisher()
+        )
         let pci_config = PciConfigPorts()
         let pci_interrupts = Q35PciInterruptConfigurator(
             config = pci_config,
             ivshmem_msix_table = MsixTable(base = 0)
         )
+        let edu_interrupt_topic = EduInterruptTopic(
+            identity = TopicIdentity(label = "hello.edu.interrupt"),
+            id = 1
+        )
+        let serial_rx = serial_rx_topic.subscribe(subscriber = hello_slot)
+        let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = hello_slot)
         let hello = HelloWorld(
-            memory = hardware.vcpu0.memory,
+            slot = hello_slot,
+            loop = EventSleepPolicy(),
+            memory = hello_memory,
             interrupts = ApicInterruptController(
                 local_apic = LocalApic(base = 0xFEE00000),
                 io_apic = IoApic(base = 0xFEC00000)
             ),
             pci_interrupts = pci_interrupts,
             serial_path = serial_path,
-            edu_path = EduMsiPath(mmio_base = pci_interrupts.edu_bar0())
+            serial_rx = serial_rx,
+            edu_path = EduMsiPath(
+                identity = PathIdentity(label = "hello.edu"),
+                mmio_base = pci_interrupts.edu_bar0(),
+                irq = edu_interrupt_topic.publisher()
+            ),
+            edu_interrupts = edu_interrupts
         )
-        hello.run()
+        hardware.vcpu0.enter(executor = hello)
     }
 }

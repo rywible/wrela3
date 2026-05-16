@@ -2,11 +2,12 @@ module tests.e2e.cache_memory
 
 use { DelegatedHardware } from platform.uefi.transition
 use { CacheArena } from machine.x86_64.cache_memory
-use { CpuPlan, DriverMemory, ExecutorPlacement, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan } from machine.x86_64.cpu_state
+use { CpuPlan, DriverMemory, ExecutorPlacement, ExecutorSlot, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
 
 executor CacheMemoryProbe {
+    slot: ExecutorSlot
     memory: ExecutorMemory
     serial_path: SerialWritePath
     cache: CacheArena
@@ -115,8 +116,9 @@ image CacheMemorySmoke {
             registers = registers,
             memory = DriverMemory(region = hardware.memory.arena)
             ).initialize()
-        let serial_path = SerialWritePath(owner = hardware.vcpu0, registers = serial_driver.registers)
-        let executor_memory = hardware.vcpu0.memory
+        let serial_path = SerialWritePath(registers = serial_driver.registers)
+        let slot = hardware.executors.claim(identity = SlotIdentity(label = "cache"))
+        let executor_memory = hardware.memory.claim_executor_arena(owner = slot, length = 0x200000, align = 4096)
         let storage = executor_memory.reserve(length = 40, align = 8)
         let zero_storage = executor_memory.reserve(length = 24, align = 8)
         let short_storage = executor_memory.reserve(length = 39, align = 8)
@@ -143,12 +145,13 @@ image CacheMemorySmoke {
         )
         cache.clear()
         let probe = CacheMemoryProbe(
+            slot = slot,
             memory = executor_memory,
             serial_path = serial_path,
             cache = cache,
             zero_cache = zero_cache,
             short_cache = short_cache
         )
-        probe.run()
+        hardware.vcpu0.enter(executor = probe)
     }
 }
