@@ -208,7 +208,7 @@ class PciDevice {
     }
 
     fn claim_mmio_bar(self, index: U8) -> MmioRegion {
-        let offset = 0x10 + (index * 4)
+        let offset = 0x10 + (index << 2)
         let original = self.read_config32(offset = offset)
         if (original & 1) != 0 {
             self.panic.fail(code = 0xAC060001)
@@ -229,7 +229,7 @@ class PciDevice {
     }
 
     fn claim_io_bar(self, index: U8) -> IoPortRegion {
-        let offset = 0x10 + (index * 4)
+        let offset = 0x10 + (index << 2)
         let original = self.read_config32(offset = offset)
         if (original & 1) == 0 {
             self.panic.fail(code = 0xAC060003)
@@ -318,7 +318,7 @@ class MsixCapability {
 
     fn route_entry(self, entry: U16, vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
         self.device.enable_mmio_and_bus_master()
-        let base = self.table_offset + (entry * 16)
+        let base = self.table_offset + (entry << 4)
         self.table.write32(offset = base + 0, value = target.message_address())
         self.table.write32(offset = base + 4, value = 0)
         self.table.write32(offset = base + 8, value = vector.value)

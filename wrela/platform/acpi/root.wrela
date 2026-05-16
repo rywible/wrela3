@@ -50,12 +50,15 @@ class AcpiRoot {
         if self.use_xsdt {
             entry_size = 8
         }
-        let count = (root.length - 36) / entry_size
+        let count = (root.length - 36) >> 2
+        if self.use_xsdt {
+            count = (root.length - 36) >> 3
+        }
         let index = 0
         while index < count {
-            let address = root.bytes.read_u32(offset = 36 + (index * entry_size))
+            let address = root.bytes.read_u32(offset = 36 + (index << 2))
             if self.use_xsdt {
-                address = root.bytes.read_u64(offset = 36 + (index * entry_size))
+                address = root.bytes.read_u64(offset = 36 + (index << 3))
             }
             let table = helpers.table_at(address = address)
             if table.signature == signature {

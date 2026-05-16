@@ -85,8 +85,15 @@ class UefiConfigurationTables {
     asm fn entry_at(self, index: U64) -> UefiConfigurationTableEntry {
         mov r11, self.table_address
         mov r10, index
-        imul r10, 24
-        add r11, r10
+        mov r9, 0
+    configuration_entry_offset_loop:
+        cmp r10, 0
+        je configuration_entry_offset_done
+        add r9, 24
+        sub r10, 1
+        jmp configuration_entry_offset_loop
+    configuration_entry_offset_done:
+        add r11, r9
         mov r10, [r11]
         mov [rax + 0], r10
         mov r10, [r11 + 8]
@@ -141,10 +148,18 @@ data UefiMemoryMap {
     key: U64
 
     asm fn descriptor_at(self, index: U64) -> UefiMemoryDescriptor {
-        mov r11, self.descriptors.address
+        mov r11, self.descriptors
+        mov r11, [r11 + DelegatedBytes.address]
         mov r10, index
-        imul r10, self.descriptor_size
-        add r11, r10
+        mov r9, 0
+    descriptor_offset_loop:
+        cmp r10, 0
+        je descriptor_offset_done
+        add r9, self.descriptor_size
+        sub r10, 1
+        jmp descriptor_offset_loop
+    descriptor_offset_done:
+        add r11, r9
         mov r10d, [r11 + 0]
         mov [rax + 0], r10d
         mov r10, [r11 + 8]
@@ -160,8 +175,8 @@ data UefiMemoryMap {
 
     fn require_usable_region(self, min_base: PhysicalAddress, length: U64, align: U64) -> MutableBytes {
         let index = 0
-        let descriptor_count = self.descriptors.length / self.descriptor_size
-        while index < descriptor_count {
+        let descriptor_offset = 0
+        while descriptor_offset < self.descriptors.length {
             let descriptor = self.descriptor_at(index = index)
             let bytes = descriptor.number_of_pages << 12
             let aligned = (descriptor.physical_start + align - 1) & (0 - align)
@@ -174,6 +189,7 @@ data UefiMemoryMap {
                 }
             }
             index = index + 1
+            descriptor_offset = descriptor_offset + self.descriptor_size
         }
         BootPanic().fail(code = 0xAC020001)
     }

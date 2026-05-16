@@ -144,7 +144,7 @@ class IoApicRoute {
     destination_apic_id: U32
 
     fn program(self) {
-        let redir = (self.gsi - self.io_apic.gsi_base) * 2
+        let redir = (self.gsi - self.io_apic.gsi_base) << 1
         let low = self.vector.value
         if (self.flags & 0x0003) == 0x0003 {
             low = low | (1 << 13)

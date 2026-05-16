@@ -1984,9 +1984,37 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 			}
 		}
 		return "ivshmem_doorbell", vector, true
+	case "machine.x86_64.pci.MsiCapability::route":
+		if vector, ok := interruptVectorValueArg(call); ok {
+			return "edu_interrupt", vector, true
+		}
+		return "edu_interrupt", 0, true
+	case "machine.x86_64.pci.MsixCapability::route_entry":
+		if vector, ok := interruptVectorValueArg(call); ok {
+			return "ivshmem_doorbell", vector, true
+		}
+		return "ivshmem_doorbell", 0, true
 	default:
 		return "", 0, false
 	}
+}
+
+func interruptVectorValueArg(call *ast.CallExpr) (int, bool) {
+	arg := namedArgExpr(call.Args, "vector")
+	cons, ok := arg.(*ast.ConstructorExpr)
+	if !ok || cons.Type != "InterruptVector" {
+		return 0, false
+	}
+	value := constructorArg(cons, "value")
+	literal, ok := value.(*ast.IntLiteral)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(literal.Value, 0, 32)
+	if err != nil {
+		return 0, false
+	}
+	return int(parsed), true
 }
 
 func exprStmtCall(expr ast.Expr) *ast.CallExpr {
