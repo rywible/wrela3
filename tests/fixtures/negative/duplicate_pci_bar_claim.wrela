@@ -1,0 +1,52 @@
+// expect: SEM0050: duplicate hardware claim pci_bar:vendor=0x1234/device=0x11e8/occurrence=0.0
+module platform.hardware.panic
+class BootPanic { asm fn fail(self, code: U64) -> never { hlt } }
+
+module platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+class MmioRegion { address: PhysicalAddress; length: U64; panic: BootPanic }
+
+module machine.x86_64.pci
+use { MmioRegion } from platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+
+class PciDevice {
+    panic: BootPanic
+    fn claim_mmio_bar(self, index: U8) -> MmioRegion {
+        return MmioRegion(address = 0, length = 0, panic = self.panic)
+    }
+}
+
+class PciDeviceSet {
+    panic: BootPanic
+    fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
+        return PciDevice(panic = self.panic)
+    }
+}
+
+class PciFixtureFactory {
+    panic: BootPanic
+    fn devices(self) -> PciDeviceSet {
+        return PciDeviceSet(panic = self.panic)
+    }
+}
+
+module tests.fixtures.negative.duplicate_pci_bar_claim
+use { BootPanic } from platform.hardware.panic
+use { PciFixtureFactory } from machine.x86_64.pci
+
+image BadDuplicateBar {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let devices = PciFixtureFactory(panic = BootPanic()).devices()
+        let edu = devices.require_device(vendor_id = 0x1234, device_id = 0x11e8, occurrence = 0)
+        let first = edu.claim_mmio_bar(index = 0)
+        let second = edu.claim_mmio_bar(index = 0)
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}

@@ -47,6 +47,7 @@ type localOrigin struct {
 	HasVcpuID           bool
 	ExecutorBinding     string
 	TerminalVcpu        bool
+	PciDeviceKey        string
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -234,6 +235,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkUniqueConstructors()
 	c.checkExecutorWiring()
 	c.checkExecutorTopicGraph()
+	c.checkHardwareClaims()
 
 	return &CheckedProgram{
 		Modules:    modules,
@@ -1614,6 +1616,67 @@ func namedArgExpr(args []ast.NamedArg, name string) ast.Expr {
 	return nil
 }
 
+func literalArgKey(expr *ast.CallExpr, name string) string {
+	for _, arg := range expr.Args {
+		if arg.Name != name {
+			continue
+		}
+		if lit, ok := arg.Value.(*ast.IntLiteral); ok {
+			return strings.ToLower(lit.Value)
+		}
+		return "<nonliteral>"
+	}
+	return "<missing>"
+}
+
+func pciDeviceKeyFromRequireDevice(call *ast.CallExpr) string {
+	vendor := literalArgKey(call, "vendor_id")
+	device := literalArgKey(call, "device_id")
+	occurrence := literalArgKey(call, "occurrence")
+	if vendor == "<missing>" || device == "<missing>" || occurrence == "<missing>" {
+		return ""
+	}
+	if vendor == "<nonliteral>" || device == "<nonliteral>" || occurrence == "<nonliteral>" {
+		return ""
+	}
+	return "vendor=" + vendor + "/device=" + device + "/occurrence=" + occurrence
+}
+
+func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
+	switch r := receiver.(type) {
+	case *ast.NameExpr:
+		if scope == nil {
+			return "", false
+		}
+		if origin, ok := scope.LookupOrigin(r.Name); ok && origin.PciDeviceKey != "" {
+			return origin.PciDeviceKey, true
+		}
+	case *ast.CallExpr:
+		if r.Method == "require_device" {
+			if key := pciDeviceKeyFromRequireDevice(r); key != "" {
+				return key, true
+			}
+		}
+	}
+	return "", false
+}
+
+func interruptVectorArgKey(expr *ast.CallExpr) string {
+	arg := namedArgExpr(expr.Args, "vector")
+	cons, ok := arg.(*ast.ConstructorExpr)
+	if !ok || cons.Type != "InterruptVector" {
+		return "<nonliteral>"
+	}
+	for _, named := range cons.Args {
+		if named.Name == "value" {
+			if lit, ok := named.Value.(*ast.IntLiteral); ok {
+				return strings.ToLower(lit.Value)
+			}
+		}
+	}
+	return "<missing>"
+}
+
 func (c *checker) originForExprValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
 	switch e := expr.(type) {
 	case *ast.ConstructorExpr:
@@ -1706,6 +1769,8 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		}
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	case receiverType.Module == "machine.x86_64.pci" && receiverType.Name == "PciDeviceSet" && expr.Method == "require_device":
+		origin.PciDeviceKey = pciDeviceKeyFromRequireDevice(expr)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
@@ -1842,6 +1907,65 @@ func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.C
 		Vector:    vector,
 		Span:      call.SpanV,
 	})
+}
+
+func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr, scope *Scope, ctx ContextKind) {
+	if call == nil || (ctx != ContextImagePhaseDirect && isTrustedHardwareAuthorityModule(moduleName)) {
+		return
+	}
+	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	switch {
+	case qualifiedTypeName(receiverType) == "machine.x86_64.interrupts.InterruptAuthority" && call.Method == "route_isa_irq":
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "isa_irq", Key: literalArgKey(call, "irq"), Span: call.SpanV})
+		vectorKey := interruptVectorArgKey(call)
+		if strings.HasPrefix(vectorKey, "<") {
+			c.error(call.SpanV, diag.SEM0053, "interrupt vectors in hardware claims must be source literals")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && (call.Method == "claim_mmio_bar" || call.Method == "claim_io_bar"):
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_bar", Key: key + "." + literalArgKey(call, "index"), Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "claim_msi":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msi", Key: key, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "claim_msix":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
+	case (qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsiCapability" && call.Method == "route") ||
+		(qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsixCapability" && call.Method == "route_entry"):
+		vectorKey := interruptVectorArgKey(call)
+		if strings.HasPrefix(vectorKey, "<") {
+			c.error(call.SpanV, diag.SEM0053, "interrupt vectors in hardware claims must be source literals")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
+	}
+}
+
+func (c *checker) checkHardwareClaims() {
+	seen := map[string]source.Span{}
+	for _, claim := range c.graph.HardwareClaims {
+		key := claim.Kind + ":" + claim.Key
+		if prev, ok := seen[key]; ok {
+			_ = prev
+			c.error(claim.Span, diag.SEM0050, "duplicate hardware claim "+key)
+			continue
+		}
+		seen[key] = claim.Span
+	}
 }
 
 func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string, int, bool) {
@@ -2388,6 +2512,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
+	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}

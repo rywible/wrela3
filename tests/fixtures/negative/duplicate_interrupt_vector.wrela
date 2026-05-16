@@ -1,0 +1,43 @@
+// expect: SEM0050: duplicate hardware claim interrupt_vector:0x40
+module platform.hardware.panic
+class BootPanic { asm fn fail(self, code: U64) -> never { hlt } }
+
+module machine.x86_64.interrupts
+use { BootPanic } from platform.hardware.panic
+
+data InterruptVector { value: U32 }
+class IoApicRoute { vector: InterruptVector }
+
+class InterruptAuthority {
+    panic: BootPanic
+    fn route_isa_irq(self, irq: U8, vector: InterruptVector) -> IoApicRoute {
+        return IoApicRoute(vector = vector)
+    }
+}
+
+class InterruptFixtureFactory {
+    panic: BootPanic
+    fn authority(self) -> InterruptAuthority {
+        return InterruptAuthority(panic = self.panic)
+    }
+}
+
+module tests.fixtures.negative.duplicate_interrupt_vector
+
+use { BootPanic } from platform.hardware.panic
+use { InterruptFixtureFactory, InterruptVector } from machine.x86_64.interrupts
+
+image DuplicateInterruptVector {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let interrupts = InterruptFixtureFactory(panic = BootPanic()).authority()
+        let first = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let second = interrupts.route_isa_irq(irq = 5, vector = InterruptVector(value = 0x40))
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}

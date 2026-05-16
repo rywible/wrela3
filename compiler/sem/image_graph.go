@@ -107,6 +107,12 @@ type InterruptConfiguratorNode struct {
 	Span      source.Span
 }
 
+type HardwareClaimNode struct {
+	Kind string
+	Key  string
+	Span source.Span
+}
+
 type VcpuPlacementNode struct {
 	VcpuID          int
 	ExecutorBinding string
@@ -128,6 +134,7 @@ type ImageGraph struct {
 	Paths                   []PathNode
 	InterruptTopicRoutes    []InterruptTopicRouteNode
 	InterruptConfigurators  []InterruptConfiguratorNode
+	HardwareClaims          []HardwareClaimNode
 	VcpuPlacements          []VcpuPlacementNode
 }
 
