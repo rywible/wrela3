@@ -1055,8 +1055,11 @@ func (c *checker) checkExecutorSubscriptionUse(use SubscriptionUseNode, subscrip
 		}
 		binding := exec.FieldBindings[use.SubscriberLabel]
 		sub := subscriptions[binding]
-		if sub.SubscriberLabel == "" || exec.SlotLabel == "" || sub.SubscriberLabel == exec.SlotLabel {
+		if sub.SubscriberLabel == "" || exec.SlotLabel == "" {
 			continue
+		}
+		if sub.SubscriberLabel == exec.SlotLabel {
+			return true
 		}
 		c.error(use.Span, diag.SEM0040, "subscription for slot "+sub.SubscriberLabel+" used from executor "+exec.Type.Name)
 		reported = true
@@ -1878,6 +1881,13 @@ func (c *checker) canMintInContext(ctx ContextKind, typ *Type) bool {
 	}
 	if ctx == ContextImagePhaseDirect && typ.Kind != KindData {
 		return true
+	}
+	if ctx == ContextOwnershipTransferAuthorityMethod {
+		switch qualifiedTypeName(typ) {
+		case "machine.x86_64.cpu_state.ExecutorRegistry",
+			"machine.x86_64.cpu_state.Vcpu":
+			return true
+		}
 	}
 	return ctx == ContextOwnershipTransferAuthorityMethod && typ == c.ownedRoot
 }

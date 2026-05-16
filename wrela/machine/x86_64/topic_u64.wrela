@@ -28,12 +28,12 @@ class U64GapTopic {
     id: U64
     depth: U64
 
-    fn publisher(self) -> U64GapPublisher {
-        return U64GapPublisher(topic = self)
+    asm fn publisher(self) -> U64GapPublisher {
+        ret
     }
 
-    fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription {
-        return U64GapSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription {
+        ret
     }
 }
 
@@ -73,12 +73,12 @@ class U64ReliableTopic {
     id: U64
     depth: U64
 
-    fn publisher(self) -> U64ReliablePublisher {
-        return U64ReliablePublisher(topic = self)
+    asm fn publisher(self) -> U64ReliablePublisher {
+        ret
     }
 
-    fn subscribe(self, subscriber: ExecutorSlot) -> U64ReliableSubscription {
-        return U64ReliableSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64ReliableSubscription {
+        ret
     }
 }
 

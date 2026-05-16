@@ -2,7 +2,7 @@ module platform.uefi.transition
 
 use { DelegatedMemory, UefiHandle } from platform.uefi.types
 use { UefiBootServicesCalls } from platform.uefi.boot_services
-use { CpuPlan, OwnedHardware, MemoryPlan } from machine.x86_64.cpu_state
+use { CpuPlan, ExecutorRegistry, OwnedHardware, MemoryPlan, Vcpu } from machine.x86_64.cpu_state
 
 unique class DelegatedHardware {
     image_handle: UefiHandle
@@ -66,7 +66,9 @@ unique class DelegatedHardware {
         return OwnedHardware(
             memory = memory_plan.owned_memory,
             io_ports = memory_plan.io_ports,
-            vcpu0 = cpu_plan.vcpu0
+            executors = ExecutorRegistry(next_id = 0),
+            vcpu0 = Vcpu(id = 0),
+            vcpu1 = Vcpu(id = 1)
         )
     }
 
