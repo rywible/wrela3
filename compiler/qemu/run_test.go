@@ -57,6 +57,20 @@ func TestArgsAllowsCPUOverride(t *testing.T) {
 	}
 }
 
+func TestArgsIncludesSMPWhenRequested(t *testing.T) {
+	args := Args(Options{
+		ImagePath: "x.efi",
+		ESPDir:   "esp",
+		OVMFCode: "code.fd",
+		OVMFVars: "vars.fd",
+		SMP:      2,
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-smp 2") {
+		t.Fatalf("QEMU args missing -smp 2:\n%s", joined)
+	}
+}
+
 func TestRunWritesInputTextToQEMUStdin(t *testing.T) {
 	tmp := t.TempDir()
 	seen := filepath.Join(tmp, "stdin.txt")

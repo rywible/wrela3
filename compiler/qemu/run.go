@@ -22,6 +22,7 @@ type Options struct {
 	ImagePath   string
 	Memory      string
 	CPU         string
+	SMP         int
 	Timeout     time.Duration
 	SuccessText string
 
@@ -77,6 +78,9 @@ func Args(opts Options) []string {
 
 	if opts.EnableEdu {
 		args = append(args, "-device", "edu,addr=0x5")
+	}
+	if opts.SMP > 0 {
+		args = append(args, "-smp", strconv.Itoa(opts.SMP))
 	}
 	if opts.EnableIvshmemMsix {
 		args = append(args,
