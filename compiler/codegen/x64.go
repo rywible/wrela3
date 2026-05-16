@@ -32,6 +32,7 @@ type frameSave struct {
 type compileContext struct {
 	types        map[string]ir.TypeInfo
 	topicLayouts map[string]topicDataLayout
+	SlotVcpu     map[string]int
 }
 
 type internalReloc struct {
@@ -82,7 +83,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	ctx := compileContext{types: program.Types, topicLayouts: topicLayouts}
+	ctx := compileContext{types: program.Types, topicLayouts: topicLayouts, SlotVcpu: slotVcpuMap(program)}
 	if ctx.types == nil {
 		ctx.types = map[string]ir.TypeInfo{}
 	}
@@ -202,6 +203,16 @@ func topicLayoutMap(program *ir.Program) (map[string]topicDataLayout, []diag.Dia
 		out[layout.Label] = layout
 	}
 	return out, nil
+}
+
+func slotVcpuMap(program *ir.Program) map[string]int {
+	out := map[string]int{}
+	for _, start := range program.VcpuStarts {
+		if start.SlotLabel != "" {
+			out[start.SlotLabel] = start.VcpuID
+		}
+	}
+	return out
 }
 
 func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding {
@@ -443,6 +454,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitTopicTryNext(e, frame, v)
 			case *ir.TopicArmWait:
 				emitTopicArmWait(e, frame, v)
+			case *ir.TopicWait:
+				emitHltWait(e)
 			}
 		}
 	}
@@ -865,6 +878,49 @@ func (e *Emitter) emitInstruction(instruction asm.Instruction) {
 	e.Code = append(e.Code, bytes...)
 }
 
+func emitHltWait(e *Emitter) {
+	e.emit(0xF4)
+}
+
+func emitMonitorMwait(e *Emitter, addressReg asm.Reg) {
+	if addressReg.Name != "rax" {
+		e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+			asm.RegOperand{Reg: asm.MustLookup("rax")},
+			asm.RegOperand{Reg: addressReg},
+		}})
+	}
+	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("ecx")},
+		asm.RegOperand{Reg: asm.MustLookup("ecx")},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("edx")},
+		asm.RegOperand{Reg: asm.MustLookup("edx")},
+	}})
+	e.emit(0x0F, 0x01, 0xC8)
+	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("ecx")},
+		asm.RegOperand{Reg: asm.MustLookup("ecx")},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("eax")},
+		asm.RegOperand{Reg: asm.MustLookup("eax")},
+	}})
+	e.emit(0x0F, 0x01, 0xC9)
+}
+
+func compileWaitFallbackUnitForTest() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	emitHltWait(e)
+	return compiledUnit{Symbol: "wait_fallback_test", Bytes: e.Code}
+}
+
+func compileMonitorMwaitUnitForTest() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	emitMonitorMwait(e, asm.MustLookup("rax"))
+	return compiledUnit{Symbol: "monitor_mwait_test", Bytes: e.Code}
+}
+
 func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
 	e.emit(0x55)
 	e.emit(0x48, 0x89, 0xE5)
@@ -1185,6 +1241,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitTopicTryNext(e, frame, v)
 		case *ir.TopicArmWait:
 			emitTopicArmWait(e, frame, v)
+		case *ir.TopicWait:
+			emitHltWait(e)
 		}
 	}
 }
@@ -1586,9 +1644,12 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitStoreMemFromReg(e, slot, 8, value, 64)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
+	wakeSlots := make([]string, 0, len(layout.Subscribers))
 	for _, subscriber := range layout.Subscribers {
 		emitStoreMemFromReg(e, base, int64(subscriber.WaitlineOffset), seq, 64)
+		wakeSlots = append(wakeSlots, subscriber.Label)
 	}
+	emitWakeSubscriberSlots(e, wakeSlots, e.ctx)
 }
 
 func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTopicTryPublish) {
@@ -1637,9 +1698,12 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitStoreMemFromReg(e, slot, 8, value, 64)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), producer, 64)
+	wakeSlots := make([]string, 0, len(layout.Subscribers))
 	for _, subscriber := range layout.Subscribers {
 		emitStoreMemFromReg(e, base, int64(subscriber.WaitlineOffset), producer, 64)
+		wakeSlots = append(wakeSlots, subscriber.Label)
 	}
+	emitWakeSubscriberSlots(e, wakeSlots, e.ctx)
 	emitStoreSlotBool(e, outSlot, 1)
 	e.emitJmp(done)
 
@@ -1668,8 +1732,19 @@ func emitReliableTopicWaitForAdvance(e *Emitter, wait *ir.ReliableTopicWaitForAd
 	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth))
 	emitCmpRegReg(e, candidate, asm.MustLookup("rdi"))
 	e.emitJcc(0x82, notFull)
-	e.emit(0xF4)
+	emitHltWait(e)
 	e.bindLabel(notFull)
+}
+
+func emitWakeSubscriberSlots(e *Emitter, subscribers []string, ctx compileContext) {
+	for _, slot := range subscribers {
+		vcpuID := ctx.SlotVcpu[slot]
+		if vcpuID == 0 {
+			continue
+		}
+		emitLapicWrite(e, lapicICRHigh, uint32(vcpuID)<<24)
+		emitLapicWrite(e, lapicICRLow, 0x00004000|0xF0)
+	}
 }
 
 func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg, dst asm.Reg, tmp asm.Reg) {
