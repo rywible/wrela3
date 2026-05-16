@@ -43,9 +43,15 @@ func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 	if layout.SlotsOffset%cacheLineSize != 0 {
 		t.Fatalf("SlotsOffset = %d, want cache-line aligned", layout.SlotsOffset)
 	}
+	if layout.TotalSize < cacheLineSize+2*cacheLineSize+8*cacheLineSize {
+		t.Fatalf("TotalSize = %d, want producer line, cursor+waitline, and cache-line ring slots", layout.TotalSize)
+	}
 	for _, subscriber := range layout.Subscribers {
 		if subscriber.CursorOffset%cacheLineSize != 0 {
 			t.Fatalf("subscriber %q CursorOffset = %d, want cache-line aligned", subscriber.Label, subscriber.CursorOffset)
+		}
+		if subscriber.WaitlineOffset%cacheLineSize != 0 {
+			t.Fatalf("subscriber %q WaitlineOffset = %d, want cache-line aligned", subscriber.Label, subscriber.WaitlineOffset)
 		}
 	}
 }

@@ -11,8 +11,9 @@ import (
 const cacheLineSize = 64
 
 type topicDataSubscriberLayout struct {
-	Label        string
-	CursorOffset uint64
+	Label          string
+	CursorOffset   uint64
+	WaitlineOffset uint64
 }
 
 type topicDataLayout struct {
@@ -44,13 +45,14 @@ func planTopicData(topic ir.TopicLayout) topicDataLayout {
 	layout.Subscribers = make([]topicDataSubscriberLayout, 0, len(topic.Subscribers))
 	for _, subscriber := range topic.Subscribers {
 		layout.Subscribers = append(layout.Subscribers, topicDataSubscriberLayout{
-			Label:        subscriber,
-			CursorOffset: next,
+			Label:          subscriber,
+			CursorOffset:   next,
+			WaitlineOffset: next + cacheLineSize,
 		})
-		next += cacheLineSize
+		next += 2 * cacheLineSize
 	}
-	layout.SlotsOffset = next
-	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*16)
+	layout.SlotsOffset = alignUp64(next)
+	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*cacheLineSize)
 	return layout
 }
 

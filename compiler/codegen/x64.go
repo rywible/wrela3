@@ -1568,7 +1568,7 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitRegRegMove(e, slot, seq)
 	emitMovImmToReg(e, asm.MustLookup("rdx"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdx"))
-	emitShiftImm(e, 0x04, slot, 4)
+	emitShiftImm(e, 0x04, slot, 6)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
@@ -1576,6 +1576,9 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitStoreMemFromReg(e, slot, 8, value, 64)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
+	for _, subscriber := range layout.Subscribers {
+		emitStoreMemFromReg(e, base, int64(subscriber.WaitlineOffset), seq, 64)
+	}
 }
 
 func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
@@ -1619,7 +1622,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitRegRegMove(e, slot, cursor)
 	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdi"))
-	emitShiftImm(e, 0x04, slot, 4)
+	emitShiftImm(e, 0x04, slot, 6)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitLoadMemToReg(e, tmp, slot, 0, 64)
