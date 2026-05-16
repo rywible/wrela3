@@ -138,6 +138,34 @@ func TestHardwareBytesAsmCodegen(t *testing.T) {
 	}
 }
 
+func TestAcpiRootRequireTableLowersChecksumAndOffsets(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	program, ds := ir.Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", ds)
+	}
+	requireTable := findIRFunction(program, "_wrela_method_platform_acpi_root_AcpiRoot_require_table")
+	if requireTable == nil {
+		t.Fatalf("missing AcpiRoot.require_table")
+	}
+	for _, want := range []uint64{36, 8} {
+		if !functionHasConstInt(requireTable, want) {
+			t.Fatalf("AcpiRoot.require_table missing constant %#x", want)
+		}
+	}
+	if !functionCalls(requireTable, "_wrela_method_platform_acpi_tables_AcpiHelpers_checksum_ok") {
+		t.Fatalf("AcpiRoot.require_table must validate table checksums")
+	}
+	requireMadt := findIRFunction(program, "_wrela_method_platform_acpi_root_AcpiRoot_require_madt")
+	if requireMadt == nil || !functionHasConstInt(requireMadt, 0x43495041) {
+		t.Fatalf("AcpiRoot.require_madt must pass APIC signature 0x43495041")
+	}
+	requireMcfg := findIRFunction(program, "_wrela_method_platform_acpi_root_AcpiRoot_require_mcfg")
+	if requireMcfg == nil || !functionHasConstInt(requireMcfg, 0x4746434D) {
+		t.Fatalf("AcpiRoot.require_mcfg must pass MCFG signature 0x4746434D")
+	}
+}
+
 func TestUEFISerialWrite8PreservesValueBeforePortRegisterSetup(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
 	write8 := asmMethodFromSem(t, checked, "machine.x86_64.serial", "SerialWriterRegisters", "write8")

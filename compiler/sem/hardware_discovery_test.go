@@ -15,6 +15,12 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_madt")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_mcfg")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet"), "require_device")
+	root := moduleType(t, index, "platform.acpi.root", "AcpiRoot")
+	assertMethodExists(t, root, "require_table")
+	assertMethodExists(t, root, "require_madt")
+	assertMethodExists(t, root, "require_mcfg")
+	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiLocator"), "find")
+	assertMethodExists(t, moduleType(t, index, "platform.acpi.tables", "AcpiHelpers"), "checksum_ok")
 
 	tables := moduleType(t, index, "platform.uefi.types", "UefiConfigurationTables")
 	assertMethodExists(t, tables, "entry_at")

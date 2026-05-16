@@ -1,9 +1,9 @@
 module platform.acpi.root
 
-use { AcpiTable } from platform.acpi.tables
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
 use { MadtTable } from platform.acpi.madt
 use { McfgTable } from platform.acpi.mcfg
-use { BoundedBytes } from platform.hardware.bytes
+use { PhysicalBytes } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { UefiConfigurationTables } from platform.uefi.types
 
@@ -11,7 +11,23 @@ class AcpiLocator {
     panic: BootPanic
 
     fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
-        return AcpiRoot(root_address = 0, use_xsdt = true, panic = self.panic)
+        let rsdp = tables.find_acpi_rsdp()
+        if rsdp.found == false {
+            self.panic.fail(code = 0xAC010001)
+        }
+        let helpers = AcpiHelpers(panic = self.panic)
+        let rsdp_bytes = PhysicalBytes(address = rsdp.address, length = 36, panic = self.panic).bounded()
+        if helpers.checksum_ok(bytes = rsdp_bytes.slice(offset = 0, length = 20)) == false {
+            self.panic.fail(code = 0xAC010002)
+        }
+        let revision = rsdp_bytes.read_u8(offset = 15)
+        if revision != 0 {
+            if helpers.checksum_ok(bytes = rsdp_bytes.slice(offset = 0, length = rsdp_bytes.read_u32(offset = 20))) == false {
+                self.panic.fail(code = 0xAC010003)
+            }
+            return AcpiRoot(root_address = rsdp_bytes.read_u64(offset = 24), use_xsdt = true, panic = self.panic)
+        }
+        return AcpiRoot(root_address = rsdp_bytes.read_u32(offset = 16), use_xsdt = false, panic = self.panic)
     }
 }
 
@@ -20,8 +36,37 @@ class AcpiRoot {
     use_xsdt: Bool
     panic: BootPanic
 
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers(panic = self.panic).table_at(address = self.root_address)
+    }
+
     fn require_table(self, signature: U32) -> AcpiTable {
-        return AcpiTable(bytes = BoundedBytes(address = 0, length = 0, panic = self.panic), signature = signature, length = 0)
+        let helpers = AcpiHelpers(panic = self.panic)
+        let root = self.root_table()
+        if helpers.checksum_ok(bytes = root.bytes) == false {
+            self.panic.fail(code = 0xAC010004)
+        }
+        let entry_size = 4
+        if self.use_xsdt {
+            entry_size = 8
+        }
+        let count = (root.length - 36) / entry_size
+        let index = 0
+        while index < count {
+            let address = root.bytes.read_u32(offset = 36 + (index * entry_size))
+            if self.use_xsdt {
+                address = root.bytes.read_u64(offset = 36 + (index * entry_size))
+            }
+            let table = helpers.table_at(address = address)
+            if table.signature == signature {
+                if helpers.checksum_ok(bytes = table.bytes) == false {
+                    self.panic.fail(code = 0xAC010005)
+                }
+                return table
+            }
+            index = index + 1
+        }
+        self.panic.fail(code = 0xAC010006)
     }
 
     fn require_madt(self) -> MadtTable {

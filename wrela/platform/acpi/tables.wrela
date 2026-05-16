@@ -1,9 +1,31 @@
 module platform.acpi.tables
 
-use { BoundedBytes } from platform.hardware.bytes
+use { BoundedBytes, PhysicalBytes } from platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
 
 data AcpiTable {
     bytes: BoundedBytes
     signature: U32
     length: U32
+}
+
+class AcpiHelpers {
+    panic: BootPanic
+
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        let header = PhysicalBytes(address = address, length = 36, panic = self.panic).bounded()
+        let length = header.read_u32(offset = 4)
+        let bytes = PhysicalBytes(address = address, length = length, panic = self.panic).bounded()
+        return AcpiTable(bytes = bytes, signature = bytes.read_u32(offset = 0), length = length)
+    }
+
+    fn checksum_ok(self, bytes: BoundedBytes) -> Bool {
+        let sum = 0
+        let index = 0
+        while index < bytes.length {
+            sum = (sum + bytes.read_u8(offset = index)) & 0xFF
+            index = index + 1
+        }
+        return sum == 0
+    }
 }
