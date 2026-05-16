@@ -423,10 +423,7 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 }
 
 func emitLocalApicEOI(e *Emitter) {
-	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("r11")},
-		asm.ImmOperand{Value: 0xFEE00000},
-	}})
+	emitLoadLocalApicBase(e, asm.MustLookup("r11"))
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.RegOperand{Reg: asm.MustLookup("eax")},
 		asm.ImmOperand{Value: 0},
@@ -487,6 +484,7 @@ func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnost
 		return Section{}, nil, ds
 	}
 	writable = append(writable, topicObjects...)
+	writable = append(writable, localApicBaseDataObject())
 	writable = append(writable, vcpuStartupData(program)...)
 	writable = append(writable, interruptRuntimeData(program)...)
 	section, offsets := buildDataSection(".data", writable, 0xC0000040)
@@ -807,6 +805,8 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 		return true
 	case *ir.Call:
 		return ctx.shouldPassRecordReturn(v.Type)
+	case *ir.FieldLoad:
+		return ctx.isDataType(v.Type)
 	case *ir.ReliableTopicTryPublish:
 		return ctx.isDataType(v.Type)
 	case ir.ReliableTopicTryPublish:
@@ -1611,6 +1611,11 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown constructor field: " + field.Name})
 			continue
 		}
+		if e.ctx.isDataType(fieldInfo.Type) && fieldInfo.StorageOffset >= 0 {
+			emitStoreNestedDestinationHandle(e, asm.MustLookup("rbp"), int64(objectSlot+fieldInfo.Offset), int64(objectSlot+fieldInfo.StorageOffset))
+			emitDeepCopyValueToTypedStorage(e, frame, field.Value, fieldInfo.Type, asm.MustLookup("rbp"), int64(objectSlot+fieldInfo.StorageOffset))
+			continue
+		}
 		emitCopyValueToStackRange(e, frame, field.Value, objectSlot+fieldInfo.Offset, fieldInfo.Size)
 	}
 	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
@@ -1875,6 +1880,22 @@ func emitFieldLoad(e *Emitter, op *ir.FieldLoad, frame Frame) {
 	if !ok {
 		return
 	}
+	if e.ctx.isDataType(op.Type) {
+		objectSlot, ok := frame.ObjectSlots[op]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing field load object slot"})
+			return
+		}
+		base, disp, ok := emitObjectAddress(e, frame, op.Object, op.Offset)
+		if !ok {
+			return
+		}
+		emitLoadMemToReg(e, asm.MustLookup("r11"), base, disp, 64)
+		emitDeepCopyObjectToAddressAsType(e, op.Type, asm.MustLookup("r11"), 0, asm.MustLookup("rbp"), int64(objectSlot))
+		emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+		emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+		return
+	}
 	base, disp, ok := emitObjectAddress(e, frame, op.Object, op.Offset)
 	if !ok {
 		return
@@ -1884,6 +1905,29 @@ func emitFieldLoad(e *Emitter, op *ir.FieldLoad, frame Frame) {
 }
 
 func emitFieldStore(e *Emitter, op *ir.FieldStore, frame Frame) {
+	info, infoOK := e.ctx.types[op.ObjectType]
+	if infoOK {
+		if fieldInfo, ok := info.Fields[op.Field]; ok && e.ctx.isDataType(fieldInfo.Type) && fieldInfo.StorageOffset >= 0 {
+			base, disp, ok := emitValueAddress(e, frame, op.Object)
+			if !ok {
+				return
+			}
+			emitStoreNestedDestinationHandle(e, base, disp+int64(fieldInfo.Offset), disp+int64(fieldInfo.StorageOffset))
+			if base.Name == "r11" {
+				emitPushReg(e, base)
+				srcBase, srcDisp, ok := emitValueAddress(e, frame, op.Value)
+				if !ok {
+					emitPopReg(e, asm.MustLookup("rdi"))
+					return
+				}
+				emitPopReg(e, asm.MustLookup("rdi"))
+				emitDeepCopyObjectToAddressAsType(e, fieldInfo.Type, srcBase, srcDisp, asm.MustLookup("rdi"), disp+int64(fieldInfo.StorageOffset))
+				return
+			}
+			emitDeepCopyValueToTypedStorage(e, frame, op.Value, fieldInfo.Type, base, disp+int64(fieldInfo.StorageOffset))
+			return
+		}
+	}
 	base, disp, ok := emitObjectAddress(e, frame, op.Object, op.Offset)
 	if !ok {
 		return
@@ -2124,8 +2168,11 @@ func emitWakeSlot(e *Emitter, slot string, ctx compileContext) {
 		}
 		return
 	}
-	emitLapicWrite(e, lapicICRHigh, uint32(vcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x00004000|0xF0)
+	emitLoadLocalApicBase(e, asm.MustLookup("r11"))
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), vcpuAPICIDCommandSymbol(vcpuID))
+	emitLoadMemToReg(e, asm.MustLookup("rax"), asm.MustLookup("rax"), 0, 64)
+	emitLapicWriteRegWithBaseReg(e, asm.MustLookup("r11"), lapicICRHigh, asm.MustLookup("rax"))
+	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicICRLow, 0x00004000|0xF0)
 }
 
 func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg, dst asm.Reg, tmp asm.Reg) {

@@ -1455,11 +1455,11 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, executorOps...)
 			if e.Method == "start" {
 				ret := ctx.resolveType("machine.x86_64.cpu_state", "VcpuStartStatus")
-				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
+				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
 				ops = append(ops, start)
 				return start, ops, ret
 			}
-			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Executor: executor, SlotLabel: slotLabel}
+			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
 			return receiver, ops, ctx.resolveType(moduleName, "never")
 		}

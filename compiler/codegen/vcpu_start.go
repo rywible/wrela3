@@ -14,8 +14,11 @@ import (
 const apTrampolineBase = 0x8000
 const apTrampolineInstallSymbol = "_wrela_method_platform_uefi_types_DelegatedMemory_install_ap_trampoline"
 const apTrampolineVcpuStackSize = 16 * 1024
+const apStartupDelayLoopCount = 70_000
+const apicICRInitAssert = 0x00004500
 
 const (
+	apTrampolineLocalApicBaseOffset = 0x98
 	apTrampolinePML4Offset          = 0xa0
 	apTrampolineEntryOffset         = 0xa8
 	apTrampolineStackOffset         = 0xb0
@@ -86,7 +89,7 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 		return plans[i].VcpuID < plans[j].VcpuID
 	})
 
-	suffixes := []string{"ready", "entry", "stack_top", "context"}
+	suffixes := []string{"ready", "entry", "stack_top", "context", "apic_id_command"}
 	for _, plan := range plans {
 		out = append(out, ir.DataObject{
 			Symbol: fmt.Sprintf("_wrela_vcpu%d_stack", plan.VcpuID),
@@ -105,7 +108,10 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 }
 
 func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
-	emitLapicWrite(e, op.LocalApicBase, lapicSVR, 0x1ff)
+	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame)
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
+	emitStoreLocalApicBase(e, asm.MustLookup("r11"))
+	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicSVR, 0x1ff)
 	e.emit(0xFB)
 	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
 	emitCallReloc(e, executorStartSymbolForPlan(ctx.VcpuPlans[op.SlotLabel], valueType(op.Executor)))
@@ -114,16 +120,101 @@ func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext
 
 func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
 	emitPrepareVcpuStartup(e, op, frame, ctx)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004500)
-	emitDelayLoop(e, 70000)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
-	emitDelayLoop(e, 70000)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
-	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
+	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame)
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
+	emitStoreLocalApicBase(e, asm.MustLookup("r11"))
+	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicSVR, 0x1ff)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
+	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), apicICRInitAssert)
+	emitDelayLoop(e, apStartupDelayLoopCount)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
+	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
+	emitDelayLoop(e, apStartupDelayLoopCount)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
+	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
 	emitWaitForVcpuReady(e, op.VcpuID)
 	emitStoreVcpuStartStatus(e, op, frame)
+}
+
+func emitLoadVcpuLocalApicBase(e *Emitter, vcpu ir.Value, fallback uint64, frame Frame, dst asm.Reg) {
+	if emitLoadVcpuField(e, vcpu, frame, "local_apic_base", dst, 64) {
+		return
+	}
+	emitMovImmToReg(e, dst, int64(fallback))
+}
+
+func emitLoadVcpuAPICIDCommand(e *Emitter, vcpu ir.Value, fallback uint32, frame Frame, dst asm.Reg) {
+	if emitLoadVcpuField(e, vcpu, frame, "apic_id", dst, 32) {
+		emitShiftImm(e, 0x04, dst, 24)
+		return
+	}
+	emitMovImmToReg(e, dst, int64(fallback<<24))
+}
+
+func emitStoreVcpuAPICIDCommand(e *Emitter, vcpuID int, vcpu ir.Value, fallback uint32, frame Frame) {
+	emitLoadVcpuAPICIDCommand(e, vcpu, fallback, frame, asm.MustLookup("r10"))
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), vcpuAPICIDCommandSymbol(vcpuID))
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
+}
+
+func vcpuAPICIDCommandSymbol(vcpuID int) string {
+	return fmt.Sprintf("_wrela_vcpu%d_apic_id_command", vcpuID)
+}
+
+func emitLoadVcpuField(e *Emitter, vcpu ir.Value, frame Frame, field string, dst asm.Reg, width int) bool {
+	if vcpu == nil {
+		return false
+	}
+	info, ok := e.ctx.typeInfo(valueType(vcpu))
+	if !ok {
+		return false
+	}
+	fieldInfo, ok := info.Fields[field]
+	if !ok {
+		return false
+	}
+	base, disp, ok := emitValueAddress(e, frame, vcpu)
+	if !ok {
+		return false
+	}
+	emitLoadMemToReg(e, dst, base, disp+int64(fieldInfo.Offset), width)
+	return true
+}
+
+func emitLapicWriteWithBaseReg(e *Emitter, base asm.Reg, offset uint32, value uint32) {
+	emitMovImmToReg(e, asm.MustLookup("rax"), int64(value))
+	emitLapicWriteRegWithBaseReg(e, base, offset, asm.MustLookup("rax"))
+}
+
+func emitLapicWriteRegWithBaseReg(e *Emitter, base asm.Reg, offset uint32, value asm.Reg) {
+	emitStoreMemFromReg(e, base, int64(offset), value, 32)
+}
+
+func emitWaitForIcrDelivery(e *Emitter, base asm.Reg) {
+	loop := e.newLabel("icr_delivery")
+	done := e.newLabel("icr_delivery_done")
+	e.bindLabel(loop)
+	emitLoadMemToReg(e, asm.MustLookup("rax"), base, lapicICRLow, 32)
+	emitMovImmToReg(e, asm.MustLookup("r10"), 0x1000)
+	emitRegRegOp(e, 0x21, asm.MustLookup("rax"), asm.MustLookup("r10"))
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rax")},
+		asm.ImmOperand{Value: 0},
+	}})
+	e.emitJcc(0x84, done)
+	e.emitInstruction(asm.Instruction{Mnemonic: "pause"})
+	e.emitJmp(loop)
+	e.bindLabel(done)
+}
+
+func emitSendIcr(e *Emitter, base asm.Reg, destShifted asm.Reg, low uint32) {
+	emitRegRegMove(e, asm.MustLookup("rax"), destShifted)
+	emitLapicWriteRegWithBaseReg(e, base, lapicICRHigh, asm.MustLookup("rax"))
+	emitLapicWriteWithBaseReg(e, base, lapicICRLow, low)
+	emitWaitForIcrDelivery(e, base)
 }
 
 func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
@@ -158,6 +249,8 @@ func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compi
 	// Patch the SIPI-page handoff slots consumed by ap_trampoline.bin.
 	trampolineBase := asm.MustLookup("r9")
 	emitMovImmToReg(e, trampolineBase, apTrampolineBase)
+	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("rax"))
+	emitStoreMemFromReg(e, trampolineBase, apTrampolineLocalApicBaseOffset, asm.MustLookup("rax"), 64)
 	emitStoreIDTDescriptor(e, trampolineBase, apTrampolineIDTDescriptorOffset)
 	e.emit(0x0F, 0x20, 0xD8) // mov rax, cr3
 	emitStoreMemFromReg(e, trampolineBase, apTrampolinePML4Offset, asm.MustLookup("rax"), 64)

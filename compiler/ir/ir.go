@@ -424,6 +424,7 @@ type VcpuStart struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
 	Type          Type
@@ -436,6 +437,7 @@ type VcpuEnter struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
 }

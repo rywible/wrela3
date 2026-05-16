@@ -348,6 +348,9 @@ class Boot {
 	if start.VcpuID != 1 || start.APICID != 7 || start.LocalApicBase != 0xfee01000 {
 		t.Fatalf("VcpuStart = %#v, want VcpuID 1 APICID 7 LocalApicBase 0xfee01000", start)
 	}
+	if start.Vcpu == nil {
+		t.Fatalf("VcpuStart must retain the receiver value for runtime APIC ID and LAPIC base loads")
+	}
 }
 
 func TestLowerUsesSourceAsmForDelegatedHardwareExitToOwnedHardware(t *testing.T) {

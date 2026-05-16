@@ -78,11 +78,12 @@ data AcpiRsdpSearchResult {
     address: PhysicalAddress
 }
 
-class UefiConfigurationTables {
+data UefiConfigurationTables {
     table_address: VirtualAddress
     count: U64
 
     asm fn entry_at(self, index: U64) -> UefiConfigurationTableEntry {
+        mov r8, r10
         mov r11, self.table_address
         mov r10, index
         mov r9, 0
@@ -95,16 +96,19 @@ class UefiConfigurationTables {
     configuration_entry_offset_done:
         add r11, r9
         mov r10, [r11]
-        mov [rax + 0], r10
+        mov [r8 + 0], r10
         mov r10, [r11 + 8]
-        mov [rax + 8], r10
+        mov [r8 + 8], r10
         mov r10, [r11 + 16]
-        mov [rax + 16], r10
+        mov [r8 + 16], r10
+        mov rax, r8
         ret
     }
 
     fn find_acpi_rsdp(self) -> AcpiRsdpSearchResult {
         let index = 0
+        let fallback_found = false
+        let fallback_address = self.table_address & 0
         while index < self.count {
             let entry = self.entry_at(index = index)
             if entry.vendor_guid_low == 0x11D3E4F18868E871 {
@@ -114,10 +118,14 @@ class UefiConfigurationTables {
             }
             if entry.vendor_guid_low == 0x11D32D88EB9D2D30 {
                 if entry.vendor_guid_high == 0x4DC13F279000169A {
-                    return AcpiRsdpSearchResult(found = true, address = entry.table_address)
+                    fallback_found = true
+                    fallback_address = entry.table_address
                 }
             }
             index = index + 1
+        }
+        if fallback_found {
+            return AcpiRsdpSearchResult(found = true, address = fallback_address)
         }
         return AcpiRsdpSearchResult(found = false, address = 0)
     }
@@ -148,6 +156,7 @@ data UefiMemoryMap {
     key: U64
 
     asm fn descriptor_at(self, index: U64) -> UefiMemoryDescriptor {
+        mov r8, r10
         mov r11, self.descriptors
         mov r11, [r11 + DelegatedBytes.address]
         mov r10, index
@@ -161,15 +170,16 @@ data UefiMemoryMap {
     descriptor_offset_done:
         add r11, r9
         mov r10d, [r11 + 0]
-        mov [rax + 0], r10d
+        mov [r8 + 0], r10d
         mov r10, [r11 + 8]
-        mov [rax + 8], r10
+        mov [r8 + 8], r10
         mov r10, [r11 + 16]
-        mov [rax + 16], r10
+        mov [r8 + 16], r10
         mov r10, [r11 + 24]
-        mov [rax + 24], r10
+        mov [r8 + 24], r10
         mov r10, [r11 + 32]
-        mov [rax + 32], r10
+        mov [r8 + 32], r10
+        mov rax, r8
         ret
     }
 
@@ -180,12 +190,13 @@ data UefiMemoryMap {
             let descriptor = self.descriptor_at(index = index)
             let bytes = descriptor.number_of_pages << 12
             let aligned = (descriptor.physical_start + align - 1) & (0 - align)
+            if aligned < min_base {
+                aligned = (min_base + align - 1) & (0 - align)
+            }
             let end = aligned + length
             if descriptor.kind == 7 {
-                if aligned >= min_base {
-                    if end <= descriptor.physical_start + bytes {
-                        return MutableBytes(address = aligned, length = length)
-                    }
+                if end <= descriptor.physical_start + bytes {
+                    return MutableBytes(address = aligned, length = length)
                 }
             }
             index = index + 1
@@ -242,15 +253,16 @@ class DelegatedMemory {
         push r15
 
         mov r10, self.next_offset
+        add r10, self.arena_base
         add r10, 4095
         mov rax, 0xfffffffffffff000
         and r10, rax
-        mov r11, self.arena_base
-        add r11, r10
+        mov r11, r10
         mov rbx, r11
         mov r12, r11
         add r12, 4096
         mov r14, r10
+        sub r14, self.arena_base
         add r14, 4096
         add r14, 4096
 

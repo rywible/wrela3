@@ -16,8 +16,11 @@ var entryRecordNames = []string{
 	"DelegatedHardware",
 }
 
+const entryAdapterScratchSize = 128 * 1024
+
 type entryFrameLayout struct {
 	FrameSize                      int
+	ScratchOffset                  int
 	UefiHandleOffset               int
 	UefiBootServicesOffset         int
 	UefiBootServicesCallsOffset    int
@@ -57,7 +60,7 @@ func buildEntryAdapterLayout(ctx compileContext) (entryFrameLayout, bool) {
 		offsets[name] = -cursor
 	}
 
-	frameSize := layout.AlignUp(cursor, 16)
+	frameSize := layout.AlignUp(cursor+entryAdapterScratchSize, 16)
 	hw := records["DelegatedHardware"]
 	mem := records["DelegatedMemory"]
 	memoryMap := records["UefiMemoryMap"]
@@ -93,6 +96,7 @@ func buildEntryAdapterLayout(ctx compileContext) (entryFrameLayout, bool) {
 
 	return entryFrameLayout{
 		FrameSize:                      frameSize,
+		ScratchOffset:                  -frameSize,
 		UefiHandleOffset:               offsets["UefiHandle"],
 		UefiBootServicesOffset:         offsets["UefiBootServices"],
 		UefiBootServicesCallsOffset:    offsets["UefiBootServicesCalls"],
@@ -255,8 +259,8 @@ func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter, ctx compileContext) {
 	for i := 0; i < delegatedMemoryRecord.Size; i += 8 {
 		emitStoreImmediateSlot(e, 0, adapterLayout.DelegatedMemoryOffset+i)
 	}
-	emitStoreImmediateSlot(e, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_base"].Offset)
-	emitStoreImmediateSlot(e, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
+	emitStoreSlotAddress(e, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_base"].Offset, adapterLayout.ScratchOffset)
+	emitStoreImmediateSlot(e, entryAdapterScratchSize, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
 	emitStoreImmediateSlot(e, 0, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["next_offset"].Offset)
 
 	for i := 0; i < delegatedBytesRecord.Size; i += 8 {

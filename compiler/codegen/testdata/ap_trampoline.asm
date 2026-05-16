@@ -48,7 +48,7 @@
 ;     mov rsp, rax
 ;     mov rdi, [context_qword]
 ;     mov rbx, [ready_qword]
-;     mov r11d, 0xfee00000
+;     mov r11, [local_apic_base_qword]
 ;     mov eax, 0x1ff
 ;     mov dword [r11 + 0xf0], eax
 ;     mov dword [rbx], 1
@@ -60,6 +60,7 @@
 ;     jmp halt
 ;
 ; Metadata slots:
+;     0x98 local_apic_base_qword: dq 0
 ;     0xa0 pml4_phys_qword: dq 0
 ;     0xa8 entry_qword:     dq 0
 ;     0xb0 stack_qword:     dq 0

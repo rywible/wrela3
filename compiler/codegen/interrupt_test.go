@@ -156,6 +156,7 @@ func interruptTopicProgramForCodegenTest(t *testing.T) *ir.Program {
 	}}
 	program.VcpuStarts = []ir.VcpuStartPlan{{
 		VcpuID:    2,
+		APICID:    7,
 		SlotLabel: "console",
 		ExecutorType: ir.Type{
 			Name:   "HelloWorld",
@@ -377,12 +378,15 @@ func TestInterruptTopicDispatchWakesNonBspSubscriber(t *testing.T) {
 	}
 	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
 
-	destination := make([]byte, 4)
-	binary.LittleEndian.PutUint32(destination, 2<<24)
 	vector := make([]byte, 4)
 	binary.LittleEndian.PutUint32(vector, 0x00004000|0xF0)
-	if !containsBytes(code, destination) || !containsBytes(code, vector) {
-		t.Fatalf("interrupt topic dispatch missing LAPIC wake for vCPU 2/vector F0: %#x", code)
+	if !codeReferencesSymbol(t, img, "_wrela_interrupt_vector40_serial", "_wrela_vcpu2_apic_id_command") || !containsBytes(code, vector) {
+		t.Fatalf("interrupt topic dispatch missing runtime APIC ID wake for vCPU 2/vector F0: %#x", code)
+	}
+	ordinalDestination := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ordinalDestination, 2<<24)
+	if containsBytes(code, ordinalDestination) {
+		t.Fatalf("interrupt topic dispatch must not derive wake destination from vCPU ordinal: %#x", code)
 	}
 }
 

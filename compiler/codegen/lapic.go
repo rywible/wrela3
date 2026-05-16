@@ -1,6 +1,9 @@
 package codegen
 
-import "github.com/ryanwible/wrela3/compiler/asm"
+import (
+	"github.com/ryanwible/wrela3/compiler/asm"
+	"github.com/ryanwible/wrela3/compiler/ir"
+)
 
 const (
 	lapicSVR     = 0xF0
@@ -8,47 +11,18 @@ const (
 	lapicICRHigh = 0x310
 )
 
-func emitLapicWrite(e *Emitter, args ...interface{}) {
-	base, offset, value := lapicWriteArgs(args...)
-	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("r11")},
-		asm.ImmOperand{Value: int64(base)},
-	}})
-	emitMovImmToReg(e, asm.MustLookup("rax"), int64(value))
-	emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(offset), asm.MustLookup("rax"), 32)
+const localApicBaseSymbol = "_wrela_local_apic_base"
+
+func localApicBaseDataObject() ir.DataObject {
+	return ir.DataObject{Symbol: localApicBaseSymbol, Bytes: make([]byte, 8), Align: 8}
 }
 
-func lapicWriteArgs(args ...interface{}) (uint64, uint32, uint32) {
-	base := uint64(0xFEE00000)
-	if len(args) == 3 {
-		base = asUint64(args[0])
-		return base, asUint32(args[1]), asUint32(args[2])
-	}
-	return base, asUint32(args[0]), asUint32(args[1])
+func emitStoreLocalApicBase(e *Emitter, value asm.Reg) {
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), localApicBaseSymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, value, 64)
 }
 
-func asUint64(v interface{}) uint64 {
-	switch n := v.(type) {
-	case uint64:
-		return n
-	case uint32:
-		return uint64(n)
-	case int:
-		return uint64(n)
-	default:
-		return 0
-	}
-}
-
-func asUint32(v interface{}) uint32 {
-	switch n := v.(type) {
-	case uint32:
-		return n
-	case uint64:
-		return uint32(n)
-	case int:
-		return uint32(n)
-	default:
-		return 0
-	}
+func emitLoadLocalApicBase(e *Emitter, dst asm.Reg) {
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), localApicBaseSymbol)
+	emitLoadMemToReg(e, dst, asm.MustLookup("rax"), 0, 64)
 }

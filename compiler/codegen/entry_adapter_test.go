@@ -38,8 +38,11 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 		t.Fatal("buildEntryAdapterLayout() failed")
 	}
 
-	if adapterLayout.FrameSize != 144 {
-		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 144)
+	if adapterLayout.FrameSize != 131216 {
+		t.Fatalf("entry adapter frame size = %d, want %d", adapterLayout.FrameSize, 131216)
+	}
+	if adapterLayout.ScratchOffset != -131216 {
+		t.Fatalf("entry adapter scratch offset = %d, want %d", adapterLayout.ScratchOffset, -131216)
 	}
 	if adapterLayout.UefiHandleOffset != -8 ||
 		adapterLayout.UefiBootServicesOffset != -16 ||
@@ -95,8 +98,8 @@ func TestCompileEntryAdapterMaterializesRecordsAndNestedOffsets(t *testing.T) {
 	if delegatedMemoryRecord.Size != 32 || delegatedMemoryRecord.Fields["last_memory_map"].Offset != 24 || delegatedMemoryRecord.Fields["last_memory_map"].Size != 8 {
 		t.Fatalf("DelegatedMemory layout = %#v, want last_memory_map handle at +24", delegatedMemoryRecord)
 	}
-	assertStoresImmediateSlot(t, entry, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_base"].Offset)
-	assertStoresImmediateSlot(t, entry, 0x200000, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
+	assertStoresSlotAddress(t, entry, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_base"].Offset, adapterLayout.ScratchOffset)
+	assertStoresImmediateSlot(t, entry, entryAdapterScratchSize, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["arena_length"].Offset)
 	assertStoresImmediateSlot(t, entry, 0, adapterLayout.DelegatedMemoryOffset+delegatedMemoryRecord.Fields["next_offset"].Offset)
 
 	memoryMapRecord, ok := recordLayoutFromTypeInfo(program.Types["UefiMemoryMap"])
