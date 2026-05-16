@@ -314,6 +314,7 @@ type builtDataSection struct {
 
 func buildData(program *ir.Program) (Section, map[string]uint64) {
 	writable := append([]ir.DataObject{}, program.WritableData...)
+	writable = append(writable, vcpuStartupData(program)...)
 	writable = append(writable, interruptRuntimeData(program)...)
 	return buildDataSection(".data", writable, 0xC0000040)
 }
@@ -344,6 +345,10 @@ func buildDataSection(name string, objects []ir.DataObject, characteristics uint
 func appendDataObjects(out *[]byte, objects []ir.DataObject) map[string]uint64 {
 	offsets := map[string]uint64{}
 	for _, obj := range objects {
+		if obj.Align > 1 {
+			aligned := layout.AlignUp(len(*out), int(obj.Align))
+			*out = append(*out, make([]byte, aligned-len(*out))...)
+		}
 		offsets[obj.Symbol] = uint64(len(*out))
 		*out = append(*out, obj.Bytes...)
 	}

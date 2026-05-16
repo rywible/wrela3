@@ -409,6 +409,7 @@ func (VcpuEnter) isOperation() {}
 type DataObject struct {
 	Symbol string
 	Bytes  []byte
+	Align  uint64
 }
 
 type InterruptContextPathField struct {
