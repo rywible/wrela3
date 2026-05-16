@@ -447,10 +447,9 @@ func (c *checker) checkOnHandlers(moduleName string, exec *Type, handlers []ast.
 	if exec == nil {
 		return
 	}
-	seen := map[string]source.Span{}
 	for _, handler := range handlers {
+		c.error(handler.SpanV, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics")
 		key := handler.PathField + ".interrupt"
-		seen[key] = handler.Span()
 		field := c.fieldByName(exec, handler.PathField)
 		if field == nil || field.Type == nil || field.Type.Kind != KindDriverPath {
 			c.error(handler.SpanV, diag.SEM0018, "on handler must reference a driver path field with an interrupt event")
@@ -481,7 +480,6 @@ func (c *checker) checkOnHandlers(moduleName string, exec *Type, handlers []ast.
 		c.currentType = prevType
 		c.currentPhase = prevPhase
 	}
-	c.checkExecutorInterruptCompleteness(exec, seen)
 }
 
 func (c *checker) checkImageDecl(moduleName string, image *ast.ImageDecl) {

@@ -568,12 +568,6 @@ driver path SerialConsolePath {
         return SerialInterrupt(vector = 1)
     }
 }
-
-executor ConsoleExec {
-    serial: SerialConsolePath
-
-    on serial.interrupt(event: SerialInterrupt) {}
-}
 `
 
 func TestInterruptEventBodyContracts(t *testing.T) {
@@ -624,7 +618,7 @@ driver path PrimitiveEvent {
 	}
 }
 
-func TestExecutorMustHandleInterruptPathFields(t *testing.T) {
+func TestExecutorInterruptPathFieldsNoLongerRequireOnHandlers(t *testing.T) {
 	_, diags := checkModuleForTest(t, `
 module index.interrupt_missing_on
 `+interruptPrelude+`
@@ -647,8 +641,8 @@ image Bad {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0017) {
-		t.Fatalf("expected SEM0017, got %#v", diags)
+	if hasCode(diags, diag.SEM0017) {
+		t.Fatalf("did not expect SEM0017, got %#v", diags)
 	}
 }
 
@@ -663,8 +657,8 @@ executor BadField {
     on missing.interrupt(event: SerialInterrupt) {}
 }
 `)
-	if !hasCode(diags, diag.SEM0018) {
-		t.Fatalf("expected SEM0018, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -679,8 +673,8 @@ executor BadParam {
     on serial.interrupt(event: OtherInterrupt) {}
 }
 `)
-	if !hasCode(diags, diag.SEM0016) {
-		t.Fatalf("expected SEM0016, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -701,8 +695,8 @@ executor BadBody {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0016) {
-		t.Fatalf("expected SEM0016, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -779,8 +773,8 @@ executor BadHandler {
 		t.Fatalf("index diagnostics: %#v", ds)
 	}
 	_, diags := Check(index, modules)
-	if !hasCode(diags, diag.SEM0016) {
-		t.Fatalf("expected SEM0016, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -797,8 +791,8 @@ executor BadCall {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0019) {
-		t.Fatalf("expected SEM0019, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -823,12 +817,21 @@ executor BadBind {
 	if hasCode(diags, diag.SEM0019) {
 		t.Fatalf("ordinary interrupts field bind() must remain legal, got %#v", diags)
 	}
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
+	}
 }
 
 func TestOnlySupportedInterruptRuntimeBindingsExposed(t *testing.T) {
 	checked, diags := checkModuleForTest(t, `
 module machine.x86_64.serial
 `+interruptPrelude+`
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {}
+}
 
 image Good {
     transitions { delegated_hardware -> owned_hardware }
@@ -844,11 +847,11 @@ image Good {
     }
 }
 `)
-	if len(diags) != 0 {
-		t.Fatalf("unexpected diagnostics: %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
-	if len(checked.InterruptBindings) != 1 || checked.InterruptBindings[0].Vector != 0x40 {
-		t.Fatalf("interrupt bindings = %#v, want vector 0x40", checked.InterruptBindings)
+	if len(checked.InterruptBindings) != 0 {
+		t.Fatalf("interrupt bindings = %#v, want none", checked.InterruptBindings)
 	}
 }
 
@@ -856,6 +859,12 @@ func TestOnlySupportedInterruptRuntimeRejectsReachableUnsupported(t *testing.T) 
 	_, diags := checkModuleForTest(t, `
 module index.interrupt_unsupported_reachable
 `+interruptPrelude+`
+
+executor ConsoleExec {
+    serial: SerialConsolePath
+
+    on serial.interrupt(event: SerialInterrupt) {}
+}
 
 image Bad {
     transitions { delegated_hardware -> owned_hardware }
@@ -871,8 +880,8 @@ image Bad {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0020) {
-		t.Fatalf("expected SEM0020, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
@@ -929,8 +938,8 @@ image Bad {
     }
 }
 `)
-	if !hasCode(diags, diag.SEM0020) {
-		t.Fatalf("expected SEM0020, got %#v", diags)
+	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
+		t.Fatalf("expected SEM0042, got %#v", diags)
 	}
 }
 
