@@ -2,6 +2,7 @@ module machine.x86_64.pci
 
 use { IoPortRegion, MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
+use { InterruptVector, LocalApic } from machine.x86_64.interrupts
 
 class PciConfigPorts {
     asm fn write32(self, address: U32, value: U32) {
@@ -128,6 +129,10 @@ data PciDeviceIdentity {
     prog_if: U8
 }
 
+data PciInterruptRoute {
+    vector: InterruptVector
+}
+
 class PcieEcamWindow {
     base: PhysicalAddress
     segment: U16
@@ -235,6 +240,92 @@ class PciDevice {
         let base = original & 0xFFFC
         let size = (0 - (mask & 0xFFFC)) & 0xFFFF
         return IoPortRegion(port_base = base, length = size)
+    }
+
+    fn find_capability(self, capability_id: U8) -> U16 {
+        let status = self.read_config32(offset = 0x04)
+        if (status & 0x00100000) == 0 {
+            self.panic.fail(code = 0xAC060020)
+        }
+        let ptr = self.read_config32(offset = 0x34) & 0xFC
+        let remaining = 48
+        while remaining != 0 {
+            if ptr == 0 {
+                self.panic.fail(code = 0xAC060021)
+            }
+            let header = self.read_config32(offset = ptr)
+            if (header & 0xFF) == capability_id {
+                return ptr
+            }
+            ptr = (header >> 8) & 0xFC
+            remaining = remaining - 1
+        }
+        self.panic.fail(code = 0xAC060022)
+    }
+
+    fn enable_mmio_and_bus_master(self) {
+        let command_status = self.read_config32(offset = 0x04)
+        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
+    }
+
+    fn claim_msi(self) -> MsiCapability {
+        let command_status = self.read_config32(offset = 0x04)
+        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
+        return MsiCapability(device = self, capability_offset = self.find_capability(capability_id = 0x05))
+    }
+
+    fn claim_msix(self, table_bar_index: U8) -> MsixCapability {
+        let command_status = self.read_config32(offset = 0x04)
+        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
+        let cap = self.find_capability(capability_id = 0x11)
+        let table_info = self.read_config32(offset = cap + 4)
+        let bir = table_info & 0x7
+        if bir != table_bar_index {
+            self.panic.fail(code = 0xAC060023)
+        }
+        let table_offset = table_info & 0xFFFFFFF8
+        let table = self.claim_mmio_bar(index = table_bar_index)
+        return MsixCapability(device = self, capability_offset = cap, table = table, table_offset = table_offset)
+    }
+}
+
+class MsiCapability {
+    device: PciDevice
+    capability_offset: U16
+
+    fn route(self, vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
+        self.device.enable_mmio_and_bus_master()
+        let header = self.device.read_config32(offset = self.capability_offset)
+        let control = (header >> 16) & 0xFFFF
+        let message_address = target.message_address()
+        self.device.write_config32(offset = self.capability_offset + 4, value = message_address)
+        if (control & 0x80) != 0 {
+            self.device.write_config32(offset = self.capability_offset + 8, value = 0)
+            self.device.write_config32(offset = self.capability_offset + 12, value = vector.value)
+        } else {
+            self.device.write_config32(offset = self.capability_offset + 8, value = vector.value)
+        }
+        self.device.write_config32(offset = self.capability_offset, value = header | 0x00010000)
+        return PciInterruptRoute(vector = vector)
+    }
+}
+
+class MsixCapability {
+    device: PciDevice
+    capability_offset: U16
+    table: MmioRegion
+    table_offset: U32
+
+    fn route_entry(self, entry: U16, vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
+        self.device.enable_mmio_and_bus_master()
+        let base = self.table_offset + (entry * 16)
+        self.table.write32(offset = base + 0, value = target.message_address())
+        self.table.write32(offset = base + 4, value = 0)
+        self.table.write32(offset = base + 8, value = vector.value)
+        self.table.write32(offset = base + 12, value = 0)
+        let header = self.device.read_config32(offset = self.capability_offset)
+        self.device.write_config32(offset = self.capability_offset, value = header | 0x80000000)
+        return PciInterruptRoute(vector = vector)
     }
 }
 

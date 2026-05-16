@@ -1,5 +1,6 @@
 module machine.x86_64.edu
 
+use { MmioRegion } from platform.hardware.bytes
 use { ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
 use { TopicIdentity } from machine.x86_64.topic_u64
 
@@ -50,32 +51,17 @@ class EduInterruptSubscription {
 
 driver path EduMsiPath {
     identity: PathIdentity
-    mmio_base: VirtualAddress
+    mmio: MmioRegion
     irq: EduInterruptPublisher
 
     interrupt receiver -> EduInterrupt {
-        let status = self.read32(offset = 0x24)
-        self.write32(offset = 0x64, value = status)
+        let status = self.mmio.read32(offset = 0x24)
+        self.mmio.write32(offset = 0x64, value = status)
         return EduInterrupt(status = status)
     }
 
-    asm fn read32(self, offset: U64) -> U32 {
-        mov r11, self.mmio_base
-        add r11, offset
-        mov eax, [r11]
-        ret
-    }
-
-    asm fn write32(self, offset: U64, value: U32) {
-        mov r11, self.mmio_base
-        add r11, offset
-        mov eax, value
-        mov [r11], eax
-        ret
-    }
-
     fn raise_test_interrupt(self) {
-        self.write32(offset = 0x60, value = 0x01)
+        self.mmio.write32(offset = 0x60, value = 0x01)
     }
 
     fn ack_completed(self, event: EduInterrupt) {

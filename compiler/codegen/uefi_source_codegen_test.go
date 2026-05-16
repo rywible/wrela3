@@ -337,33 +337,23 @@ func TestInterruptPlatformSourceCodegen(t *testing.T) {
 	}
 }
 
-func TestPciInterruptConfiguratorWalksCapabilities(t *testing.T) {
+func TestPciCapabilitiesWalkedFromDiscoveredDevices(t *testing.T) {
 	checked := parseCheckedUEFIModules(t)
-	_ = asmMethodFromSem(t, checked, "machine.x86_64.pci", "PciConfigPorts", "read32")
 	program, ds := ir.Lower(checked)
 	if len(ds) != 0 {
 		t.Fatalf("Lower diagnostics: %#v", ds)
 	}
-	findCap := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability")
-	if findCap == nil {
-		t.Fatalf("missing find_capability lowering")
+	msi := findIRFunction(program, "_wrela_method_machine_x86_64_pci_PciDevice_claim_msi")
+	if msi == nil || !functionHasConstInt(msi, 0x05) {
+		t.Fatalf("claim_msi must search capability id 0x05")
 	}
-	edu := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_edu_msi_vector41")
-	if !functionCalls(edu, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability") {
-		t.Fatalf("configure_edu_msi_vector41 must call find_capability")
+	msix := findIRFunction(program, "_wrela_method_machine_x86_64_pci_PciDevice_claim_msix")
+	if msix == nil || !functionHasConstInt(msix, 0x11) {
+		t.Fatalf("claim_msix must search capability id 0x11")
 	}
-	for _, want := range []uint64{0xFEE00000, 0x41, 0x80, 0x00010000} {
-		if !functionHasConstInt(edu, want) {
-			t.Fatalf("configure_edu_msi_vector41 missing constant %#x", want)
-		}
-	}
-	msix := findIRFunction(program, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_configure_ivshmem_msix_vector42")
-	if !functionCalls(msix, "_wrela_method_machine_x86_64_pci_Q35PciInterruptConfigurator_find_capability") {
-		t.Fatalf("configure_ivshmem_msix_vector42 must call find_capability")
-	}
-	for _, want := range []uint64{0xFEE00000, 0x42, 0x80000000} {
-		if !functionHasConstInt(msix, want) {
-			t.Fatalf("configure_ivshmem_msix_vector42 missing constant %#x", want)
+	for _, fn := range []*ir.Function{msi, msix} {
+		if !functionHasConstInt(fn, 0x04) || !functionHasConstInt(fn, 0x00000006) {
+			t.Fatalf("%s must enable PCI command memory and bus-master bits", fn.Symbol)
 		}
 	}
 }
