@@ -63,3 +63,15 @@ func TestMemoryDiagnosticCodesExist(t *testing.T) {
 		}
 	}
 }
+
+func TestHardwareDiscoveryDiagnosticCodesExist(t *testing.T) {
+	codes := []string{
+		diag.SEM0049, diag.SEM0050, diag.SEM0051,
+		diag.SEM0052, diag.SEM0053, diag.SEM0054,
+	}
+	for _, code := range codes {
+		if code == "" {
+			t.Fatalf("hardware diagnostic code must not be empty")
+		}
+	}
+}

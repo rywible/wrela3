@@ -60,6 +60,12 @@ const (
 	SEM0046  = "SEM0046" // topic depth or cache-line layout is invalid
 	SEM0047  = "SEM0047" // executor memory must be owned by executor slot
 	SEM0048  = "SEM0048" // path identity required for publishing path
+	SEM0049  = "SEM0049" // hardware capability construction is not allowed here
+	SEM0050  = "SEM0050" // duplicate hardware claim
+	SEM0051  = "SEM0051" // discovered hardware authority cannot cross this phase boundary
+	SEM0052  = "SEM0052" // required hardware discovery call lacks boot-fatal path
+	SEM0053  = "SEM0053" // unsupported discovered hardware shape
+	SEM0054  = "SEM0054" // PCI claims must be made from discovered PciDevice values
 	ASM0001  = "ASM0001"
 	ASM0002  = "ASM0002"
 	ASM0003  = "ASM0003"
