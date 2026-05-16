@@ -4,7 +4,9 @@ import (
 	_ "embed"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
@@ -85,4 +87,96 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 		}
 	}
 	return out
+}
+
+func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
+	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
+	emitCallReloc(e, executorStartSymbol(ctx.VcpuPlans[op.SlotLabel].ExecutorType))
+	emitHltLoop(e)
+}
+
+func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame) {
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4500)
+	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
+	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
+	emitWaitForVcpuReady(e, op.VcpuID)
+	emitStoreVcpuStartStatus(e, op, frame)
+}
+
+func executorStartSymbol(typ ir.Type) string {
+	return codegenSymbolName("method", typ.Module, typ.Name, "run")
+}
+
+func emitHltLoop(e *Emitter) {
+	loop := e.newLabel("hlt_loop")
+	e.bindLabel(loop)
+	emitHltWait(e)
+	e.emitJmp(loop)
+}
+
+func emitDelayLoop(e *Emitter, count int64) {
+	loop := e.newLabel("vcpu_delay")
+	emitMovImmToReg(e, asm.MustLookup("rcx"), count)
+	e.bindLabel(loop)
+	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rcx")},
+		asm.ImmOperand{Value: 1},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rcx")},
+		asm.ImmOperand{Value: 0},
+	}})
+	e.emitJcc(0x85, loop)
+}
+
+func emitWaitForVcpuReady(e *Emitter, vcpuID int) {
+	loop := e.newLabel("vcpu_ready")
+	done := e.newLabel("vcpu_ready_done")
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), fmt.Sprintf("_wrela_vcpu%d_ready", vcpuID))
+	e.bindLabel(loop)
+	emitLoadMemToReg(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("r10")},
+		asm.ImmOperand{Value: 1},
+	}})
+	e.emitJcc(0x84, done)
+	emitHltWait(e)
+	e.emitJmp(loop)
+	e.bindLabel(done)
+}
+
+func emitStoreVcpuStartStatus(e *Emitter, op *ir.VcpuStart, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing vcpu start status slot"})
+		return
+	}
+	emitMovImmToReg(e, asm.MustLookup("rax"), 1)
+	emitStoreSlotFromReg(e, asm.MustLookup("rax"), slot, 8)
+	emitMovImmToReg(e, asm.MustLookup("rax"), int64(op.VcpuID))
+	emitStoreSlotFromReg(e, asm.MustLookup("rax"), slot+8, 64)
+}
+
+func codegenSymbolName(parts ...string) string {
+	var b strings.Builder
+	b.WriteString("_wrela")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		b.WriteByte('_')
+		for _, r := range part {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte('_')
+			}
+		}
+	}
+	return b.String()
 }

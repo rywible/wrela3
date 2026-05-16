@@ -33,6 +33,7 @@ type compileContext struct {
 	types        map[string]ir.TypeInfo
 	topicLayouts map[string]topicDataLayout
 	SlotVcpu     map[string]int
+	VcpuPlans    map[string]ir.VcpuStartPlan
 }
 
 type internalReloc struct {
@@ -83,7 +84,12 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
-	ctx := compileContext{types: program.Types, topicLayouts: topicLayouts, SlotVcpu: slotVcpuMap(program)}
+	ctx := compileContext{
+		types:        program.Types,
+		topicLayouts: topicLayouts,
+		SlotVcpu:     slotVcpuMap(program),
+		VcpuPlans:    vcpuPlanMap(program),
+	}
 	if ctx.types == nil {
 		ctx.types = map[string]ir.TypeInfo{}
 	}
@@ -138,7 +144,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
-	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || program.Entry.Symbol != "" {
+	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || len(program.VcpuStarts) > 0 || program.Entry.Symbol != "" {
 		section, offsets, ds := buildData(program)
 		if len(ds) != 0 {
 			return nil, ds
@@ -217,6 +223,16 @@ func slotVcpuMap(program *ir.Program) map[string]int {
 	for _, start := range program.VcpuStarts {
 		if start.SlotLabel != "" {
 			out[start.SlotLabel] = start.VcpuID
+		}
+	}
+	return out
+}
+
+func vcpuPlanMap(program *ir.Program) map[string]ir.VcpuStartPlan {
+	out := map[string]ir.VcpuStartPlan{}
+	for _, start := range program.VcpuStarts {
+		if start.SlotLabel != "" {
+			out[start.SlotLabel] = start
 		}
 	}
 	return out
@@ -463,6 +479,11 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitTopicArmWait(e, frame, v)
 			case *ir.TopicWait:
 				emitHltWait(e)
+			case *ir.VcpuStart:
+				emitVcpuStart(e, v, frame)
+			case *ir.VcpuEnter:
+				emitVcpuEnter(e, v, frame, ctx)
+				hasReturn = true
 			}
 		}
 	}
@@ -677,6 +698,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 		return ctx.representationSize(v.Type.Name)
 	case *ir.TopicTryNext:
 		return ctx.representationSize(v.Type.Name)
+	case *ir.VcpuStart:
+		return ctx.storageSizeForType(v.Type)
 	default:
 		return 8
 	}
@@ -701,6 +724,8 @@ func (ctx compileContext) objectSize(name string) int {
 	case "U32", "I32":
 		return 4
 	case "StringLiteral", "Bytes", "MutableBytes", "DelegatedBytes", "DelegatedMutableBytes":
+		return 16
+	case "VcpuStartStatus":
 		return 16
 	default:
 		s, _, err := layout.SizeAlign(name)
@@ -1250,6 +1275,10 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitTopicArmWait(e, frame, v)
 		case *ir.TopicWait:
 			emitHltWait(e)
+		case *ir.VcpuStart:
+			emitVcpuStart(e, v, frame)
+		case *ir.VcpuEnter:
+			emitVcpuEnter(e, v, frame, e.ctx)
 		}
 	}
 }
@@ -2182,6 +2211,8 @@ func valueType(value ir.Value) ir.Type {
 	case *ir.ReliableTopicTryPublish:
 		return v.Type
 	case *ir.TopicTryNext:
+		return v.Type
+	case *ir.VcpuStart:
 		return v.Type
 	default:
 		return ir.Type{}
