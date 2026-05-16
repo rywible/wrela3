@@ -116,6 +116,23 @@ class DelegatedMemory {
         return self.last_memory_map
     }
 
+    asm fn install_ap_trampoline(self, trampoline_base: PhysicalAddress, source: PhysicalAddress, length: U64) {
+        mov rdi, trampoline_base
+        mov rsi, source
+        mov rcx, length
+    copy:
+        cmp rcx, 0
+        je done
+        mov al, [rsi]
+        mov [rdi], al
+        add rsi, 1
+        add rdi, 1
+        sub rcx, 1
+        jmp copy
+    done:
+        ret
+    }
+
     asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
         push rbx
         push r12

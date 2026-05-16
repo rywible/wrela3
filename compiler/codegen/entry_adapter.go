@@ -184,6 +184,14 @@ func emitStoreSlotValue(e *Emitter, dstSlot, srcSlot int) {
 	emitStoreSlotFromReg(e, asm.MustLookup("rax"), dstSlot, 64)
 }
 
+func emitInstallAPTrampoline(e *Emitter) {
+	emitMovImmToReg(e, asm.MustLookup("rdi"), apTrampolineBase)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), "_wrela_ap_trampoline_blob")
+	emitRegRegMove(e, asm.MustLookup("rsi"), asm.MustLookup("rax"))
+	emitMovImmToReg(e, asm.MustLookup("rcx"), int64(len(apTrampolineBlob())))
+	emitCallReloc(e, "_wrela_method_platform_uefi_types_DelegatedMemory_install_ap_trampoline")
+}
+
 func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter, ctx compileContext) {
 	adapterLayout, ok := buildEntryAdapterLayout(ctx)
 	if !ok {
@@ -257,6 +265,8 @@ func emitEntryAdapter(e *Emitter, entry ir.EntryAdapter, ctx compileContext) {
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareImageOffset, adapterLayout.UefiHandleOffset)
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareBootOffset, adapterLayout.UefiBootServicesCallsOffset)
 	emitStoreSlotAddress(e, adapterLayout.DelegatedHardwareMemoryOffset, adapterLayout.DelegatedMemoryOffset)
+
+	emitInstallAPTrampoline(e)
 
 	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), adapterLayout.DelegatedHardwareOffset)
 	emitSymbolCall(e, entry.DelegatedPhaseSymbol)

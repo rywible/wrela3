@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ir"
@@ -17,6 +18,7 @@ func TestVcpuStartupDataSymbolsAreDeterministic(t *testing.T) {
 	objects := vcpuStartupData(program)
 
 	wantSymbols := []string{
+		"_wrela_ap_trampoline_blob",
 		"_wrela_vcpu0_ready",
 		"_wrela_vcpu0_entry",
 		"_wrela_vcpu0_stack_top",
@@ -33,8 +35,31 @@ func TestVcpuStartupDataSymbolsAreDeterministic(t *testing.T) {
 		if obj.Symbol != wantSymbols[i] {
 			t.Fatalf("object %d symbol = %q, want %q", i, obj.Symbol, wantSymbols[i])
 		}
+		if obj.Symbol == "_wrela_ap_trampoline_blob" {
+			if obj.Align != 4096 {
+				t.Fatalf("object %s Align = %d, want 4096", obj.Symbol, obj.Align)
+			}
+			continue
+		}
 		if obj.Align != 64 {
 			t.Fatalf("object %s Align = %d, want 64", obj.Symbol, obj.Align)
+		}
+	}
+}
+
+func TestAPTrampolineBlobContract(t *testing.T) {
+	blob := apTrampolineBlob()
+	if len(blob) > 4096 {
+		t.Fatalf("AP trampoline must fit in one 4KiB SIPI page, got %d bytes", len(blob))
+	}
+	for _, want := range [][]byte{
+		{0xFA},       // cli
+		{0x0F, 0x22}, // mov to control register shape
+		{0x0F, 0x30}, // wrmsr
+		{0xF4},       // hlt fallback
+	} {
+		if !bytes.Contains(blob, want) {
+			t.Fatalf("trampoline missing byte shape %x in %x", want, blob)
 		}
 	}
 }

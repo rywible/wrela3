@@ -103,6 +103,13 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}
 		units = append(units, unit)
 	}
+	if !hasAPTrampolineInstallMethod(program) {
+		unit, ds := compileAPTrampolineInstallUnit()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		units = append(units, unit)
+	}
 	units = append(units, compileInterruptDispatchUnits(program)...)
 	if program.Entry.Symbol != "" {
 		unit, ds := compileEntryAdapterUnit(program.Entry, ctx)
@@ -131,7 +138,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
-	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 {
+	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || program.Entry.Symbol != "" {
 		section, offsets, ds := buildData(program)
 		if len(ds) != 0 {
 			return nil, ds
@@ -507,7 +514,7 @@ func compileEntryAdapterUnit(entry ir.EntryAdapter, ctx compileContext) (compile
 	if len(e.Diags) != 0 {
 		return compiledUnit{}, e.Diags
 	}
-	return compiledUnit{Symbol: entry.Symbol, Bytes: e.Code, CallReloc: e.CallReloc}, nil
+	return compiledUnit{Symbol: entry.Symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}, nil
 }
 
 func buildFrame(fn ir.Function, ctx compileContext) Frame {
