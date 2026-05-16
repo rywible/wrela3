@@ -29,6 +29,31 @@ func TestGapTopicPublishStoresSequenceAndValue(t *testing.T) {
 	}
 }
 
+func TestReliableTopicPublishChecksSlowestSubscriber(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Topics[0].Kind = "reliable_u64"
+	program.Topics[0].Subscribers = []string{"worker", "logger"}
+	program.Functions[0].Blocks[0].Ops = []ir.Operation{
+		program.Functions[0].Blocks[0].Ops[0],
+		&ir.ReliableTopicTryPublish{
+			TopicLabel: "counter",
+			Value:      program.Functions[0].Blocks[0].Ops[0].(ir.Value),
+			Type:       ir.Type{Name: "U64PublishResult"},
+		},
+		&ir.Return{},
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "publish_counter")
+	if !bytes.Contains(code, []byte{0x48, 0x3B}) && !bytes.Contains(code, []byte{0x4C, 0x3B}) {
+		t.Fatalf("publish_counter missing 64-bit subscriber cursor compare shape: %#x", code)
+	}
+}
+
 func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 	layout := planTopicData(ir.TopicLayout{
 		Label:       "telemetry",
@@ -150,6 +175,14 @@ func topicProgramForCodegenTest() *ir.Program {
 					"message":     {Name: "message", Type: ir.Type{Name: "U64TopicMessage", Kind: ir.TypeKindData}, Offset: 16, Size: 16, Align: 8, StorageOffset: 16, StorageSize: 16},
 				},
 				FieldOrder: []string{"has_message", "gap", "missed", "message"},
+			},
+			"U64PublishResult": {
+				Name: "U64PublishResult", Kind: ir.TypeKindData, Size: 2, Align: 1, StorageSize: 2,
+				Fields: map[string]ir.FieldInfo{
+					"published": {Name: "published", Type: ir.Type{Name: "Bool"}, Offset: 0, Size: 1, Align: 1, StorageOffset: 0, StorageSize: 1},
+					"full":      {Name: "full", Type: ir.Type{Name: "Bool"}, Offset: 1, Size: 1, Align: 1, StorageOffset: 1, StorageSize: 1},
+				},
+				FieldOrder: []string{"published", "full"},
 			},
 		},
 		Functions: []ir.Function{{

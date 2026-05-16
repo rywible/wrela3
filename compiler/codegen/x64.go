@@ -435,6 +435,10 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitInterruptContextStore(e, frame, v)
 			case *ir.TopicPublish:
 				emitTopicPublish(e, frame, v)
+			case *ir.ReliableTopicTryPublish:
+				emitReliableTopicTryPublish(e, frame, v)
+			case *ir.ReliableTopicWaitForAdvance:
+				emitReliableTopicWaitForAdvance(e, v)
 			case *ir.TopicTryNext:
 				emitTopicTryNext(e, frame, v)
 			case *ir.TopicArmWait:
@@ -648,6 +652,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.ArenaReserve:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaPlace:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.ReliableTopicTryPublish:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.TopicTryNext:
 		return ctx.representationSize(v.Type.Name)
@@ -1171,6 +1177,10 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitInterruptContextStore(e, frame, v)
 		case *ir.TopicPublish:
 			emitTopicPublish(e, frame, v)
+		case *ir.ReliableTopicTryPublish:
+			emitReliableTopicTryPublish(e, frame, v)
+		case *ir.ReliableTopicWaitForAdvance:
+			emitReliableTopicWaitForAdvance(e, v)
 		case *ir.TopicTryNext:
 			emitTopicTryNext(e, frame, v)
 		case *ir.TopicArmWait:
@@ -1581,6 +1591,103 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	}
 }
 
+func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTopicTryPublish) {
+	layout, ok := e.ctx.topicLayouts[publish.TopicLabel]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
+		return
+	}
+	if layout.Kind != "reliable_u64" {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + layout.Kind})
+		return
+	}
+	outSlot, ok := frame.Slots[publish]
+	if !ok {
+		return
+	}
+
+	base := asm.MustLookup("rax")
+	producer := asm.MustLookup("r10")
+	minCursor := asm.MustLookup("r11")
+	candidate := asm.MustLookup("rcx")
+	slot := asm.MustLookup("rdx")
+	value := asm.MustLookup("rdi")
+	full := e.newLabel("reliable_topic_publish_full")
+	done := e.newLabel("reliable_topic_publish_done")
+
+	emitZeroSlotRange(e, outSlot, e.ctx.representationSize(publish.Type.Name))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
+	emitLoadMemToReg(e, producer, base, int64(layout.HeadOffset), 64)
+	emitReliableTopicMinCursor(e, layout, base, minCursor, candidate)
+	emitRegRegMove(e, candidate, producer)
+	emitRegRegOp(e, 0x29, candidate, minCursor)
+	emitMovImmToReg(e, value, int64(layout.Depth))
+	emitCmpRegReg(e, candidate, value)
+	e.emitJcc(0x83, full)
+
+	emitAddImm(e, producer, 1)
+	emitRegRegMove(e, slot, producer)
+	emitMovImmToReg(e, value, int64(layout.Depth-1))
+	emitRegRegOp(e, 0x21, slot, value)
+	emitShiftImm(e, 0x04, slot, 6)
+	emitAddImm(e, slot, int64(layout.SlotsOffset))
+	emitRegRegOp(e, 0x01, slot, base)
+	emitStoreMemFromReg(e, slot, 0, producer, 64)
+	emitLoadValue(e, frame, publish.Value, value)
+	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitMfence(e)
+	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), producer, 64)
+	for _, subscriber := range layout.Subscribers {
+		emitStoreMemFromReg(e, base, int64(subscriber.WaitlineOffset), producer, 64)
+	}
+	emitStoreSlotBool(e, outSlot, 1)
+	e.emitJmp(done)
+
+	e.bindLabel(full)
+	emitStoreSlotBool(e, outSlot+1, 1)
+	e.bindLabel(done)
+}
+
+func emitReliableTopicWaitForAdvance(e *Emitter, wait *ir.ReliableTopicWaitForAdvance) {
+	layout, ok := e.ctx.topicLayouts[wait.TopicLabel]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + wait.TopicLabel})
+		return
+	}
+	base := asm.MustLookup("rax")
+	producer := asm.MustLookup("r10")
+	minCursor := asm.MustLookup("r11")
+	candidate := asm.MustLookup("rcx")
+	notFull := e.newLabel("reliable_topic_wait_not_full")
+
+	emitMovDataAddressToReg(e, base, topicDataSymbol(wait.TopicLabel))
+	emitLoadMemToReg(e, producer, base, int64(layout.HeadOffset), 64)
+	emitReliableTopicMinCursor(e, layout, base, minCursor, candidate)
+	emitRegRegMove(e, candidate, producer)
+	emitRegRegOp(e, 0x29, candidate, minCursor)
+	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth))
+	emitCmpRegReg(e, candidate, asm.MustLookup("rdi"))
+	e.emitJcc(0x82, notFull)
+	e.emit(0xF4)
+	e.bindLabel(notFull)
+}
+
+func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg, dst asm.Reg, tmp asm.Reg) {
+	if len(layout.Subscribers) == 0 {
+		emitLoadMemToReg(e, dst, base, int64(layout.HeadOffset), 64)
+		return
+	}
+	emitLoadMemToReg(e, dst, base, int64(layout.Subscribers[0].CursorOffset), 64)
+	for _, subscriber := range layout.Subscribers[1:] {
+		skip := e.newLabel("reliable_topic_min_cursor_skip")
+		emitCmpRegMem(e, dst, base, int64(subscriber.CursorOffset), 64)
+		e.emitJcc(0x86, skip)
+		emitLoadMemToReg(e, tmp, base, int64(subscriber.CursorOffset), 64)
+		emitRegRegMove(e, dst, tmp)
+		e.bindLabel(skip)
+	}
+}
+
 func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	layout, ok := e.ctx.topicLayouts[next.TopicLabel]
 	if !ok {
@@ -1935,6 +2042,13 @@ func emitLoadMemToReg(e *Emitter, reg asm.Reg, base asm.Reg, disp int64, width i
 	}})
 }
 
+func emitCmpRegMem(e *Emitter, reg asm.Reg, base asm.Reg, disp int64, width int) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: registerForWidth(reg, width)},
+		asm.MemOperand{Base: base, Disp: disp, Width: width},
+	}})
+}
+
 func emitStoreMemFromReg(e *Emitter, base asm.Reg, disp int64, reg asm.Reg, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: base, Disp: disp, Width: width},
@@ -1982,6 +2096,8 @@ func valueType(value ir.Value) ir.Type {
 	case *ir.ArenaReserve:
 		return v.Type
 	case *ir.ArenaPlace:
+		return v.Type
+	case *ir.ReliableTopicTryPublish:
 		return v.Type
 	case *ir.TopicTryNext:
 		return v.Type
