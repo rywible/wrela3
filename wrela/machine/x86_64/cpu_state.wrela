@@ -118,10 +118,20 @@ class EnabledCpuSet {
 data CpuTopology {
     bootstrap: EnabledCpu
     secondary: EnabledCpu
+
+    fn vcpu0(self, local_apic_base: PhysicalAddress) -> Vcpu {
+        return Vcpu(id = 0, apic_id = self.bootstrap.apic_id, local_apic_base = local_apic_base)
+    }
+
+    fn vcpu1(self, local_apic_base: PhysicalAddress) -> Vcpu {
+        return Vcpu(id = 1, apic_id = self.secondary.apic_id, local_apic_base = local_apic_base)
+    }
 }
 
 class Vcpu {
     id: U64
+    apic_id: U32
+    local_apic_base: PhysicalAddress
 }
 
 unique class OwnedHardware {

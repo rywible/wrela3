@@ -302,6 +302,54 @@ class Boot {
 	}
 }
 
+func TestLowerVcpuStartUsesReceiverAPICIDAndLocalApicBase(t *testing.T) {
+	checked := checkedProgramFromSourcesForTest(t, `
+module machine.x86_64.cpu_state
+
+class Vcpu {
+    id: U64
+    apic_id: U32
+    local_apic_base: PhysicalAddress
+}
+
+data VcpuStartStatus {
+    started: Bool
+    id: U64
+}
+
+executor Worker {
+    start fn run(self) -> never {
+        while true {}
+    }
+}
+
+class Boot {
+    worker: Worker
+
+    fn run(self) {
+        let vcpu = Vcpu(id = 1, apic_id = 7, local_apic_base = 0xfee01000)
+        let status = vcpu.start(executor = self.worker)
+    }
+}
+`)
+
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower() diagnostics = %#v", diags)
+	}
+	fn := findFunction(program, symbolName("method", "machine.x86_64.cpu_state", "Boot", "run"))
+	if fn == nil {
+		t.Fatal("missing Boot.run")
+	}
+	start, ok := functionOp[VcpuStart](*fn)
+	if !ok {
+		t.Fatalf("Boot.run missing VcpuStart: %#v", fn.Blocks)
+	}
+	if start.VcpuID != 1 || start.APICID != 7 || start.LocalApicBase != 0xfee01000 {
+		t.Fatalf("VcpuStart = %#v, want VcpuID 1 APICID 7 LocalApicBase 0xfee01000", start)
+	}
+}
+
 func TestLowerUsesSourceAsmForDelegatedHardwareExitToOwnedHardware(t *testing.T) {
 	transitionSymbol := symbolName("method", "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware")
 	sourceBody := "source_transfer_marker:\nret"

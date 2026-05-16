@@ -1166,6 +1166,54 @@ func (ctx *lowerContext) slotLabelForExecutorValue(value Value) string {
 	return ""
 }
 
+func (ctx *lowerContext) vcpuFieldsForValue(value Value) (int, uint32, uint64) {
+	id := uint64(0)
+	apicID := uint64(0)
+	localApicBase := uint64(0)
+	if v, ok := constUintFieldValue(value, "id"); ok {
+		id = v
+	} else if load, ok := value.(*FieldLoad); ok {
+		switch load.Field {
+		case "vcpu0":
+			id = 0
+		case "vcpu1":
+			id = 1
+		}
+	}
+	if v, ok := constUintFieldValue(value, "apic_id"); ok {
+		apicID = v
+	}
+	if v, ok := constUintFieldValue(value, "local_apic_base"); ok {
+		localApicBase = v
+	}
+	return int(id), uint32(apicID), localApicBase
+}
+
+func constUintFieldValue(value Value, fieldName string) (uint64, bool) {
+	construct, ok := value.(*Construct)
+	if !ok {
+		return 0, false
+	}
+	for _, field := range construct.Fields {
+		if field.Name != fieldName {
+			continue
+		}
+		return constUintValue(field.Value)
+	}
+	return 0, false
+}
+
+func constUintValue(value Value) (uint64, bool) {
+	switch v := value.(type) {
+	case *ConstInt:
+		return v.Value, true
+	case ConstInt:
+		return v.Value, true
+	default:
+		return 0, false
+	}
+}
+
 func (ctx *lowerContext) vcpuIDForValue(value Value) int {
 	if load, ok := value.(*FieldLoad); ok {
 		switch load.Field {
@@ -1401,17 +1449,17 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		}
 		if sem.IsVcpuType(recvType) && (e.Method == "start" || e.Method == "enter") {
 			executor, executorOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "executor"))
-			vcpuID := ctx.vcpuIDForValue(receiver)
+			vcpuID, apicID, localApicBase := ctx.vcpuFieldsForValue(receiver)
 			slotLabel := ctx.slotLabelForExecutorValue(executor)
 			ops := append([]Operation{}, receiverOps...)
 			ops = append(ops, executorOps...)
 			if e.Method == "start" {
 				ret := ctx.resolveType("machine.x86_64.cpu_state", "VcpuStartStatus")
-				start := VcpuStart{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
+				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
 				ops = append(ops, start)
 				return start, ops, ret
 			}
-			enter := VcpuEnter{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel}
+			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
 			return receiver, ops, ctx.resolveType(moduleName, "never")
 		}

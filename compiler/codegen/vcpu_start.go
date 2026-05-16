@@ -105,7 +105,7 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 }
 
 func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
-	emitLapicWrite(e, lapicSVR, 0x1ff)
+	emitLapicWrite(e, op.LocalApicBase, lapicSVR, 0x1ff)
 	e.emit(0xFB)
 	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
 	emitCallReloc(e, executorStartSymbolForPlan(ctx.VcpuPlans[op.SlotLabel], valueType(op.Executor)))
@@ -114,14 +114,14 @@ func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext
 
 func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
 	emitPrepareVcpuStartup(e, op, frame, ctx)
-	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x00004500)
+	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
+	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004500)
 	emitDelayLoop(e, 70000)
-	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
+	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
+	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
 	emitDelayLoop(e, 70000)
-	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
-	emitLapicWrite(e, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
+	emitLapicWrite(e, op.LocalApicBase, lapicICRHigh, op.APICID<<24)
+	emitLapicWrite(e, op.LocalApicBase, lapicICRLow, 0x00004600|uint32(apTrampolineBase>>12))
 	emitWaitForVcpuReady(e, op.VcpuID)
 	emitStoreVcpuStartStatus(e, op, frame)
 }

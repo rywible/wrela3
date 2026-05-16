@@ -88,8 +88,8 @@ unique class DelegatedHardware {
             memory = memory_plan.owned_memory,
             io_ports = memory_plan.io_ports,
             executors = ExecutorRegistry(next_id = 0),
-            vcpu0 = Vcpu(id = 0),
-            vcpu1 = Vcpu(id = 1)
+            vcpu0 = Vcpu(id = 0, apic_id = 0, local_apic_base = 0),
+            vcpu1 = Vcpu(id = 1, apic_id = 1, local_apic_base = 0)
         )
     }
 

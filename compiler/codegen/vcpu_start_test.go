@@ -147,12 +147,25 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 	worker := &ir.Local{Symbol: "worker", Type: execType}
 	statusType := ir.Type{Name: "VcpuStartStatus", Module: "machine.x86_64.cpu_state", Kind: ir.TypeKindData}
 	program := &ir.Program{
-		VcpuStarts: []ir.VcpuStartPlan{{VcpuID: 1, SlotLabel: "worker", Terminal: false}},
+		VcpuStarts: []ir.VcpuStartPlan{{
+			VcpuID:        1,
+			APICID:        7,
+			LocalApicBase: 0xfee01000,
+			SlotLabel:     "worker",
+			Terminal:      false,
+		}},
 		Functions: []ir.Function{{
 			Symbol: "start_worker",
 			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
 				worker,
-				&ir.VcpuStart{VcpuID: 1, SlotLabel: "worker", Type: statusType, Executor: worker},
+				&ir.VcpuStart{
+					VcpuID:        1,
+					APICID:        7,
+					LocalApicBase: 0xfee01000,
+					SlotLabel:     "worker",
+					Type:          statusType,
+					Executor:      worker,
+				},
 			}}},
 		}, {
 			Symbol: "_wrela_method_test_Worker_run",
@@ -166,6 +179,15 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 		t.Fatalf("Compile diagnostics: %#v", ds)
 	}
 	code := symbolBytes(t, image, "start_worker")
+	if !bytes.Contains(code, u32le(7<<24)) {
+		t.Fatalf("start_worker must target APIC ID 7 in ICR high dword: %x", code)
+	}
+	if !bytes.Contains(code, u32le(0xfee01000)) {
+		t.Fatalf("start_worker must use discovered LAPIC base 0xfee01000: %x", code)
+	}
+	if bytes.Contains(code, u32le(0xFEE00000)) {
+		t.Fatalf("start_worker must not embed the default LAPIC base: %x", code)
+	}
 	for _, want := range [][]byte{
 		u32le(0x00004500),
 		u32le(0x00004608),

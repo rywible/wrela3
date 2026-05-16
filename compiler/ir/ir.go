@@ -421,19 +421,23 @@ type TopicWait struct {
 func (TopicWait) isOperation() {}
 
 type VcpuStart struct {
-	VcpuID    int
-	Executor  Value
-	SlotLabel string
-	Type      Type
+	VcpuID        int
+	APICID        uint32
+	LocalApicBase uint64
+	Executor      Value
+	SlotLabel     string
+	Type          Type
 }
 
 func (VcpuStart) isValue()     {}
 func (VcpuStart) isOperation() {}
 
 type VcpuEnter struct {
-	VcpuID    int
-	Executor  Value
-	SlotLabel string
+	VcpuID        int
+	APICID        uint32
+	LocalApicBase uint64
+	Executor      Value
+	SlotLabel     string
 }
 
 func (VcpuEnter) isOperation() {}
@@ -518,11 +522,13 @@ type TopicLayout struct {
 }
 
 type VcpuStartPlan struct {
-	VcpuID       int
-	SlotLabel    string
-	ExecutorType Type
-	EntrySymbol  string
-	Terminal     bool
+	VcpuID        int
+	APICID        uint32
+	LocalApicBase uint64
+	SlotLabel     string
+	ExecutorType  Type
+	EntrySymbol   string
+	Terminal      bool
 }
 
 type AsmMethod struct {
