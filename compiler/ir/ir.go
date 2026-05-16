@@ -102,6 +102,18 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *ArenaPlace:
 		return []Value{v}
+	case ReliableTopicTryPublish:
+		return []Value{v}
+	case *ReliableTopicTryPublish:
+		return []Value{v}
+	case TopicTryNext:
+		return []Value{v}
+	case *TopicTryNext:
+		return []Value{v}
+	case VcpuStart:
+		return []Value{v}
+	case *VcpuStart:
+		return []Value{v}
 	case *Copy:
 		return valuesFromValue(v.Target)
 	case *ForBytes:
@@ -330,6 +342,70 @@ type FieldStore struct {
 
 func (FieldStore) isOperation() {}
 
+type TopicPublish struct {
+	TopicLabel string
+	Kind       string
+	Value      Value
+}
+
+func (TopicPublish) isOperation() {}
+
+type ReliableTopicTryPublish struct {
+	TopicLabel string
+	Value      Value
+	Type       Type
+}
+
+func (ReliableTopicTryPublish) isValue()     {}
+func (ReliableTopicTryPublish) isOperation() {}
+
+type ReliableTopicWaitForAdvance struct {
+	TopicLabel string
+}
+
+func (ReliableTopicWaitForAdvance) isOperation() {}
+
+type TopicTryNext struct {
+	TopicLabel   string
+	Subscription Value
+	Type         Type
+}
+
+func (TopicTryNext) isValue()     {}
+func (TopicTryNext) isOperation() {}
+
+type TopicArmWait struct {
+	TopicLabel   string
+	Subscription Value
+}
+
+func (TopicArmWait) isOperation() {}
+
+type TopicWait struct {
+	SlotLabel string
+	Policy    string
+}
+
+func (TopicWait) isOperation() {}
+
+type VcpuStart struct {
+	VcpuID    int
+	Executor  Value
+	SlotLabel string
+	Type      Type
+}
+
+func (VcpuStart) isValue()     {}
+func (VcpuStart) isOperation() {}
+
+type VcpuEnter struct {
+	VcpuID    int
+	Executor  Value
+	SlotLabel string
+}
+
+func (VcpuEnter) isOperation() {}
+
 type DataObject struct {
 	Symbol string
 	Bytes  []byte
@@ -394,6 +470,20 @@ type InterruptBinding struct {
 	Vector                uint8
 }
 
+type TopicLayout struct {
+	Label       string
+	Kind        string
+	Depth       uint64
+	Subscribers []string
+}
+
+type VcpuStartPlan struct {
+	VcpuID       int
+	SlotLabel    string
+	ExecutorType Type
+	Terminal     bool
+}
+
 type AsmMethod struct {
 	Symbol       string
 	ReceiverType string
@@ -418,4 +508,6 @@ type Program struct {
 	OnHandlers        []OnHandler
 	InterruptBindings []InterruptBinding
 	InterruptContexts []InterruptContext
+	Topics            []TopicLayout
+	VcpuStarts        []VcpuStartPlan
 }
