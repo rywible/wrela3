@@ -38,6 +38,48 @@ func TestBuildHello(t *testing.T) {
 	}
 }
 
+func TestBuildMultiVcpuTopicsExample(t *testing.T) {
+	source := readRepoFile(t, "examples/multi_vcpu_topics/main.wrela")
+	for _, want := range []string{
+		"hardware.vcpu1.start(executor = consumer)",
+		"hardware.vcpu0.enter(executor = producer)",
+		"panic: vcpu1 start failed\\n",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("multi-vCPU example missing %q", want)
+		}
+	}
+
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "multi-vcpu-topics.efi")
+	result, err := Build(BuildOptions{
+		Mode:       ModeDev,
+		RootPath:   "examples/multi_vcpu_topics/main.wrela",
+		OutputPath: out,
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("Build multi-vCPU topics example: %v", err)
+	}
+	if result.OutputPath != out {
+		t.Fatalf("OutputPath = %q, want %q", result.OutputPath, out)
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat output: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("output image is empty")
+	}
+	if result.Image == nil {
+		t.Fatal("BuildResult.Image is nil")
+	}
+	program := compileProgramAt(t, "examples/multi_vcpu_topics/main.wrela")
+	if got := len(program.VcpuStarts); got != 2 {
+		t.Fatalf("VcpuStarts = %d, want 2: %#v", got, program.VcpuStarts)
+	}
+}
+
 func TestBuildReturnsResolvedRelativeOutputPath(t *testing.T) {
 	repoRoot := resolveRepoRoot(".")
 	tmp := t.TempDir()
@@ -458,9 +500,14 @@ func operationInList[T ir.Operation](ops []ir.Operation) (T, bool) {
 
 func compileHelloProgram(t *testing.T) *ir.Program {
 	t.Helper()
+	return compileProgramAt(t, "examples/hello/main.wrela")
+}
+
+func compileProgramAt(t *testing.T, rootPath string) *ir.Program {
+	t.Helper()
 	repoRoot := resolveRepoRoot(".")
 	graph, err := source.LoadGraph(source.Options{
-		RootPath: filepath.Join(repoRoot, "examples/hello/main.wrela"),
+		RootPath: filepath.Join(repoRoot, rootPath),
 		ImportRoots: []string{
 			repoRoot,
 			filepath.Join(repoRoot, "wrela"),

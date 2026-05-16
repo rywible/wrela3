@@ -244,7 +244,7 @@ func TestMultiVcpuTopicsQEMU(t *testing.T) {
 	image := filepath.Join(tmp, "multi-vcpu-topics.efi")
 	_, err = compiler.Build(compiler.BuildOptions{
 		Mode:       compiler.ModeDev,
-		RootPath:   "tests/e2e/fixtures/multi_vcpu_topics/main.wrela",
+		RootPath:   "examples/multi_vcpu_topics/main.wrela",
 		OutputPath: image,
 		RepoRoot:   ".",
 	})

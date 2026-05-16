@@ -1,4 +1,4 @@
-module tests.e2e.fixtures.multi_vcpu_topics.main
+module examples.multi_vcpu_topics.main
 
 use { DelegatedHardware } from platform.uefi.transition
 use { CpuPlan, DriverMemory, ExecutorSlot, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
