@@ -45,6 +45,9 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.mcfg", "McfgTable"), "ecam_windows")
 	_ = moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
+	pci := moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet")
+	assertMethodExists(t, pci, "require_device")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")
 
 	interrupts := moduleType(t, index, "machine.x86_64.interrupts", "InterruptAuthority")
 	assertMethodExists(t, interrupts, "route_isa_irq")

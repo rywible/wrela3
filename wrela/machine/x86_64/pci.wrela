@@ -1,5 +1,6 @@
 module machine.x86_64.pci
 
+use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 
 class PciConfigPorts {
@@ -133,12 +134,52 @@ class PcieEcamWindow {
     start_bus: U8
     end_bus: U8
     panic: BootPanic
+
+    fn config_address(self, bus: U8, device: U8, function: U8, offset: U16) -> PhysicalAddress {
+        // This milestone uses standard PCI capability space only; extended
+        // capability offsets above 0x0FFF are out of scope and intentionally
+        // masked to one ECAM function page.
+        return self.base + ((bus - self.start_bus) << 20) + (device << 15) + (function << 12) + (offset & 0x0FFC)
+    }
+
+    fn mmio(self, bus: U8, device: U8, function: U8) -> MmioRegion {
+        return MmioRegion(address = self.config_address(bus = bus, device = device, function = function, offset = 0), length = 4096, panic = self.panic)
+    }
+
+    fn read_config32(self, bus: U8, device: U8, function: U8, offset: U16) -> U32 {
+        return self.mmio(bus = bus, device = device, function = function).read32(offset = offset)
+    }
+
+    fn write_config32(self, bus: U8, device: U8, function: U8, offset: U16, value: U32) {
+        self.mmio(bus = bus, device = device, function = function).write32(offset = offset, value = value)
+    }
 }
 
 class PcieEcamWindows {
     count: U64
     window0: PcieEcamWindow
     panic: BootPanic
+
+    fn enumerate(self) -> PciDeviceSet {
+        let devices = PciDeviceSetBuilder(panic = self.panic).empty()
+        let bus = self.window0.start_bus
+        while bus <= self.window0.end_bus {
+            let device = 0
+            while device < 32 {
+                let function = 0
+                while function < 8 {
+                    let vendor_device = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0)
+                    if (vendor_device & 0xFFFF) != 0xFFFF {
+                        devices.append(window = self.window0, bus = bus, device = device, function = function)
+                    }
+                    function = function + 1
+                }
+                device = device + 1
+            }
+            bus = bus + 1
+        }
+        return devices
+    }
 
     fn append(self, window: PcieEcamWindow) {
         if self.count == 0 {
@@ -152,15 +193,109 @@ class PciDevice {
     window: PcieEcamWindow
     identity: PciDeviceIdentity
     panic: BootPanic
+
+    fn read_config32(self, offset: U16) -> U32 {
+        return self.window.read_config32(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset)
+    }
+
+    fn write_config32(self, offset: U16, value: U32) {
+        self.window.write_config32(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset, value = value)
+    }
 }
 
 class PciDeviceSet {
     count: U64
     device0: PciDevice
+    device1: PciDevice
+    device2: PciDevice
+    device3: PciDevice
+    device4: PciDevice
+    device5: PciDevice
+    device6: PciDevice
+    device7: PciDevice
+    device8: PciDevice
+    device9: PciDevice
+    device10: PciDevice
+    device11: PciDevice
+    device12: PciDevice
+    device13: PciDevice
+    device14: PciDevice
+    device15: PciDevice
     panic: BootPanic
 
+    fn at(self, index: U64) -> PciDevice {
+        if index == 0 { return self.device0 }
+        if index == 1 { return self.device1 }
+        if index == 2 { return self.device2 }
+        if index == 3 { return self.device3 }
+        if index == 4 { return self.device4 }
+        if index == 5 { return self.device5 }
+        if index == 6 { return self.device6 }
+        if index == 7 { return self.device7 }
+        if index == 8 { return self.device8 }
+        if index == 9 { return self.device9 }
+        if index == 10 { return self.device10 }
+        if index == 11 { return self.device11 }
+        if index == 12 { return self.device12 }
+        if index == 13 { return self.device13 }
+        if index == 14 { return self.device14 }
+        if index == 15 { return self.device15 }
+        self.panic.fail(code = 0xAC060011)
+    }
+
+    fn append(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8) {
+        if self.count >= 16 {
+            self.panic.fail(code = 0xAC060012)
+        }
+        let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
+        let class_reg = window.read_config32(bus = bus, device = device, function = function, offset = 8)
+        let id = PciDeviceIdentity(
+            segment = window.segment,
+            bus = bus,
+            device = device,
+            function = function,
+            vendor_id = vendor_device & 0xFFFF,
+            device_id = vendor_device >> 16,
+            class_code = class_reg >> 24,
+            subclass = (class_reg >> 16) & 0xFF,
+            prog_if = (class_reg >> 8) & 0xFF
+        )
+        let value = PciDevice(window = window, identity = id, panic = self.panic)
+        if self.count == 0 { self.device0 = value }
+        if self.count == 1 { self.device1 = value }
+        if self.count == 2 { self.device2 = value }
+        if self.count == 3 { self.device3 = value }
+        if self.count == 4 { self.device4 = value }
+        if self.count == 5 { self.device5 = value }
+        if self.count == 6 { self.device6 = value }
+        if self.count == 7 { self.device7 = value }
+        if self.count == 8 { self.device8 = value }
+        if self.count == 9 { self.device9 = value }
+        if self.count == 10 { self.device10 = value }
+        if self.count == 11 { self.device11 = value }
+        if self.count == 12 { self.device12 = value }
+        if self.count == 13 { self.device13 = value }
+        if self.count == 14 { self.device14 = value }
+        if self.count == 15 { self.device15 = value }
+        self.count = self.count + 1
+    }
+
     fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
-        return self.device0
+        let seen = 0
+        let index = 0
+        while index < self.count {
+            let candidate = self.at(index = index)
+            if candidate.identity.vendor_id == vendor_id {
+                if candidate.identity.device_id == device_id {
+                    if seen == occurrence {
+                        return candidate
+                    }
+                    seen = seen + 1
+                }
+            }
+            index = index + 1
+        }
+        self.panic.fail(code = 0xAC060010)
     }
 }
 
@@ -168,9 +303,9 @@ class PciDeviceSetBuilder {
     panic: BootPanic
 
     fn empty(self) -> PciDeviceSet {
-        let window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
-        let identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
-        let device = PciDevice(window = window, identity = identity, panic = self.panic)
-        return PciDeviceSet(count = 0, device0 = device, panic = self.panic)
+        let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
+        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let empty = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
+        return PciDeviceSet(count = 0, device0 = empty, device1 = empty, device2 = empty, device3 = empty, device4 = empty, device5 = empty, device6 = empty, device7 = empty, device8 = empty, device9 = empty, device10 = empty, device11 = empty, device12 = empty, device13 = empty, device14 = empty, device15 = empty, panic = self.panic)
     }
 }
