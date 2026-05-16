@@ -6,7 +6,7 @@ Wrela's next executor step is to move from direct `executor.run()` calls toward 
 
 The design goal is:
 
-- each executor owns one vCPU/core
+- each executor owns one vCPU
 - executor placement is explicit in source
 - communication is explicit publish/subscribe
 - wakeups are compiler-planned from the known graph
@@ -76,9 +76,36 @@ Examples:
 - NIC TX queue path
 - timer tick path
 
-Path ownership is established by passing the path value into an executor constructor. The path should not carry an `owner = hardware.vcpuN` field.
+**Load-bearing rule:** path ownership is established by passing the path value into an executor constructor.
+
+The path should not carry an `owner = hardware.vcpuN` field.
 
 Path instance identity matters. Two paths of the same type are still distinct capabilities and must have distinct topic identity when they publish events.
+
+Path identity should be source-visible without depending on let-binding names. Let-binding names are aliases and can change without changing the hardware graph.
+
+The proposed source shape is an explicit path instance label carried by the path value:
+
+```wrela
+data PathIdentity {
+    label: StringLiteral
+}
+
+driver path SerialConsolePath {
+    identity: PathIdentity
+    registers: SerialWriterRegisters
+}
+
+let console_path = serial_driver.create_console_path(
+    identity = PathIdentity(label = "console.com1")
+)
+```
+
+The compiler assigns the canonical path instance identity to the created capability value. The path's `identity` field is human-readable graph metadata and must be unique within the image for path instances that publish topics. The compiler should use the canonical capability identity for ownership and routing, and use the label/source span for diagnostics and generated symbol names.
+
+If no label is provided for a non-publishing path, the compiler may synthesize one for diagnostics. If a path publishes a topic, the source should provide a label so generated topic identity remains reviewable.
+
+Path sharing is not part of this design. A path capability may be passed to exactly one executor. Fanout should be modeled with topics and subscriptions, not by sharing the path itself. Milestone 1 should reject shared paths.
 
 ### Executor
 
@@ -98,7 +125,9 @@ let hello_memory = hardware.memory.claim_executor_arena(
     align = 4096
 )
 
-let serial_path = serial_driver.create_console_path()
+let serial_path = serial_driver.create_console_path(
+    identity = PathIdentity(label = "console.com1")
+)
 
 let hello = HelloWorld(
     memory = hello_memory,
@@ -109,6 +138,8 @@ hardware.vcpu0.enter(executor = hello)
 ```
 
 For secondary CPUs, `start` means "install this executor context on this vCPU and release that vCPU into the executor start method." Starting a non-current vCPU returns to the caller after the target vCPU has been released or after its startup record has been installed.
+
+Secondary `start` must have an explicit failure path. If AP startup cannot release the target vCPU, the image must enter a boot failure path or return a startup status that source handles before entering the bootstrap executor. It must not silently continue with one fewer executor.
 
 For the current bootstrap CPU, starting an executor is a terminal control transfer into that executor's start method. In source, the current-vCPU start must be the last successful action in the phase. A clearer future spelling may split this into:
 
@@ -125,7 +156,9 @@ This design allows either spelling, but the semantic distinction must exist.
 
 A topic is a cache-line-aware SPMC stream.
 
-The producer owns the topic. Subscribers hold explicit read capabilities. Topics are the single communication model for:
+The producer owns the topic. `Topic.publisher()` creates a single producer capability. The type system and ownership checker should enforce that publisher capability is unique and cannot be copied into multiple producers.
+
+Subscribers hold explicit read capabilities. Topics are the single communication model for:
 
 - executor-to-executor events
 - device interrupt events
@@ -184,6 +217,28 @@ Guarantee:
 
 This is required for command-like protocols where loss is unacceptable.
 
+Because Wrela has no hidden scheduler, reliable bounded topics must expose backpressure explicitly:
+
+```wrela
+let result = topic.try_publish(message = command)
+
+if result.full {
+    topic.wait_for_subscriber_advance()
+}
+```
+
+or:
+
+```wrela
+topic.publish_or_wait(message = command)
+```
+
+`try_publish` is non-blocking and returns a full/backpressure result. `publish_or_wait` is source-level sugar for an explicit producer loop that arms a wait on subscriber cursor advancement, re-checks available capacity, and sleeps or polls according to the executor's loop policy.
+
+Reliable bounded backpressure wakes on subscriber cursor movement, not on new producer messages. The compiler may synthesize producer waitlines for subscriber cursor advancement, using the same cache-line wait abstraction and IPI fallback as subscriber wakeups.
+
+Reliable bounded topics are not part of milestone 1, but their surface must remain compatible with this explicit wait model.
+
 ### Idempotency
 
 Idempotency is a consumer-side protocol layered on top of a delivery policy. It handles duplicate messages, not missing messages.
@@ -204,7 +259,7 @@ Baseline layout:
 
 For small hot messages, prefer fixed-size slots that fit in one cache line or a small integral number of cache lines.
 
-For large payloads, publish descriptors or handles to explicitly owned/shared buffers rather than copying large payloads through the topic ring.
+For large payloads, publish descriptors or handles to explicitly owned transfer buffers rather than copying large payloads through the topic ring. Explicit shared buffers are a future design, not part of milestone 1.
 
 The compiler should know or discover cache line size through the target profile/hardware discovery path.
 
@@ -264,7 +319,7 @@ Each executor owns its loop policy explicitly.
 
 Never sleeps. Lowest latency, highest resource use.
 
-Use for dedicated high-rate paths where burning a core is intentional.
+Use for dedicated high-rate paths where burning a vCPU is intentional.
 
 ### Adaptive
 
@@ -284,7 +339,7 @@ Arms subscriptions plus a local deadline timer before sleeping.
 
 Use for periodic work or timeouts.
 
-No core must remain awake by default. If all executors sleep and no timer/device/publisher wake source is armed, the image is quiescent until external hardware wakes it.
+No vCPU must remain awake by default. If all executors sleep and no timer/device/publisher wake source is armed, the image is quiescent until external hardware wakes it.
 
 The compiler should verify that an executor using a sleep policy has at least one wake source:
 
@@ -338,9 +393,30 @@ NIC RX queue 1 path -> RX topic 1 -> executor 1
 
 For devices with one physical interrupt but multiple logical paths, the driver may demux internally into path-specific topics. That demux should be explicit in the driver/module design.
 
+### Migration From `on path.interrupt`
+
+The current v0 interrupt model lowers `on path.interrupt(...)` handlers into generated interrupt context and direct executor handler calls. That shape should be treated as the old compatibility surface.
+
+The migration target is:
+
+- interrupt-capable driver paths declare one or more typed event topics
+- generated ISR glue publishes into the path instance topic
+- executor constructors receive subscriptions to those topics
+- executor loops drain subscriptions explicitly
+- direct `on path.interrupt` handlers are removed or lowered only as temporary compatibility wrappers around topic consumption
+
+The first implementation plan should choose one migration step:
+
+- keep `on path.interrupt` unchanged while building the vCPU/topic spine, then migrate interrupts in a later plan
+- or migrate one simple interrupt path, such as serial receive, to a path-owned topic as part of the first multi-vCPU slice
+
+The design preference is the second path when feasible, but milestone 1 may defer it if AP startup and SPMC topics are already too large.
+
 ## Memory Model
 
 Memory is executor-owned, not vCPU-owned.
+
+This composes with the physical arena memory model in `docs/implementation/2026-05-15-physical-arena-memory-executable-plan.md`: `ExecutorMemory` remains the durable root arena for one executor, `ArenaFrame` remains a bounded child arena, and raw physical authority creation remains constrained to image hardware planning.
 
 The future shape should move away from:
 
@@ -363,7 +439,7 @@ hardware.vcpu1.start(executor = worker)
 
 The memory planner may place the arena near the target vCPU for topology reasons, but ownership belongs to the executor.
 
-Shared memory across executors is not ambient. Shared regions require explicit capabilities and should be treated as a separate, rare mechanism.
+Shared memory across executors is not ambient. Shared regions require explicit capabilities and should be treated as a separate, rare mechanism outside this design. Milestone 1 should reject shared executor memory and shared paths.
 
 ## Topology and Capacity Planning
 
@@ -380,7 +456,7 @@ Known inputs:
 - declared publish rates or burst sizes
 - declared subscriber drain cadence or maximum tolerated lag
 - cache line size
-- SMT/core/cache/NUMA topology when known
+- SMT sibling, physical core, cache, and NUMA topology when known
 
 The compiler/planner should detect:
 
@@ -388,7 +464,7 @@ The compiler/planner should detect:
 - more than one executor started on one vCPU
 - executor not started
 - executor started more than once
-- path passed to more than one executor without explicit sharing
+- path passed to more than one executor
 - reliable topic without enough retention or backpressure policy
 - lossy topic used where the subscriber declares no tolerated gaps
 - hot cross-socket producer/subscriber edges
@@ -425,10 +501,11 @@ The compiler should enforce:
 - each executor is started exactly once
 - each vCPU starts at most one executor
 - every started executor has a root memory arena
-- executor memory is not shared unless explicitly declared shared
+- executor memory is not shared
 - driver root capabilities are not passed into executors
 - path capabilities are owned by the executor that receives them
 - path ownership derives from executor constructor flow, not `owner = vcpu`
+- path identities for publishing paths are source-visible and unique
 - topic publisher authority is single-owner
 - subscriptions are explicit read capabilities
 - interrupt-capable path topics have bounded ISR-safe publish behavior
@@ -448,7 +525,9 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
         memory = hardware.memory.claim_driver_region(length = 4096)
     ).initialize()
 
-    let serial_console = serial_driver.create_console_path()
+    let serial_console = serial_driver.create_console_path(
+        identity = PathIdentity(label = "console.com1")
+    )
 
     let producer_topic = Topic(
         message = CounterMessage,
@@ -475,6 +554,53 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
 }
 ```
 
+Illustrative executor loops:
+
+```wrela
+executor HelloWorld {
+    memory: ExecutorMemory
+    serial: SerialConsolePath
+    counter_out: TopicPublisher<CounterMessage>
+
+    start fn run(self) -> never {
+        let count = 0
+
+        while count < 64 {
+            self.counter_out.publish(message = CounterMessage(value = count))
+            count = count + 1
+        }
+
+        self.serial.write(self.memory.bytes(value = "producer done\n"))
+        self.memory.halt_forever()
+    }
+}
+
+executor Worker {
+    memory: ExecutorMemory
+    counter_in: TopicSubscription<CounterMessage>
+
+    start fn run(self) -> never {
+        let received = 0
+
+        while received < 64 {
+            while self.counter_in.try_next() as message {
+                received = received + 1
+            }
+
+            self.counter_in.arm_wait()
+
+            if received < 64 {
+                self.counter_in.recheck_or_wait()
+            }
+        }
+
+        self.memory.halt_forever()
+    }
+}
+```
+
+The exact generic spelling is illustrative. The important source ergonomics are: publish through a unique publisher, drain through a subscription, arm before sleep, re-check before sleeping, and keep loop policy explicit.
+
 The compiler derives:
 
 - `hello` is placed on `vcpu0`
@@ -498,6 +624,7 @@ The first implementation milestone should prove the spine without solving every 
 - cache-line wait abstraction in source/backend shape
 - `HLT + IPI` fallback path
 - compiler checks for vCPU count, one executor per vCPU, one start/enter per executor, and terminal current-vCPU entry ordering
+- e2e proof that the producer publishes N messages and the consumer observes N messages, then reports success through serial
 
 Device interrupt topics and reliable bounded topics can follow after the vCPU/topic spine is working, unless interrupt-as-topic is needed to remove the current `on path.interrupt` model first.
 
@@ -511,6 +638,7 @@ This design does not include:
 - dynamic executor creation
 - generic heap allocation
 - ambient shared memory
+- shared path capabilities
 - virtual address-space design
 - full ACPI CPU discovery
 - complete PCI/MSI-X routing generality
