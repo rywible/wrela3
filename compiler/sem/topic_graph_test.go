@@ -689,10 +689,11 @@ func TestExplicitInterruptConfiguratorSetsRouteVector(t *testing.T) {
 module sem.explicit_interrupt_configurator
 
 use { DelegatedHardware } from platform.uefi.transition
+use { BootPanic } from platform.hardware.panic
 use { CpuPlan, ExecutorSlot, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { HotPollPolicy } from machine.x86_64.executor_loop
-use { ApicInterruptController, IoApic, LocalApic } from machine.x86_64.interrupts
+use { ApicInterruptController, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
 use { SerialConsolePath, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity } from machine.x86_64.topic_u64
 
@@ -733,6 +734,13 @@ image ExplicitInterruptConfigurator {
         let path = SerialConsolePath(
             identity = PathIdentity(label = "serial"),
             registers = SerialWriterRegisters(port_base = 0x03f8),
+            route = IoApicRoute(
+                io_apic = IoApicDiscovered(id = 0, address = 0, gsi_base = 0, panic = BootPanic()),
+                gsi = 4,
+                flags = 0,
+                vector = InterruptVector(value = 0x40),
+                destination_apic_id = 0
+            ),
             rx = topic.publisher()
         )
         let sub = topic.subscribe(subscriber = slot)
@@ -740,8 +748,7 @@ image ExplicitInterruptConfigurator {
             slot = slot,
             loop = HotPollPolicy(),
             interrupts = ApicInterruptController(
-                local_apic = LocalApic(base = 0xFEE00000),
-                io_apic = IoApic(base = 0xFEC00000)
+                local_apic = LocalApic(base = 0xFEE00000, apic_id = 0, panic = BootPanic())
             ),
             serial_rx = sub
         )

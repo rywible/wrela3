@@ -2,6 +2,7 @@ module machine.x86_64.serial
 
 use { Bytes } from machine.x86_64.executor_memory
 use { DriverMemory, ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
+use { IoApicRoute } from machine.x86_64.interrupts
 use { TopicIdentity } from machine.x86_64.topic_u64
 
 driver path SerialWriterRegisters {
@@ -38,8 +39,8 @@ unique driver SerialDriver {
         return self
     }
 
-    fn create_console_path(self, identity: PathIdentity, rx: SerialRxPublisher) -> SerialConsolePath {
-        let console_path = SerialConsolePath(identity = identity, registers = self.registers, rx = rx)
+    fn create_console_path(self, identity: PathIdentity, route: IoApicRoute, rx: SerialRxPublisher) -> SerialConsolePath {
+        let console_path = SerialConsolePath(identity = identity, registers = self.registers, route = route, rx = rx)
         console_path.enable_receive_interrupts()
         return console_path
     }
@@ -94,6 +95,7 @@ class SerialRxSubscription {
 driver path SerialConsolePath {
     identity: PathIdentity
     registers: SerialWriterRegisters
+    route: IoApicRoute
     rx: SerialRxPublisher
 
     interrupt receiver -> SerialPathInterrupt {
@@ -106,6 +108,7 @@ driver path SerialConsolePath {
     }
 
     fn enable_receive_interrupts(self) {
+        self.route.program()
         self.registers.write8(offset = 1, value = 0x01)
         self.registers.write8(offset = 4, value = 0x0B)
     }

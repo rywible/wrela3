@@ -1,24 +1,7 @@
 module machine.x86_64.interrupts
 
+use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
-
-class LocalApic {
-    base: VirtualAddress
-
-    asm fn enable(self) {
-        mov r11, self.base
-        mov eax, 0x1FF
-        mov [r11 + 0xF0], eax
-        ret
-    }
-
-    asm fn eoi(self) {
-        mov r11, self.base
-        mov eax, 0
-        mov [r11 + 0xB0], eax
-        ret
-    }
-}
 
 data InterruptVector {
     value: U32
@@ -54,6 +37,74 @@ class InterruptOverrideSet {
         if self.count == 7 { self.override7 = entry }
         if self.count < 8 { self.count = self.count + 1 }
     }
+
+    fn at(self, index: U64) -> InterruptOverride {
+        if index == 0 { return self.override0 }
+        if index == 1 { return self.override1 }
+        if index == 2 { return self.override2 }
+        if index == 3 { return self.override3 }
+        if index == 4 { return self.override4 }
+        if index == 5 { return self.override5 }
+        if index == 6 { return self.override6 }
+        return self.override7
+    }
+
+    fn gsi_for_isa_irq(self, irq: U8) -> U32 {
+        let index = 0
+        let found = false
+        let result = self.override0.gsi & 0
+        while index < self.count {
+            let entry = self.at(index = index)
+            if entry.bus == 0 {
+                if entry.source == irq {
+                    result = entry.gsi
+                    found = true
+                }
+            }
+            index = index + 1
+        }
+        if found {
+            return result
+        }
+        return (self.override0.gsi & 0) + irq
+    }
+
+    fn flags_for_isa_irq(self, irq: U8) -> U16 {
+        let index = 0
+        let result = self.override0.flags & 0
+        while index < self.count {
+            let entry = self.at(index = index)
+            if entry.bus == 0 {
+                if entry.source == irq {
+                    result = entry.flags
+                }
+            }
+            index = index + 1
+        }
+        return result
+    }
+}
+
+class LocalApic {
+    base: PhysicalAddress
+    apic_id: U32
+    panic: BootPanic
+
+    fn mmio(self) -> MmioRegion {
+        return MmioRegion(address = self.base, length = 4096, panic = self.panic)
+    }
+
+    fn enable(self) {
+        self.mmio().write32(offset = 0xF0, value = 0x1FF)
+    }
+
+    fn eoi(self) {
+        self.mmio().write32(offset = 0xB0, value = 0)
+    }
+
+    fn message_address(self) -> U32 {
+        return 0xFEE00000 | (self.apic_id << 12)
+    }
 }
 
 class IoApicDiscovered {
@@ -61,6 +112,16 @@ class IoApicDiscovered {
     address: PhysicalAddress
     gsi_base: U32
     panic: BootPanic
+
+    fn mmio(self) -> MmioRegion {
+        return MmioRegion(address = self.address, length = 4096, panic = self.panic)
+    }
+
+    fn redirection_count(self) -> U32 {
+        self.mmio().write32(offset = 0, value = 1)
+        let version = self.mmio().read32(offset = 0x10)
+        return ((version >> 16) & 0xFF) + 1
+    }
 }
 
 class IoApicSet {
@@ -75,35 +136,51 @@ class IoApicSet {
     }
 }
 
+class IoApicRoute {
+    io_apic: IoApicDiscovered
+    gsi: U32
+    flags: U16
+    vector: InterruptVector
+    destination_apic_id: U32
+
+    fn program(self) {
+        let redir = (self.gsi - self.io_apic.gsi_base) * 2
+        let low = self.vector.value
+        if (self.flags & 0x0003) == 0x0003 {
+            low = low | (1 << 13)
+        }
+        if (self.flags & 0x000C) == 0x000C {
+            low = low | (1 << 15)
+        }
+        self.io_apic.mmio().write32(offset = 0, value = 0x10 + redir)
+        self.io_apic.mmio().write32(offset = 0x10, value = low)
+        self.io_apic.mmio().write32(offset = 0, value = 0x11 + redir)
+        self.io_apic.mmio().write32(offset = 0x10, value = self.destination_apic_id << 24)
+    }
+}
+
 class InterruptAuthority {
     local_apic: LocalApic
     io_apics: IoApicSet
     overrides: InterruptOverrideSet
     panic: BootPanic
-}
 
-class IoApic {
-    base: VirtualAddress
-
-    asm fn route_gsi4_to_vector40(self) {
-        mov r11, self.base
-        mov eax, 0x18
-        mov [r11], eax
-        mov eax, 0x40
-        mov [r11 + 0x10], eax
-
-        mov eax, 0x19
-        mov [r11], eax
-        mov eax, 0
-        mov [r11 + 0x10], eax
-        ret
+    fn route_isa_irq(self, irq: U8, vector: InterruptVector) -> IoApicRoute {
+        let gsi = self.overrides.gsi_for_isa_irq(irq = irq)
+        let flags = self.overrides.flags_for_isa_irq(irq = irq)
+        let io_apic = self.io_apics.io_apic0
+        if gsi < io_apic.gsi_base {
+            self.panic.fail(code = 0xAC050001)
+        }
+        if gsi >= io_apic.gsi_base + io_apic.redirection_count() {
+            self.panic.fail(code = 0xAC050002)
+        }
+        return IoApicRoute(io_apic = io_apic, gsi = gsi, flags = flags, vector = InterruptVector(value = vector.value), destination_apic_id = self.local_apic.apic_id)
     }
-
 }
 
 class ApicInterruptController {
     local_apic: LocalApic
-    io_apic: IoApic
 
     asm fn enable_cpu_interrupts(self) {
         sti
@@ -112,7 +189,6 @@ class ApicInterruptController {
 
     fn initialize_for_com1_receive(self) {
         self.local_apic.enable()
-        self.io_apic.route_gsi4_to_vector40()
     }
 
     fn eoi(self) {

@@ -73,7 +73,7 @@ class MadtTable {
     fn interrupt_authority(self) -> InterruptAuthority {
         let cpus = self.enabled_cpus().require_count(count = 1)
         return InterruptAuthority(
-            local_apic = LocalApic(base = self.local_apic_base()),
+            local_apic = LocalApic(base = self.local_apic_base(), apic_id = cpus.bootstrap.apic_id, panic = self.panic),
             io_apics = self.io_apics(),
             overrides = self.interrupt_source_overrides(),
             panic = self.panic

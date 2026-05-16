@@ -1,6 +1,9 @@
 package sem
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHardwareDiscoverySourceShape(t *testing.T) {
 	modules := parseUEFIModuleSet(t)
@@ -42,4 +45,18 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.mcfg", "McfgTable"), "ecam_windows")
 	_ = moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
+
+	interrupts := moduleType(t, index, "machine.x86_64.interrupts", "InterruptAuthority")
+	assertMethodExists(t, interrupts, "route_isa_irq")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute"), "program")
+	route := moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute")
+	if fieldTypeName(t, route, "destination_apic_id") != "U32" || fieldTypeName(t, route, "flags") != "U16" {
+		t.Fatalf("IoApicRoute must carry destination APIC ID and MADT override flags")
+	}
+	source := readRepoFile(t, "wrela/machine/x86_64/interrupts.wrela")
+	for _, want := range []string{"self.destination_apic_id << 24", "flags & 0x0003", "flags & 0x000C", "flags_for_isa_irq"} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("interrupt route source missing %q", want)
+		}
+	}
 }
