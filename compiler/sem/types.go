@@ -76,9 +76,8 @@ type InterruptBinding struct {
 }
 
 type CheckedProgram struct {
-	Modules           []*ast.Module
-	Index             *Index
-	ImageGraph        ImageGraph
-	OwnedRoot         *Type
-	InterruptBindings []InterruptBinding
+	Modules    []*ast.Module
+	Index      *Index
+	ImageGraph ImageGraph
+	OwnedRoot  *Type
 }

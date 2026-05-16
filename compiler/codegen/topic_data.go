@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"encoding/binary"
 	"sort"
 	"strings"
 
@@ -9,6 +10,8 @@ import (
 )
 
 const cacheLineSize = 64
+const topicWaitlineDisarmed int64 = -1
+const topicWaitlineDisarmedBits uint64 = ^uint64(0)
 
 type topicDataSubscriberLayout struct {
 	Label          string
@@ -68,6 +71,13 @@ func planTopicDataChecked(topic ir.TopicLayout) (topicDataLayout, []diag.Diagnos
 			Message: "topic depth must be a power of two",
 		}}
 	}
+	if topic.Kind == "reliable_u64" && len(topic.Subscribers) == 0 {
+		return topicDataLayout{}, []diag.Diagnostic{{
+			Phase:   diagnosticPhase,
+			Code:    diag.CG0001,
+			Message: "reliable topic requires at least one subscriber: " + topic.Label,
+		}}
+	}
 	return planTopicData(topic), nil
 }
 
@@ -100,9 +110,14 @@ func topicDataObjects(program *ir.Program) ([]ir.DataObject, []diag.Diagnostic) 
 
 	objects := make([]ir.DataObject, 0, len(layouts))
 	for _, layout := range layouts {
+		data := make([]byte, layout.TotalSize)
+		binary.LittleEndian.PutUint64(data[layout.ProducerWaitlineOffset:], topicWaitlineDisarmedBits)
+		for _, subscriber := range layout.Subscribers {
+			binary.LittleEndian.PutUint64(data[subscriber.WaitlineOffset:], topicWaitlineDisarmedBits)
+		}
 		objects = append(objects, ir.DataObject{
 			Symbol: "_wrela_topic_" + sanitizeSymbol(layout.Label),
-			Bytes:  make([]byte, layout.TotalSize),
+			Bytes:  data,
 			Align:  cacheLineSize,
 		})
 	}

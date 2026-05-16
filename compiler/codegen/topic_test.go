@@ -63,6 +63,47 @@ func TestGapTopicPublishCoalescesSubscriberWake(t *testing.T) {
 	}
 }
 
+func TestTopicWaitlinesStartDisarmed(t *testing.T) {
+	objects, diags := topicDataObjects(topicProgramForCodegenTest())
+	if len(diags) != 0 {
+		t.Fatalf("topicDataObjects diagnostics = %#v", diags)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("topic data objects = %#v, want one", objects)
+	}
+	layout := planTopicData(topicProgramForCodegenTest().Topics[0])
+	if got := binary.LittleEndian.Uint64(objects[0].Bytes[layout.ProducerWaitlineOffset:]); got != topicWaitlineDisarmedBits {
+		t.Fatalf("producer waitline = %#x, want disarmed sentinel", got)
+	}
+	if got := binary.LittleEndian.Uint64(objects[0].Bytes[layout.Subscribers[0].WaitlineOffset:]); got != topicWaitlineDisarmedBits {
+		t.Fatalf("subscriber waitline = %#x, want disarmed sentinel", got)
+	}
+}
+
+func TestTopicPublishDoesNotWakeDisarmedSubscriber(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.VcpuStarts = []ir.VcpuStartPlan{{SlotLabel: "worker", VcpuID: 1}}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "publish_counter")
+	sentinel := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sentinel, topicWaitlineDisarmedBits)
+	if !bytes.Contains(code, sentinel) {
+		t.Fatalf("publish_counter must check disarmed waitline sentinel before waking: %#x", code)
+	}
+	vector := make([]byte, 4)
+	binary.LittleEndian.PutUint32(vector, 0x00004000|0xF0)
+	sentinelAt := bytes.Index(code, sentinel)
+	vectorAt := bytes.Index(code, vector)
+	if sentinelAt < 0 || vectorAt < 0 || sentinelAt > vectorAt {
+		t.Fatalf("publish_counter must test disarmed sentinel before IPI: sentinel=%d vector=%d code=%#x", sentinelAt, vectorAt, code)
+	}
+}
+
 func TestWakeSlotAllowsBSPVcpuZero(t *testing.T) {
 	e := &Emitter{Labels: map[string]int{}}
 	emitWakeSlot(e, "producer", compileContext{SlotVcpu: map[string]int{"producer": 0}})
@@ -71,6 +112,15 @@ func TestWakeSlotAllowsBSPVcpuZero(t *testing.T) {
 	binary.LittleEndian.PutUint32(vector, 0x00004000|0xF0)
 	if !bytes.Contains(e.Code, vector) {
 		t.Fatalf("BSP slot wake missing IPI vector: %#x", e.Code)
+	}
+}
+
+func TestWakeSlotRejectsIncompletePlacementMap(t *testing.T) {
+	e := &Emitter{Labels: map[string]int{}}
+	emitWakeSlot(e, "consumer", compileContext{SlotVcpu: map[string]int{"producer": 0}})
+
+	if len(e.Diags) != 1 || e.Diags[0].Code != diag.CG0001 {
+		t.Fatalf("missing vCPU placement should emit CG0001, got %#v", e.Diags)
 	}
 }
 
@@ -192,8 +242,10 @@ func TestTopicIsWaitArmedComparesStaticCursorAndWaitline(t *testing.T) {
 	code := symbolBytes(t, image, "is_counter_armed")
 	topicAddress := make([]byte, 8)
 	binary.LittleEndian.PutUint64(topicAddress, runtimeImageBase+image.Symbols["_wrela_topic_counter"])
-	if !bytes.Contains(code, topicAddress) || !bytes.Contains(code, []byte{0x0F, 0x94, 0xC0}) {
-		t.Fatalf("is_counter_armed must compare static cursor/waitline and materialize equality: %#x", code)
+	sentinel := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sentinel, topicWaitlineDisarmedBits)
+	if !bytes.Contains(code, topicAddress) || !bytes.Contains(code, sentinel) || !bytes.Contains(code, []byte{0x0F, 0x94, 0xC0}) {
+		t.Fatalf("is_counter_armed must reject disarmed sentinel, compare static cursor/waitline, and materialize equality: %#x", code)
 	}
 }
 
@@ -448,6 +500,17 @@ func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 		if subscriber.WaitlineOffset%cacheLineSize != 0 {
 			t.Fatalf("subscriber %q WaitlineOffset = %d, want cache-line aligned", subscriber.Label, subscriber.WaitlineOffset)
 		}
+	}
+}
+
+func TestReliableTopicRequiresSubscriber(t *testing.T) {
+	_, diags := planTopicDataChecked(ir.TopicLayout{
+		Label: "commands",
+		Kind:  "reliable_u64",
+		Depth: 8,
+	})
+	if len(diags) != 1 || diags[0].Code != diag.CG0001 {
+		t.Fatalf("subscriberless reliable topic diagnostics = %#v, want CG0001", diags)
 	}
 }
 

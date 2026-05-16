@@ -823,7 +823,7 @@ executor BadBind {
 }
 
 func TestOnlySupportedInterruptRuntimeBindingsExposed(t *testing.T) {
-	checked, diags := checkModuleForTest(t, `
+	_, diags := checkModuleForTest(t, `
 module machine.x86_64.serial
 `+interruptPrelude+`
 
@@ -849,9 +849,6 @@ image Good {
 `)
 	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
 		t.Fatalf("expected SEM0042, got %#v", diags)
-	}
-	if len(checked.InterruptBindings) != 0 {
-		t.Fatalf("interrupt bindings = %#v, want none", checked.InterruptBindings)
 	}
 }
 
@@ -886,7 +883,7 @@ image Bad {
 }
 
 func TestUnsupportedInterruptRuntimeShapeIgnoredWhenUnreachable(t *testing.T) {
-	checked, diags := checkModuleForTest(t, `
+	_, diags := checkModuleForTest(t, `
 module index.interrupt_unsupported_unreachable
 `+interruptPrelude+`
 
@@ -904,9 +901,6 @@ image Good {
 `)
 	if len(diags) != 0 {
 		t.Fatalf("unexpected diagnostics: %#v", diags)
-	}
-	if len(checked.InterruptBindings) != 0 {
-		t.Fatalf("interrupt bindings = %#v, want none", checked.InterruptBindings)
 	}
 }
 

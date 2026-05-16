@@ -803,9 +803,11 @@ Add:
 use { ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
 use { TopicIdentity } from machine.x86_64.topic_u64
 
-// Keep the existing SerialPathInterrupt data type. Do not add a second
-// serial receive event type with the same payload shape.
+// Keep SerialPathInterrupt as the one serial receive event type. Include
+// has_byte so the interrupt receiver can represent "no byte pending" without
+// treating a real NUL byte as an empty event.
 data SerialPathInterrupt {
+    has_byte: Bool
     byte: U8
 }
 
@@ -3977,9 +3979,9 @@ driver path SerialConsolePath {
     interrupt receiver -> SerialPathInterrupt {
         let status = self.registers.read8(offset = 5)
         if (status & 0x01) != 0 {
-            return SerialPathInterrupt(byte = self.registers.read8(offset = 0))
+            return SerialPathInterrupt(has_byte = true, byte = self.registers.read8(offset = 0))
         }
-        return SerialPathInterrupt(byte = 0)
+        return SerialPathInterrupt(has_byte = false, byte = 0)
     }
 }
 ```

@@ -1942,7 +1942,6 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitStoreMemFromReg(e, slot, 8, value, 64)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
-	emitMfence(e)
 	wakeSlots := make([]string, 0, len(layout.Subscribers))
 	for _, subscriber := range layout.Subscribers {
 		wakeSlots = append(wakeSlots, subscriber.Label)
@@ -2012,7 +2011,8 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitStoreMemFromReg(e, slot, 8, value, 64)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), producer, 64)
-	emitMfence(e)
+	emitMovImmToReg(e, value, topicWaitlineDisarmed)
+	emitStoreMemFromReg(e, base, int64(layout.ProducerWaitlineOffset), value, 64)
 	wakeSlots := make([]string, 0, len(layout.Subscribers))
 	for _, subscriber := range layout.Subscribers {
 		wakeSlots = append(wakeSlots, subscriber.Label)
@@ -2080,7 +2080,12 @@ func emitTouchSubscriberWaitlinesAndWakeSkippingVcpu(e *Emitter, layout topicDat
 			continue
 		}
 		skip := e.newLabel("topic_wake_skip")
-		emitCmpRegMem(e, seq, base, int64(subscriber.WaitlineOffset), 64)
+		waitline := asm.MustLookup("r11")
+		emitLoadMemToReg(e, waitline, base, int64(subscriber.WaitlineOffset), 64)
+		emitMovImmToReg(e, asm.MustLookup("rdi"), topicWaitlineDisarmed)
+		emitCmpRegReg(e, waitline, asm.MustLookup("rdi"))
+		e.emitJcc(0x84, skip)
+		emitCmpRegReg(e, seq, waitline)
 		e.emitJcc(0x84, skip)
 		emitStoreMemFromReg(e, base, int64(subscriber.WaitlineOffset), seq, 64)
 		if vcpuID, ok := ctx.SlotVcpu[label]; !ok || vcpuID != skipVcpuID {
@@ -2097,7 +2102,12 @@ func emitWakeProducerSlots(e *Emitter, layout topicDataLayout, cursor asm.Reg, c
 	base := asm.MustLookup("rax")
 	emitMovDataAddressToReg(e, base, topicDataSymbol(layout.Label))
 	skip := e.newLabel("topic_producer_wake_skip")
-	emitCmpRegMem(e, cursor, base, int64(layout.ProducerWaitlineOffset), 64)
+	waitline := asm.MustLookup("rdx")
+	emitLoadMemToReg(e, waitline, base, int64(layout.ProducerWaitlineOffset), 64)
+	emitMovImmToReg(e, asm.MustLookup("rdi"), topicWaitlineDisarmed)
+	emitCmpRegReg(e, waitline, asm.MustLookup("rdi"))
+	e.emitJcc(0x84, skip)
+	emitCmpRegReg(e, cursor, waitline)
 	e.emitJcc(0x84, skip)
 	emitStoreMemFromReg(e, base, int64(layout.ProducerWaitlineOffset), cursor, 64)
 	for _, slot := range layout.Producers {
@@ -2109,6 +2119,9 @@ func emitWakeProducerSlots(e *Emitter, layout topicDataLayout, cursor asm.Reg, c
 func emitWakeSlot(e *Emitter, slot string, ctx compileContext) {
 	vcpuID, ok := ctx.SlotVcpu[slot]
 	if !ok {
+		if len(ctx.SlotVcpu) != 0 {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing vCPU placement for slot: " + slot})
+		}
 		return
 	}
 	emitLapicWrite(e, lapicICRHigh, uint32(vcpuID)<<24)
@@ -2223,7 +2236,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 		emitStoreSlotFromReg(e, tmp, outSlot+24, 64)
 	}
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
-	emitStoreSubscriptionArmedValue(e, frame, next.Subscription, next.SubscriberSlot, layout, 0)
+	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
 	if layout.Kind == "reliable_u64" {
 		emitWakeProducerSlots(e, layout, cursor, e.ctx)
 	}
@@ -2236,6 +2249,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitMovImmToReg(e, tmp, 1)
 	emitStoreSlotFromReg(e, tmp, gapOffset, 8)
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, head, layout)
+	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
 	if layout.Kind == "reliable_u64" {
 		emitWakeProducerSlots(e, layout, head, e.ctx)
 	}
@@ -2276,12 +2290,17 @@ func emitTopicIsWaitArmed(e *Emitter, frame Frame, armed *ir.TopicIsWaitArmed) {
 		base := asm.MustLookup("rax")
 		cursor := asm.MustLookup("r10")
 		waitline := asm.MustLookup("r11")
+		store := e.newLabel("topic_is_wait_armed_store")
 		emitMovDataAddressToReg(e, base, topicDataSymbol(layout.Label))
 		emitLoadMemToReg(e, cursor, base, int64(subscriber.CursorOffset), 64)
 		emitLoadMemToReg(e, waitline, base, int64(subscriber.WaitlineOffset), 64)
-		emitCmpRegReg(e, cursor, waitline)
+		emitMovImmToReg(e, asm.MustLookup("rcx"), topicWaitlineDisarmed)
+		emitCmpRegReg(e, waitline, asm.MustLookup("rcx"))
 		emitMovImmToReg(e, asm.MustLookup("rax"), 0)
+		e.emitJcc(0x84, store)
+		emitCmpRegReg(e, cursor, waitline)
 		emitSetccAl(e, setccOpcode("eq"))
+		e.bindLabel(store)
 		emitStoreSlotFromReg(e, asm.MustLookup("rax"), outSlot, 8)
 		return
 	}
@@ -2324,6 +2343,9 @@ func emitTopicWaitIfArmed(e *Emitter, frame Frame, wait *ir.TopicWaitIfArmed) {
 		emitMovDataAddressToReg(e, base, topicDataSymbol(layout.Label))
 		emitLoadMemToReg(e, cursor, base, int64(subscriber.CursorOffset), 64)
 		emitLoadMemToReg(e, waitline, base, int64(subscriber.WaitlineOffset), 64)
+		emitMovImmToReg(e, asm.MustLookup("rcx"), topicWaitlineDisarmed)
+		emitCmpRegReg(e, waitline, asm.MustLookup("rcx"))
+		e.emitJcc(0x84, skip)
 		emitCmpRegReg(e, cursor, waitline)
 		e.emitJcc(0x85, skip)
 	}
@@ -2374,8 +2396,22 @@ func emitStoreSubscriptionArmedValue(e *Emitter, frame Frame, sub ir.Value, subs
 	if !ok {
 		return
 	}
-	emitMovImmToReg(e, scratchRegs[0], value)
-	emitStoreMemFromReg(e, base, disp, scratchRegs[0], 8)
+	valueReg := asm.MustLookup("rdi")
+	if base.Name == valueReg.Name {
+		valueReg = asm.MustLookup("r10")
+	}
+	emitMovImmToReg(e, valueReg, value)
+	emitStoreMemFromReg(e, base, disp, valueReg, 8)
+}
+
+func emitDisarmSubscriptionWait(e *Emitter, frame Frame, sub ir.Value, subscriberSlot string, layout topicDataLayout) {
+	if subscriber, ok := topicSubscriberLayoutForSubscription(layout, sub, subscriberSlot); ok {
+		emitMovDataAddressToReg(e, asm.MustLookup("rax"), topicDataSymbol(layout.Label))
+		emitMovImmToReg(e, asm.MustLookup("rdi"), topicWaitlineDisarmed)
+		emitStoreMemFromReg(e, asm.MustLookup("rax"), int64(subscriber.WaitlineOffset), asm.MustLookup("rdi"), 64)
+		return
+	}
+	emitStoreSubscriptionArmedValue(e, frame, sub, subscriberSlot, layout, 0)
 }
 
 func emitSubscriptionFieldAddress(e *Emitter, frame Frame, sub ir.Value, field string) (asm.Reg, int64, bool) {

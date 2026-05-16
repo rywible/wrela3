@@ -157,10 +157,13 @@ executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     input: U64GapSubscription
-    start fn run(self) -> never {
+    fn poll(self) {
         let next = self.input.try_next()
         if next.has_message {
         }
+    }
+    start fn run(self) -> never {
+        self.poll()
         while true {}
     }
 }
@@ -187,8 +190,16 @@ image Img {
 	}
 
 	got := map[string]string{}
+	calls := map[string]string{}
 	for _, fn := range program.Functions {
-		if !strings.HasPrefix(fn.Symbol, "_wrela_method_test_same_type_topic_lower_Worker_run") {
+		if strings.HasPrefix(fn.Symbol, "_wrela_method_test_same_type_topic_lower_Worker_run") {
+			call, ok := functionOp[*Call](fn)
+			if ok {
+				calls[fn.Symbol] = call.Symbol
+			}
+			continue
+		}
+		if !strings.HasPrefix(fn.Symbol, "_wrela_method_test_same_type_topic_lower_Worker_poll") {
 			continue
 		}
 		next, ok := functionOp[TopicTryNext](fn)
@@ -199,7 +210,15 @@ image Img {
 	}
 	want := map[string]string{"worker.a": "topic.a", "worker.b": "topic.b"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("specialized worker topic ops = %#v, want %#v", got, want)
+		t.Fatalf("specialized worker helper topic ops = %#v, want %#v", got, want)
+	}
+	for runSymbol, callSymbol := range calls {
+		if strings.HasSuffix(runSymbol, "_worker_a") && !strings.HasSuffix(callSymbol, "_worker_a") {
+			t.Fatalf("%s calls unspecialized helper %s", runSymbol, callSymbol)
+		}
+		if strings.HasSuffix(runSymbol, "_worker_b") && !strings.HasSuffix(callSymbol, "_worker_b") {
+			t.Fatalf("%s calls unspecialized helper %s", runSymbol, callSymbol)
+		}
 	}
 }
 

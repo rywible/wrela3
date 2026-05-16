@@ -191,8 +191,6 @@ type checker struct {
 	diags                   []diag.Diagnostic
 	ownedRoot               *Type
 	graph                   ImageGraph
-	bindings                []InterruptBinding
-	runtimeBindings         []InterruptBinding
 	allowFrameCallExpr      bool
 	allowPlaceConstructor   *placeConstructorAllowance
 	exprLifetimes           map[ast.Expr]Lifetime
@@ -236,14 +234,12 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkUniqueConstructors()
 	c.checkExecutorWiring()
 	c.checkExecutorTopicGraph()
-	c.checkInterruptRuntimeSupport()
 
 	return &CheckedProgram{
-		Modules:           modules,
-		Index:             index,
-		ImageGraph:        c.graph,
-		OwnedRoot:         c.ownedRoot,
-		InterruptBindings: c.runtimeBindings,
+		Modules:    modules,
+		Index:      index,
+		ImageGraph: c.graph,
+		OwnedRoot:  c.ownedRoot,
 	}, c.diags
 }
 
@@ -1401,71 +1397,11 @@ func interruptContextSymbol(pathLabel string) string {
 	return "_wrela_interrupt_context_" + replacer.Replace(pathLabel)
 }
 
-func (c *checker) checkExecutorInterruptCompleteness(exec *Type, seen map[string]source.Span) {
-	for _, field := range exec.Fields {
-		if field.Type == nil || field.Type.Kind != KindDriverPath {
-			continue
-		}
-		event := c.eventDeclForPath(field.Type)
-		if event == nil {
-			continue
-		}
-		key := field.Name + ".interrupt"
-		if _, ok := seen[key]; !ok {
-			c.error(field.Span, diag.SEM0017, "missing on handler for "+key)
-			continue
-		}
-		c.bindings = append(c.bindings, InterruptBinding{
-			ExecutorModule: exec.Module,
-			ExecutorType:   exec.Name,
-			PathField:      field.Name,
-			PathType:       qualifiedTypeName(field.Type),
-			EventType:      c.resolveType(field.Type.Module, event.EventType),
-			Span:           field.Span,
-		})
-	}
-}
-
 func (c *checker) eventDeclForPath(path *Type) *ast.InterruptEventDecl {
 	if path == nil {
 		return nil
 	}
 	return c.index.InterruptEvent(path.Module, path.Name)
-}
-
-func (c *checker) checkInterruptRuntimeSupport() {
-	c.runtimeBindings = c.runtimeBindings[:0]
-	seenVectors := map[uint8]InterruptBinding{}
-	for _, binding := range c.bindings {
-		if !c.isReachableInterruptBinding(binding) {
-			continue
-		}
-		pathModule, pathName := splitQualifiedType(binding.PathType)
-		vector, ok := interruptVector(&Type{Module: pathModule, Name: pathName})
-		if !ok {
-			c.error(binding.Span, diag.SEM0020, "unsupported interrupt runtime path "+binding.PathType)
-			continue
-		}
-		if previous, exists := seenVectors[vector]; exists {
-			c.error(binding.Span, diag.SEM0020, "duplicate interrupt runtime vector for "+binding.PathType+" and "+previous.PathType)
-			continue
-		}
-		seenVectors[vector] = binding
-		binding.Vector = vector
-		c.runtimeBindings = append(c.runtimeBindings, binding)
-	}
-}
-
-func (c *checker) isReachableInterruptBinding(binding InterruptBinding) bool {
-	for _, exec := range c.graph.Executors {
-		if exec.Type == nil || exec.Type.Module != binding.ExecutorModule || exec.Type.Name != binding.ExecutorType {
-			continue
-		}
-		if exec.FieldBindings[binding.PathField] != "" || exec.PathUses[binding.PathField].Key != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func splitQualifiedType(raw string) (string, string) {

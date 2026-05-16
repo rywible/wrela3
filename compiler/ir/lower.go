@@ -337,12 +337,12 @@ func (ctx *lowerContext) lowerSourceMethods() {
 				if method.IsAsm {
 					continue
 				}
-				if method.IsStart && receiverType != nil && receiverType.Kind == sem.KindExecutor {
+				if receiverType != nil && receiverType.Kind == sem.KindExecutor {
 					placements := ctx.executorPlacementsForType(receiverType)
 					if len(placements) > 1 {
 						for _, exec := range placements {
 							ctx.currentExecutor = exec
-							ctx.program.Functions = append(ctx.program.Functions, ctx.lowerMethodWithSymbol(mod.Name, receiverType, method, executorStartSymbolForSlot(receiverType, exec.SlotLabel)))
+							ctx.program.Functions = append(ctx.program.Functions, ctx.lowerMethodWithSymbol(mod.Name, receiverType, method, executorMethodSymbolForSlot(receiverType, method.Name, exec.SlotLabel)))
 						}
 						ctx.currentExecutor = nil
 						continue
@@ -918,15 +918,15 @@ func (ctx *lowerContext) lowerVcpuStartPlans() {
 		if exec := ctx.checked.ImageGraph.ExecutorBySlot(placement.SlotLabel); exec.Type != nil {
 			plan.ExecutorType = ctx.irType(exec.Type)
 			if len(ctx.executorPlacementsForType(exec.Type)) > 1 {
-				plan.EntrySymbol = executorStartSymbolForSlot(exec.Type, placement.SlotLabel)
+				plan.EntrySymbol = executorMethodSymbolForSlot(exec.Type, "run", placement.SlotLabel)
 			}
 		}
 		ctx.program.VcpuStarts = append(ctx.program.VcpuStarts, plan)
 	}
 }
 
-func executorStartSymbolForSlot(executorType *sem.Type, slotLabel string) string {
-	return symbolName("method", executorType.Module, executorType.Name, "run", sanitizeSymbolName(slotLabel))
+func executorMethodSymbolForSlot(executorType *sem.Type, methodName, slotLabel string) string {
+	return symbolName("method", executorType.Module, executorType.Name, methodName, sanitizeSymbolName(slotLabel))
 }
 
 func sanitizeSymbolName(label string) string {
@@ -992,6 +992,26 @@ func (ctx *lowerContext) publisherSlotForValue(value Value, currentExecutor *sem
 		}
 	}
 	return ""
+}
+
+func (ctx *lowerContext) executorForValue(value Value) *sem.ExecutorNode {
+	if ctx == nil || ctx.checked == nil {
+		return nil
+	}
+	binding := ctx.bindingNameForValue(value)
+	if binding == "" {
+		return nil
+	}
+	for _, placement := range ctx.checked.ImageGraph.VcpuPlacements {
+		if placement.ExecutorBinding == binding {
+			for i := range ctx.checked.ImageGraph.Executors {
+				if ctx.checked.ImageGraph.Executors[i].SlotLabel == placement.SlotLabel {
+					return &ctx.checked.ImageGraph.Executors[i]
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (ctx *lowerContext) subscriberSlotForValue(value Value, currentExecutor *sem.Type) string {
@@ -1487,8 +1507,16 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		method := ctx.lookupMethod(recvType, e.Method)
 		args, argOps := ctx.lowerCallArgs(moduleName, receiverType, scope, method, e.Args)
 		ret := ctx.methodReturn(moduleName, method)
+		symbol := symbolName("method", recvType.Module, recvType.Name, e.Method)
+		if recvType.Kind == sem.KindExecutor && len(ctx.executorPlacementsForType(recvType)) > 1 {
+			if ctx.currentExecutor != nil && sameSemType(ctx.currentExecutor.Type, recvType) {
+				symbol = executorMethodSymbolForSlot(recvType, e.Method, ctx.currentExecutor.SlotLabel)
+			} else if exec := ctx.executorForValue(receiver); exec != nil && sameSemType(exec.Type, recvType) {
+				symbol = executorMethodSymbolForSlot(recvType, e.Method, exec.SlotLabel)
+			}
+		}
 		call := &Call{
-			Symbol:   symbolName("method", recvType.Module, recvType.Name, e.Method),
+			Symbol:   symbol,
 			Receiver: receiver,
 			Args:     args,
 			Type:     ctx.irType(ret),
