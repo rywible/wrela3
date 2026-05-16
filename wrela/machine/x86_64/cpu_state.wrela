@@ -1,6 +1,7 @@
 module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { BootPanic } from platform.hardware.panic
 
 data SlotIdentity {
     label: StringLiteral
@@ -81,6 +82,42 @@ class IoPortAuthority {
     fn claim_com1(self) -> Com1IoPortClaim {
         return Com1IoPortClaim(port_base = 0x03f8)
     }
+}
+
+data EnabledCpu {
+    uid: U32
+    apic_id: U32
+}
+
+class EnabledCpuSet {
+    count: U64
+    cpu0: EnabledCpu
+    cpu1: EnabledCpu
+
+    fn append(self, uid: U32, apic_id: U32) {
+        if self.count == 0 {
+            self.cpu0 = EnabledCpu(uid = uid, apic_id = apic_id)
+            self.count = 1
+            return
+        }
+        if self.count == 1 {
+            self.cpu1 = EnabledCpu(uid = uid, apic_id = apic_id)
+            self.count = 2
+            return
+        }
+    }
+
+    fn require_count(self, count: U64) -> CpuTopology {
+        if self.count < count {
+            BootPanic().fail(code = 0xAC040001)
+        }
+        return CpuTopology(bootstrap = self.cpu0, secondary = self.cpu1)
+    }
+}
+
+data CpuTopology {
+    bootstrap: EnabledCpu
+    secondary: EnabledCpu
 }
 
 class Vcpu {

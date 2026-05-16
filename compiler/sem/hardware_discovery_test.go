@@ -32,4 +32,11 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "BoundedBytes"), "read_u32")
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "read32")
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "write32")
+
+	madt := moduleType(t, index, "platform.acpi.madt", "MadtTable")
+	assertMethodExists(t, madt, "local_apic_base")
+	assertMethodExists(t, madt, "enabled_cpus")
+	assertMethodExists(t, madt, "io_apics")
+	assertMethodExists(t, madt, "interrupt_source_overrides")
+	assertMethodExists(t, madt, "interrupt_authority")
 }

@@ -1,5 +1,7 @@
 module machine.x86_64.interrupts
 
+use { BootPanic } from platform.hardware.panic
+
 class LocalApic {
     base: VirtualAddress
 
@@ -16,6 +18,68 @@ class LocalApic {
         mov [r11 + 0xB0], eax
         ret
     }
+}
+
+data InterruptVector {
+    value: U32
+}
+
+data InterruptOverride {
+    bus: U8
+    source: U8
+    gsi: U32
+    flags: U16
+}
+
+class InterruptOverrideSet {
+    count: U64
+    override0: InterruptOverride
+    override1: InterruptOverride
+    override2: InterruptOverride
+    override3: InterruptOverride
+    override4: InterruptOverride
+    override5: InterruptOverride
+    override6: InterruptOverride
+    override7: InterruptOverride
+
+    fn append(self, bus: U8, source: U8, gsi: U32, flags: U16) {
+        let entry = InterruptOverride(bus = bus, source = source, gsi = gsi, flags = flags)
+        if self.count == 0 { self.override0 = entry }
+        if self.count == 1 { self.override1 = entry }
+        if self.count == 2 { self.override2 = entry }
+        if self.count == 3 { self.override3 = entry }
+        if self.count == 4 { self.override4 = entry }
+        if self.count == 5 { self.override5 = entry }
+        if self.count == 6 { self.override6 = entry }
+        if self.count == 7 { self.override7 = entry }
+        if self.count < 8 { self.count = self.count + 1 }
+    }
+}
+
+class IoApicDiscovered {
+    id: U8
+    address: PhysicalAddress
+    gsi_base: U32
+    panic: BootPanic
+}
+
+class IoApicSet {
+    count: U64
+    io_apic0: IoApicDiscovered
+
+    fn append(self, id: U8, address: PhysicalAddress, gsi_base: U32, panic: BootPanic) {
+        if self.count == 0 {
+            self.io_apic0 = IoApicDiscovered(id = id, address = address, gsi_base = gsi_base, panic = panic)
+            self.count = 1
+        }
+    }
+}
+
+class InterruptAuthority {
+    local_apic: LocalApic
+    io_apics: IoApicSet
+    overrides: InterruptOverrideSet
+    panic: BootPanic
 }
 
 class IoApic {
