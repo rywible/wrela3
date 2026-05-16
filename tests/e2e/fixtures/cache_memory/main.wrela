@@ -10,8 +10,17 @@ executor CacheMemoryProbe {
     memory: ExecutorMemory
     serial_path: SerialWritePath
     cache: CacheArena
+    zero_cache: CacheArena
+    short_cache: CacheArena
 
     start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as empty_frame {
+            let empty = self.cache.get_bytes(key = 0, into = empty_frame)
+            if empty.hit {
+                self.serial_path.write(self.memory.bytes(value = "empty cache hit\n"))
+            }
+        }
+
         let first_put = self.cache.put_bytes(key = 1, bytes = self.memory.bytes(value = "old cache\n"))
         let second_put = self.cache.put_bytes(key = 2, bytes = self.memory.bytes(value = "cache memory ok\n"))
 
@@ -24,11 +33,49 @@ executor CacheMemoryProbe {
             if second_put.stored == false {
                 self.serial_path.write(self.memory.bytes(value = "second put failed\n"))
             }
+            if first_put.evicted != 0 {
+                self.serial_path.write(self.memory.bytes(value = "first put evicted\n"))
+            }
+            if second_put.evicted == 0 {
+                self.serial_path.write(self.memory.bytes(value = "second put missed eviction\n"))
+            }
             if evicted.hit {
                 self.serial_path.write(self.memory.bytes(value = "stale cache\n"))
             }
             if cached.hit {
                 self.serial_path.write(cached.bytes)
+            }
+        }
+        let empty_value_put = self.cache.put_bytes(key = 0, bytes = self.memory.bytes(value = ""))
+        with self.memory.frame(length = 4096) as empty_value_frame {
+            let empty_value = self.cache.get_bytes(key = 0, into = empty_value_frame)
+            if empty_value_put.stored == false {
+                self.serial_path.write(self.memory.bytes(value = "empty value put failed\n"))
+            }
+            if empty_value.hit == false {
+                self.serial_path.write(self.memory.bytes(value = "empty value missed\n"))
+            }
+        }
+        self.zero_cache.clear()
+        let zero_slot_put = self.zero_cache.put_bytes(key = 7, bytes = self.memory.bytes(value = "zero slot\n"))
+        with self.memory.frame(length = 4096) as zero_slot_frame {
+            let zero_slot_lookup = self.zero_cache.get_bytes(key = 7, into = zero_slot_frame)
+            if zero_slot_put.stored {
+                self.serial_path.write(self.memory.bytes(value = "zero slot stored\n"))
+            }
+            if zero_slot_lookup.hit {
+                self.serial_path.write(self.memory.bytes(value = "zero slot hit\n"))
+            }
+        }
+        self.short_cache.clear()
+        let short_cache_put = self.short_cache.put_bytes(key = 9, bytes = self.memory.bytes(value = "short cache\n"))
+        with self.memory.frame(length = 4096) as short_cache_frame {
+            let short_cache_lookup = self.short_cache.get_bytes(key = 9, into = short_cache_frame)
+            if short_cache_put.stored {
+                self.serial_path.write(self.memory.bytes(value = "short cache stored\n"))
+            }
+            if short_cache_lookup.hit {
+                self.serial_path.write(self.memory.bytes(value = "short cache hit\n"))
             }
         }
         self.memory.halt_forever()
@@ -69,20 +116,39 @@ image CacheMemorySmoke {
             memory = DriverMemory(region = hardware.memory.arena)
             ).initialize()
         let serial_path = SerialWritePath(owner = hardware.vcpu0, registers = serial_driver.registers)
-        with hardware.vcpu0.memory.frame(length = 4096) as setup {
-            let storage = setup.reserve(length = 32, align = 8)
-            let cache = CacheArena(
-                storage = storage,
-                slot_count = 1,
-                slot_size = 16,
-                next_victim = 0
-            )
-            let probe = CacheMemoryProbe(
-                memory = hardware.vcpu0.memory,
-                serial_path = serial_path,
-                cache = cache
-            )
-            probe.run()
-        }
+        let executor_memory = hardware.vcpu0.memory
+        let storage = executor_memory.reserve(length = 40, align = 8)
+        let zero_storage = executor_memory.reserve(length = 24, align = 8)
+        let short_storage = executor_memory.reserve(length = 39, align = 8)
+        let cache = CacheArena(
+            storage = storage,
+            slot_count = 1,
+            slot_size = 16,
+            next_victim = 0,
+            initialized = 0
+        )
+        let zero_cache = CacheArena(
+            storage = zero_storage,
+            slot_count = 0,
+            slot_size = 16,
+            next_victim = 0,
+            initialized = 0
+        )
+        let short_cache = CacheArena(
+            storage = short_storage,
+            slot_count = 1,
+            slot_size = 16,
+            next_victim = 0,
+            initialized = 0
+        )
+        cache.clear()
+        let probe = CacheMemoryProbe(
+            memory = executor_memory,
+            serial_path = serial_path,
+            cache = cache,
+            zero_cache = zero_cache,
+            short_cache = short_cache
+        )
+        probe.run()
     }
 }

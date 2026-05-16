@@ -460,6 +460,16 @@ class Parser {
         return msg
     }
 }
+executor Worker {
+    memory: ExecutorMemory
+    parser: Parser
+    start fn run(self) -> never {
+        with self.memory.frame(length = 64) as tick {
+            let msg = self.parser.parse(heap = tick)
+        }
+        while true {}
+    }
+}
 `)
 	index, ds := BuildIndex(modules)
 	ds = filterMissingImageDiagnostic(ds)

@@ -51,6 +51,43 @@ func TestCompileWhileLoops(t *testing.T) {
 	}
 }
 
+func TestCompileNarrowConditionLoadClearsRegister(t *testing.T) {
+	cond := &ir.Param{Symbol: "cond", Type: ir.Type{Name: "Bool"}}
+	yes := &ir.ConstInt{Symbol: "yes", Value: 1, Type: ir.Type{Name: "U64"}}
+	no := &ir.ConstInt{Symbol: "no", Value: 0, Type: ir.Type{Name: "U64"}}
+	fn := ir.Function{
+		Symbol: "narrow_cond",
+		Return: ir.Type{Name: "U64"},
+		Params: []ir.Value{cond},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops: []ir.Operation{
+				&ir.If{
+					Condition: cond,
+					Then: []ir.Operation{
+						yes,
+						&ir.Return{Value: yes},
+					},
+					Else: []ir.Operation{
+						no,
+						&ir.Return{Value: no},
+					},
+				},
+			},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := symbolBytes(t, image, "narrow_cond")
+	clearRAX := []byte{0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !bytes.Contains(code, clearRAX) {
+		t.Fatalf("narrow condition load must clear the full comparison register first: %#x", code)
+	}
+}
+
 func TestCompileIfUsesMaterializedComparisonCondition(t *testing.T) {
 	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
 	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}

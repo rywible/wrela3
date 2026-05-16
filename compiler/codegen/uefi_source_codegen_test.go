@@ -332,22 +332,54 @@ func TestCacheArenaPutBytesContainsEvictionBump(t *testing.T) {
 	if len(code) == 0 {
 		t.Fatal("cache put compiled to empty code")
 	}
-	for _, label := range []string{"slot_offset_loop", "slot_ready", "copy_loop", "copy_done", "victim_ready"} {
+	for _, label := range []string{"put_capacity_loop", "put_capacity_ok", "put_victim_in_range", "slot_offset_loop", "slot_ready", "copy_loop", "copy_done", "victim_ready", "put_fail"} {
 		if !hasAsmLabel(instructions, label) {
 			t.Fatalf("cache put missing label %q in:\n%s", label, method.Body)
 		}
 	}
 	signatures := strings.Join(instructionSignatures(instructions), "\n")
 	for _, want := range []string{
+		"je put_fail",
+		"cmp r14 rax",
+		"jb put_fail",
+		"jbe put_fits",
+		"jb put_victim_in_range",
 		"add r13 imm",
 		"mov r11 [r11]",
-		"mov [r11] rsi",
-		"mov [r11+8] r12",
+		"mov [r11] imm",
+		"mov [r11+8] rsi",
+		"mov [r11+16] r12",
 		"mov [rdi+24] r11",
+		"mov [r10+8] r14",
 		"mov [r10] imm",
 	} {
 		if !strings.Contains(signatures, want) {
 			t.Fatalf("cache put missing lowered instruction %q in:\n%s", want, signatures)
+		}
+	}
+}
+
+func TestCacheArenaClearBoundsStorage(t *testing.T) {
+	checked := parseCheckedUEFIModules(t)
+	method := asmMethodFromSem(t, checked, "machine.x86_64.cache_memory", "CacheArena", "clear")
+	instructions, ds := lowerAsmMethodInstructions(method)
+	if len(ds) != 0 {
+		t.Fatalf("lower cache clear diagnostics: %#v", ds)
+	}
+	for _, label := range []string{"clear_capacity_loop", "clear_loop", "clear_done", "clear_invalid"} {
+		if !hasAsmLabel(instructions, label) {
+			t.Fatalf("cache clear missing label %q in:\n%s", label, method.Body)
+		}
+	}
+	signatures := strings.Join(instructionSignatures(instructions), "\n")
+	for _, want := range []string{
+		"mov r14 [r11+8]",
+		"cmp r14 rax",
+		"jb clear_invalid",
+		"mov [rdi+32] imm",
+	} {
+		if !strings.Contains(signatures, want) {
+			t.Fatalf("cache clear missing lowered instruction %q in:\n%s", want, signatures)
 		}
 	}
 }
@@ -359,7 +391,7 @@ func TestCacheArenaGetBytesCopiesIntoFrame(t *testing.T) {
 	if len(ds) != 0 {
 		t.Fatalf("lower cache get diagnostics: %#v", ds)
 	}
-	for _, label := range []string{"get_slot_loop", "get_hit", "frame_has_space", "get_copy_loop", "get_copy_done", "get_miss"} {
+	for _, label := range []string{"get_capacity_loop", "get_capacity_ok", "get_slot_loop", "get_hit", "frame_has_space", "get_copy_loop", "get_copy_done", "get_miss"} {
 		if !hasAsmLabel(instructions, label) {
 			t.Fatalf("cache get missing label %q in:\n%s", label, method.Body)
 		}
@@ -383,6 +415,11 @@ func TestCacheArenaGetBytesCopiesIntoFrame(t *testing.T) {
 	signatures := strings.Join(instructionSignatures(instructions), "\n")
 	for _, want := range []string{
 		"mov r8 [r8]",
+		"cmp rax imm",
+		"cmp r14 rax",
+		"jb get_miss",
+		"jb get_oom",
+		"jbe frame_has_space",
 		"mov [rdx+16] r15",
 		"mov [r10] imm",
 		"add r12 imm",

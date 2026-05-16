@@ -1,43 +1,35 @@
+// expect: SEM0025: frame value cannot be stored
 module machine.x86_64.executor_memory
 
-data Bytes {
-    address: PhysicalAddress
-    length: U64
-}
-
-data MutableBytes {
-    address: PhysicalAddress
-    length: U64
-}
-
+data Message { id: U64 }
+data Box { msg: Message }
 class ExecutorMemory {
     arena_base: PhysicalAddress
     arena_length: U64
     next_offset: U64
-
-    fn bytes(self, value: StringLiteral) -> Bytes {
-        return Bytes(address = value.address, length = value.length)
-    }
-
-    // Compiler intrinsic; codegen derives the child frame from self.next_offset.
     fn frame(self, length: U64) -> ArenaFrame {
         return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
     }
-
-    asm fn halt_forever(self) -> never {
-    loop:
-        hlt
-        jmp loop
-    }
 }
-
 class ArenaFrame {
     arena_base: PhysicalAddress
     arena_length: U64
     next_offset: U64
-
-    // Compiler intrinsic; codegen derives the child frame from self.next_offset.
     fn frame(self, length: U64) -> ArenaFrame {
         return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
+    }
+}
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 256) as parent {
+            with parent.frame(length = 64) as left {
+                let msg = left.place(Message(id = 1))
+                with parent.frame(length = 64) as right {
+                    let box = right.place(Box(msg = msg))
+                }
+            }
+        }
+        while true {}
     }
 }

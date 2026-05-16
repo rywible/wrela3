@@ -152,8 +152,21 @@ func TestCacheMemoryQEMU(t *testing.T) {
 	if !strings.Contains(out, "cache memory ok") {
 		t.Fatalf("serial output missing cache memory line:\n%s", out)
 	}
-	if strings.Contains(out, "stale cache") {
-		t.Fatalf("cache lookup returned evicted entry:\n%s", out)
+	for _, unexpected := range []string{
+		"empty cache hit",
+		"first put evicted",
+		"second put missed eviction",
+		"empty value put failed",
+		"empty value missed",
+		"zero slot stored",
+		"zero slot hit",
+		"short cache stored",
+		"short cache hit",
+		"stale cache",
+	} {
+		if strings.Contains(out, unexpected) {
+			t.Fatalf("cache fixture reported %q:\n%s", unexpected, out)
+		}
 	}
 }
 

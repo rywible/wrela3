@@ -271,10 +271,6 @@ type ArenaPlace struct {
 func (*ArenaPlace) isValue()     {}
 func (*ArenaPlace) isOperation() {}
 
-type MemoryTrap struct{}
-
-func (*MemoryTrap) isOperation() {}
-
 type StringLiteral struct {
 	Symbol     string
 	Value      string

@@ -17,41 +17,144 @@ class CacheArena {
     slot_count: U64
     slot_size: U64
     next_victim: U64
+    initialized: U64
 
-    asm fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult {
-        mov r11, [rdi + CacheArena.slot_size]
-        mov r12, [rdx + Bytes.length]
-        cmp r12, r11
-        jle put_fits
-        mov [r10], 0
-        mov [r10 + 8], 0
-        mov rax, r10
+    asm fn clear(self) {
+        mov [rdi + CacheArena.next_victim], 0
+        mov r12, [rdi + CacheArena.slot_count]
+        cmp r12, 0
+        je clear_done
+        mov r11, [rdi + CacheArena.storage]
+        mov r14, [r11 + MutableBytes.length]
+        mov r11, [r11 + MutableBytes.address]
+        mov r13, [rdi + CacheArena.slot_size]
+        mov rax, r13
+        add r13, 24
+        cmp r13, rax
+        jb clear_invalid
+        mov r15, r12
+        mov rax, 0
+
+clear_capacity_loop:
+        cmp r15, 0
+        je clear_loop
+        mov r8, rax
+        add rax, r13
+        cmp rax, r8
+        jb clear_invalid
+        cmp r14, rax
+        jb clear_invalid
+        sub r15, 1
+        jmp clear_capacity_loop
+
+clear_loop:
+        cmp r12, 0
+        je clear_done
+        mov [r11], 0
+        mov [r11 + 8], 0
+        mov [r11 + 16], 0
+        add r11, r13
+        sub r12, 1
+        jmp clear_loop
+
+clear_done:
+        mov [rdi + CacheArena.initialized], 1
         ret
 
-put_fits:
+clear_invalid:
+        mov [rdi + CacheArena.initialized], 0
+        ret
+    }
+
+    asm fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult {
+        mov r12, [rdi + CacheArena.slot_count]
+        cmp r12, 0
+        je put_fail
         mov r11, [rdi + CacheArena.storage]
+        mov r14, [r11 + MutableBytes.length]
         mov r11, [r11 + MutableBytes.address]
-        mov r12, [rdi + CacheArena.next_victim]
         mov r13, [rdi + CacheArena.slot_size]
-        add r13, 16
+        mov rax, r13
+        add r13, 24
+        cmp r13, rax
+        jb put_fail
+        mov r15, r12
+        mov rax, 0
+
+put_capacity_loop:
+        cmp r15, 0
+        je put_capacity_ok
+        mov r8, rax
+        add rax, r13
+        cmp rax, r8
+        jb put_fail
+        cmp r14, rax
+        jb put_fail
+        sub r15, 1
+        jmp put_capacity_loop
+
+put_capacity_ok:
+        mov rax, [rdi + CacheArena.initialized]
+        cmp rax, 1
+        je put_cache_ready
+        mov r15, r12
+        mov rax, r11
+
+put_init_loop:
+        cmp r15, 0
+        je put_init_done
+        mov [rax], 0
+        mov [rax + 8], 0
+        mov [rax + 16], 0
+        add rax, r13
+        sub r15, 1
+        jmp put_init_loop
+
+put_init_done:
+        mov [rdi + CacheArena.next_victim], 0
+        mov [rdi + CacheArena.initialized], 1
+
+put_cache_ready:
+        mov rax, [rdi + CacheArena.slot_size]
+        mov r12, [rdx + Bytes.length]
+        cmp r12, rax
+        jbe put_fits
+        jmp put_fail
+
+put_fits:
+        mov r12, [rdi + CacheArena.next_victim]
+        mov rax, [rdi + CacheArena.slot_count]
+        cmp r12, rax
+        jb put_victim_in_range
+        mov r12, 0
+
+put_victim_in_range:
 
 slot_offset_loop:
         cmp r12, 0
-        jle slot_ready
+        je slot_ready
         add r11, r13
         sub r12, 1
         jmp slot_offset_loop
 
 slot_ready:
-        mov [r11], rsi
+        mov r14, 0
+        mov rax, [r11]
+        cmp rax, 1
+        jne slot_was_empty
+        mov r14, 1
+
+slot_was_empty:
+        mov [r11], 1
+        mov [r11 + 8], rsi
         mov r12, [rdx + Bytes.length]
-        mov [r11 + 8], r12
+        mov [r11 + 16], r12
         mov r13, [rdx + Bytes.address]
-        add r11, 16
+        add r11, 24
 
 copy_loop:
         cmp r12, 0
-        jle copy_done
+        je copy_done
         mov al, [r13]
         mov [r11], al
         add r13, 1
@@ -64,61 +167,125 @@ copy_done:
         add r11, 1
         mov r12, [rdi + CacheArena.slot_count]
         cmp r11, r12
-        jl victim_ready
+        jb victim_ready
         mov r11, 0
 
 victim_ready:
         mov [rdi + CacheArena.next_victim], r11
         mov [r10], 1
-        mov [r10 + 8], 1
+        mov [r10 + 8], r14
+        mov rax, r10
+        ret
+
+put_fail:
+        mov [r10], 0
+        mov [r10 + 8], 0
         mov rax, r10
         ret
     }
 
     asm fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup {
-        mov r8, [rdi + CacheArena.storage]
-        mov r8, [r8 + MutableBytes.address]
         mov r9, [rdi + CacheArena.slot_count]
+        cmp r9, 0
+        je get_miss
+        mov r8, [rdi + CacheArena.storage]
+        mov r14, [r8 + MutableBytes.length]
+        mov r8, [r8 + MutableBytes.address]
         mov r15, [rdi + CacheArena.slot_size]
-        add r15, 16
+        mov rax, r15
+        add r15, 24
+        cmp r15, rax
+        jb get_miss
+        mov r12, r9
+        mov rax, 0
+
+get_capacity_loop:
+        cmp r12, 0
+        je get_capacity_ok
+        mov r11, rax
+        add rax, r15
+        cmp rax, r11
+        jb get_miss
+        cmp r14, rax
+        jb get_miss
+        sub r12, 1
+        jmp get_capacity_loop
+
+get_capacity_ok:
+        mov rax, [rdi + CacheArena.initialized]
+        cmp rax, 1
+        je get_cache_ready
+        mov r12, r9
+        mov r11, r8
+
+get_init_loop:
+        cmp r12, 0
+        je get_init_done
+        mov [r11], 0
+        mov [r11 + 8], 0
+        mov [r11 + 16], 0
+        add r11, r15
+        sub r12, 1
+        jmp get_init_loop
+
+get_init_done:
+        mov [rdi + CacheArena.next_victim], 0
+        mov [rdi + CacheArena.initialized], 1
+
+get_cache_ready:
 
 get_slot_loop:
         cmp r9, 0
-        jle get_miss
+        je get_miss
         mov rax, [r8]
+        cmp rax, 1
+        jne get_next_slot
+        mov rax, [r8 + 8]
         cmp rax, rsi
         je get_hit
+
+get_next_slot:
         add r8, r15
         sub r9, 1
         jmp get_slot_loop
 
 get_hit:
-        mov r12, [r8 + 8]
+        mov r12, [r8 + 16]
         mov r13, r8
-        add r13, 16
+        add r13, 24
 
         mov r14, [rdx + ArenaFrame.next_offset]
+        mov rax, r14
         add r14, 7
+        cmp r14, rax
+        jb get_oom
         mov rax, -8
         and r14, rax
         mov r15, r14
         add r15, r12
+        cmp r15, r14
+        jb get_oom
         mov rax, [rdx + ArenaFrame.arena_length]
         cmp r15, rax
-        jle frame_has_space
+        jbe frame_has_space
+
+get_oom:
         call _wrela_memory_oom
 
 frame_has_space:
         mov [rdx + ArenaFrame.next_offset], r15
         mov r11, [rdx + ArenaFrame.arena_base]
+        mov rax, r11
         add r11, r14
+        cmp r11, rax
+        jb get_oom
 
         mov r14, r12
         mov r15, r11
 
 get_copy_loop:
         cmp r12, 0
-        jle get_copy_done
+        je get_copy_done
         mov al, [r13]
         mov [r15], al
         add r13, 1

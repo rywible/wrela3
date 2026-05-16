@@ -1,6 +1,8 @@
 package sem
 
 import (
+	"strconv"
+
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/source"
@@ -34,12 +36,23 @@ type Lifetime struct {
 }
 
 type MethodLifetimeSummary struct {
-	ReturnFromParam int
-	ReturnKind      LifetimeKind
-	ReturnStatic    bool
-	ReturnRoot      bool
-	Terminates      bool
-	Invalid         bool
+	ReturnFromParam    int
+	ReturnFromReceiver bool
+	ReturnKind         LifetimeKind
+	ReturnStatic       bool
+	ReturnRoot         bool
+	RootRequirements   []LifetimeRequirement
+	Terminates         bool
+	Invalid            bool
+}
+
+type LifetimeRequirement struct {
+	FromParam      int
+	FromReceiver   bool
+	TargetParam    int
+	TargetReceiver bool
+	TargetRoot     bool
+	Kind           LifetimeKind
 }
 
 type methodLifetimeTarget struct {
@@ -48,6 +61,16 @@ type methodLifetimeTarget struct {
 	Method     ast.MethodDecl
 	ReturnType *Type
 	Context    ContextKind
+}
+
+// Method-summary checking uses negative synthetic scopes for abstract lifetimes.
+// Keep the receiver sentinel well away from explicit parameter sentinels
+// (which start at -1 and count downward).
+const methodReceiverLifetimeScope = -1 << 30
+
+type placeConstructorAllowance struct {
+	expr *ast.ConstructorExpr
+	used bool
 }
 
 func ClassifyMemoryType(t *Type) MemoryKind {
@@ -163,12 +186,15 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 	scope := c.newMethodLifetimeScope(moduleName, typ, method)
 	prev := c.currentMethodSummary
 	prevPhase := c.currentPhase
+	prevType := c.currentType
 	c.currentMethodSummary = &summary
 	c.currentPhase = method.Name
+	c.currentType = typ
 	c.activeMethodSummaries[key] = true
 	terminates := c.checkStmtList(moduleName, method.Body, scope, target.ReturnType, target.Context)
 	summary.Terminates = terminates
 	delete(c.activeMethodSummaries, key)
+	c.currentType = prevType
 	c.currentPhase = prevPhase
 	c.currentMethodSummary = prev
 	c.methodLifetimeSummaries[key] = summary
@@ -186,7 +212,7 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 	scope := NewScope(nil)
 	if len(method.Params) > 0 && method.Params[0].Name == "self" {
 		scope.Define("self", typ)
-		scope.DefineLifetime("self", Lifetime{Kind: LifetimeExecutorRoot})
+		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
 	}
 	explicitIndex := 0
 	for _, p := range method.Params {
@@ -197,12 +223,26 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		scope.Define(p.Name, paramType)
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else if parameterCanCarryHiddenLifetime(paramType) {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeExecutorRoot})
 		}
 		explicitIndex++
 	}
 	return scope
+}
+
+func parameterCanCarryHiddenLifetime(typ *Type) bool {
+	return typeCanCarryHiddenLifetime(typ) || primitiveCanCarryHiddenLifetime(typ)
+}
+
+func typeCanCarryHiddenLifetime(typ *Type) bool {
+	return typ != nil && (typ.Kind == KindData || typ.Kind == KindClass || ClassifyMemoryType(typ) == MemoryKindFrameArena)
+}
+
+func primitiveCanCarryHiddenLifetime(typ *Type) bool {
+	return typ != nil && typ.Kind == KindPrimitive && (typ.Name == "PhysicalAddress" || typ.Name == "VirtualAddress")
 }
 
 func (c *checker) recordReturnLifetime(span source.Span, lifetime Lifetime) {
@@ -212,15 +252,30 @@ func (c *checker) recordReturnLifetime(span source.Span, lifetime Lifetime) {
 	summary := c.currentMethodSummary
 	switch {
 	case lifetime.Kind == LifetimeStatic:
-		if summary.ReturnFromParam >= 0 {
+		if summary.ReturnFromParam >= 0 || summary.ReturnFromReceiver {
 			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
 			summary.Invalid = true
 			return
 		}
 		summary.ReturnStatic = true
+	case isMethodReceiverLifetime(lifetime):
+		if summary.ReturnRoot || summary.ReturnStatic || summary.ReturnFromParam >= 0 {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+			return
+		}
+		if !summary.ReturnFromReceiver {
+			summary.ReturnFromReceiver = true
+			summary.ReturnKind = lifetime.Kind
+			return
+		}
+		if summary.ReturnKind != lifetime.Kind {
+			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
+			summary.Invalid = true
+		}
 	case (lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) && lifetime.Scope < 0:
 		paramIndex := -lifetime.Scope - 1
-		if summary.ReturnRoot || summary.ReturnStatic {
+		if summary.ReturnRoot || summary.ReturnStatic || summary.ReturnFromReceiver {
 			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
 			summary.Invalid = true
 			return
@@ -238,13 +293,24 @@ func (c *checker) recordReturnLifetime(span source.Span, lifetime Lifetime) {
 		c.error(span, diag.SEM0024, "frame value cannot escape")
 		summary.Invalid = true
 	default:
-		if summary.ReturnFromParam >= 0 {
+		if summary.ReturnFromParam >= 0 || summary.ReturnFromReceiver {
 			c.error(span, diag.SEM0024, "method returns incompatible frame lifetimes")
 			summary.Invalid = true
 			return
 		}
 		summary.ReturnRoot = true
 	}
+}
+
+func isMethodReceiverLifetime(lifetime Lifetime) bool {
+	return (lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) &&
+		lifetime.Scope == methodReceiverLifetimeScope
+}
+
+func isAbstractParamLifetime(lifetime Lifetime) bool {
+	return (lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) &&
+		lifetime.Scope < 0 &&
+		lifetime.Scope != methodReceiverLifetimeScope
 }
 
 func callArgForParam(method *Method, args []ast.NamedArg, paramIndex int) ast.Expr {
@@ -396,6 +462,9 @@ func (c *checker) assignmentTargetLifetime(expr ast.Expr, scope *Scope) Lifetime
 		return Lifetime{Kind: LifetimeExecutorRoot}
 	case *ast.FieldExpr:
 		if name, ok := target.Base.(*ast.NameExpr); ok && name.Name == "self" {
+			if c.currentMethodSummary != nil {
+				return c.lifetimeOfExpr(target.Base, scope)
+			}
 			return Lifetime{Kind: LifetimeExecutorRoot}
 		}
 		return c.lifetimeOfExpr(target.Base, scope)
@@ -406,8 +475,43 @@ func (c *checker) assignmentTargetLifetime(expr ast.Expr, scope *Scope) Lifetime
 
 func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifetime) {
 	if c.lifetimeShorterThan(value, target) {
+		if c.recordLifetimeRequirement(value, target) {
+			return
+		}
 		c.error(span, diag.SEM0025, "frame value cannot be stored")
 	}
+}
+
+func (c *checker) recordLifetimeRequirement(value, target Lifetime) bool {
+	if c.currentMethodSummary == nil {
+		return false
+	}
+	requirement := LifetimeRequirement{FromParam: -1, TargetParam: -1, Kind: value.Kind}
+	switch {
+	case isMethodReceiverLifetime(value):
+		requirement.FromReceiver = true
+	case isAbstractParamLifetime(value):
+		requirement.FromParam = -value.Scope - 1
+	default:
+		return false
+	}
+	switch {
+	case target.Kind == LifetimeExecutorRoot:
+		requirement.TargetRoot = true
+	case isMethodReceiverLifetime(target):
+		requirement.TargetReceiver = true
+	case isAbstractParamLifetime(target):
+		requirement.TargetParam = -target.Scope - 1
+	default:
+		return false
+	}
+	for _, existing := range c.currentMethodSummary.RootRequirements {
+		if existing == requirement {
+			return true
+		}
+	}
+	c.currentMethodSummary.RootRequirements = append(c.currentMethodSummary.RootRequirements, requirement)
+	return true
 }
 
 func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target Lifetime) bool {
@@ -418,9 +522,7 @@ func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target 
 	return false
 }
 
-func (c *checker) pushFrameLifetime(name string, span source.Span, parentLifetime Lifetime) int {
-	_ = name
-	_ = span
+func (c *checker) pushFrameLifetime(parentLifetime Lifetime) int {
 	c.nextFrameScope++
 	id := c.nextFrameScope
 	parent := 0
@@ -435,9 +537,12 @@ func (c *checker) pushFrameLifetime(name string, span source.Span, parentLifetim
 	return id
 }
 
-func (c *checker) popFrameLifetime(id int) {
-	_ = id
+func (c *checker) popFrameLifetime(id int, span source.Span) {
 	if len(c.frameLifetimeStack) == 0 {
+		return
+	}
+	if top := c.frameLifetimeStack[len(c.frameLifetimeStack)-1]; top != id {
+		c.error(span, diag.CG0001, "frame lifetime stack mismatch")
 		return
 	}
 	c.frameLifetimeStack = c.frameLifetimeStack[:len(c.frameLifetimeStack)-1]
@@ -477,6 +582,45 @@ func (c *checker) lifetimeShorterThan(value, target Lifetime) bool {
 	return true
 }
 
+func (c *checker) combineLifetime(span source.Span, current, next Lifetime) Lifetime {
+	if !isScopedLifetime(next) {
+		return current
+	}
+	if !isScopedLifetime(current) {
+		return next
+	}
+	if current.Scope == next.Scope {
+		return stricterSameScopeLifetime(current, next)
+	}
+	currentFlowsToNext := !c.lifetimeShorterThan(current, next)
+	nextFlowsToCurrent := !c.lifetimeShorterThan(next, current)
+	switch {
+	case currentFlowsToNext && !nextFlowsToCurrent:
+		return next
+	case nextFlowsToCurrent && !currentFlowsToNext:
+		return current
+	case currentFlowsToNext && nextFlowsToCurrent:
+		return stricterSameScopeLifetime(current, next)
+	default:
+		c.error(span, diag.SEM0025, "frame value cannot be stored")
+		return current
+	}
+}
+
+func isScopedLifetime(lifetime Lifetime) bool {
+	return lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy
+}
+
+func stricterSameScopeLifetime(a, b Lifetime) Lifetime {
+	if a.Kind == LifetimeCacheCopy || b.Kind == LifetimeCacheCopy {
+		return Lifetime{Kind: LifetimeCacheCopy, Scope: a.Scope}
+	}
+	if a.Kind == LifetimeCacheLookup || b.Kind == LifetimeCacheLookup {
+		return Lifetime{Kind: LifetimeCacheLookup, Scope: a.Scope}
+	}
+	return a
+}
+
 func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
 	recvType := c.typeExpr(moduleName, expr.Receiver, scope, ctx)
 	if !IsArenaType(recvType) {
@@ -501,7 +645,14 @@ func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, 
 			c.error(expr.Args[0].Value.Span(), diag.SEM0026, "place argument must be a constructor expression")
 			return nil
 		}
+		prevAllowPlaceConstructor := c.allowPlaceConstructor
+		c.allowPlaceConstructor = &placeConstructorAllowance{expr: cons}
 		typ := c.typeConstructorExpr(moduleName, cons, scope, ctx)
+		c.allowPlaceConstructor = prevAllowPlaceConstructor
+		valueLifetime := c.lifetimeOfExpr(cons, scope)
+		if !c.rejectCacheEscape(cons.SpanV, valueLifetime, receiverLifetime) {
+			c.rejectIfLifetimeEscapes(cons.SpanV, valueLifetime, receiverLifetime)
+		}
 		c.rememberLifetime(expr, receiverLifetime)
 		return typ
 	case "reserve":
@@ -527,4 +678,23 @@ func (c *checker) requireReserveArgs(moduleName string, expr *ast.CallExpr, scop
 	if alignType != nil && !typesCompatible(u64, alignType) {
 		c.error(expr.Args[1].Value.Span(), diag.SEM0027, "reserve length and align must be U64")
 	}
+	if value, ok := unsignedIntegerLiteral(expr.Args[1].Value); ok && !isPowerOfTwo(value) {
+		c.error(expr.Args[1].Value.Span(), diag.SEM0027, "reserve align must be a non-zero power of two")
+	}
+}
+
+func unsignedIntegerLiteral(expr ast.Expr) (uint64, bool) {
+	lit, ok := expr.(*ast.IntLiteral)
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(lit.Value, 0, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func isPowerOfTwo(value uint64) bool {
+	return value != 0 && value&(value-1) == 0
 }

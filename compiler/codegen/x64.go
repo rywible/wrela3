@@ -985,7 +985,11 @@ func emitLoadValue(e *Emitter, frame Frame, value ir.Value, dst asm.Reg) {
 	case *ir.ConstInt:
 		emitMovImmToReg(e, dst, int64(c.Value))
 	default:
-		emitLoadSlotToReg(e, dst, slot, valueWidthBits(e.ctx, value))
+		width := valueWidthBits(e.ctx, value)
+		if width < 64 {
+			emitMovImmToReg(e, dst, 0)
+		}
+		emitLoadSlotToReg(e, dst, slot, width)
 	}
 }
 
@@ -1239,13 +1243,13 @@ func emitFrameBegin(e *Emitter, op *ir.FrameBegin, frame Frame) {
 	emitLoadValue(e, frame, op.Length, length)
 	emitRegRegMove(e, end, saved)
 	emitRegRegOp(e, 0x01, end, length)
-	emitTrapOnOverflow(e)
+	emitTrapOnCarry(e)
 	emitLoadMemToReg(e, limit, parent, 8, 64)
 	emitTrapIfAbove(e, end, limit)
 
 	emitLoadMemToReg(e, base, parent, 0, 64)
 	emitRegRegOp(e, 0x01, base, saved)
-	emitTrapOnOverflow(e)
+	emitTrapOnCarry(e)
 	emitStoreSlotFromReg(e, base, objectSlot, 64)
 	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
 	emitMovImmToReg(e, saved, 0)
@@ -1352,24 +1356,25 @@ func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg,
 	}
 	emitLoadMemToReg(e, next, arena, 16, 64)
 	emitTrapIfZero(e, align)
+	emitTrapIfNonPowerOfTwo(e, align)
 	emitRegRegMove(e, end, align)
 	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
 		asm.RegOperand{Reg: end},
 		asm.ImmOperand{Value: 1},
 	}})
 	emitRegRegOp(e, 0x01, next, end)
-	emitTrapOnOverflow(e)
+	emitTrapOnCarry(e)
 	emitNegReg(e, align)
 	emitRegRegOp(e, 0x21, next, align)
 	emitRegRegMove(e, end, next)
 	emitRegRegOp(e, 0x01, end, length)
-	emitTrapOnOverflow(e)
+	emitTrapOnCarry(e)
 	emitLoadMemToReg(e, limit, arena, 8, 64)
 	emitTrapIfAbove(e, end, limit)
 
 	emitLoadMemToReg(e, base, arena, 0, 64)
 	emitRegRegOp(e, 0x01, base, next)
-	emitTrapOnOverflow(e)
+	emitTrapOnCarry(e)
 	emitStoreMemFromReg(e, arena, 16, end, 64)
 	return base, true
 }
@@ -1397,9 +1402,9 @@ func emitTrapIfAbove(e *Emitter, value asm.Reg, limit asm.Reg) {
 	e.bindLabel(ok)
 }
 
-func emitTrapOnOverflow(e *Emitter) {
-	ok := e.newLabel("arena_overflow_ok")
-	e.emitJcc(0x81, ok)
+func emitTrapOnCarry(e *Emitter) {
+	ok := e.newLabel("arena_carry_ok")
+	e.emitJcc(0x83, ok)
 	emitCallReloc(e, "_wrela_memory_oom")
 	e.bindLabel(ok)
 }
@@ -1410,6 +1415,25 @@ func emitTrapIfZero(e *Emitter, value asm.Reg) {
 	emitMovImmToReg(e, zero, 0)
 	emitCmpRegReg(e, value, zero)
 	e.emitJcc(0x85, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+}
+
+func emitTrapIfNonPowerOfTwo(e *Emitter, value asm.Reg) {
+	// Clobbers r11 and rcx. Callers must schedule this before either register
+	// holds a live value.
+	ok := e.newLabel("arena_power_of_two_ok")
+	tmp := asm.MustLookup("r11")
+	emitRegRegMove(e, tmp, value)
+	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
+		asm.RegOperand{Reg: tmp},
+		asm.ImmOperand{Value: 1},
+	}})
+	emitRegRegOp(e, 0x21, tmp, value)
+	zero := asm.MustLookup("rcx")
+	emitMovImmToReg(e, zero, 0)
+	emitCmpRegReg(e, tmp, zero)
+	e.emitJcc(0x84, ok)
 	emitCallReloc(e, "_wrela_memory_oom")
 	e.bindLabel(ok)
 }

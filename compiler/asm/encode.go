@@ -23,6 +23,8 @@ type ExternalCallReloc struct {
 var condOpcode = map[string]byte{
 	"je":  0x84,
 	"jne": 0x85,
+	"jb":  0x82,
+	"jbe": 0x86,
 	"jl":  0x8c,
 	"jle": 0x8e,
 	"jg":  0x8f,
@@ -196,7 +198,7 @@ func encode(instructions []Instruction, allowExternalCalls bool) ([]byte, []Exte
 				Code:    diag.ASM0002,
 				Message: "unsupported jmp form",
 			})
-		case "je", "jne", "jl", "jle", "jg", "jge":
+		case "je", "jne", "jb", "jbe", "jl", "jle", "jg", "jge":
 			b, ok := encodeCondJmp(ins, start, &fixups)
 			if ok {
 				out = append(out, b...)

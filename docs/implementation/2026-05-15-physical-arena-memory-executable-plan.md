@@ -144,7 +144,7 @@ tests/fixtures/negative/*.wrela
 compiler/ir/ir.go
 compiler/ir/lower.go
 compiler/ir/memory_test.go
-  Adds FrameBegin, FrameEnd, ArenaReserve, ArenaPlace, and MemoryTrap operations.
+  Adds FrameBegin, FrameEnd, ArenaReserve, and ArenaPlace operations.
 
 compiler/codegen/x64.go
 compiler/codegen/memory_test.go
@@ -308,6 +308,7 @@ class CacheArena {
     slot_count: U64
     slot_size: U64
     next_victim: U64
+    initialized: U64
 }
 
 class ResponseCache {
@@ -879,7 +880,7 @@ module machine.x86_64.cache_memory
 
 use { MutableBytes } from machine.x86_64.executor_memory
 
-class CacheArena { storage: MutableBytes slot_count: U64 slot_size: U64 next_victim: U64 }
+class CacheArena { storage: MutableBytes slot_count: U64 slot_size: U64 next_victim: U64 initialized: U64 }
 `, `
 module user.shadow
 
@@ -2791,9 +2792,6 @@ type ArenaPlace struct {
 func (*ArenaPlace) isValue()     {}
 func (*ArenaPlace) isOperation() {}
 
-type MemoryTrap struct{}
-
-func (*MemoryTrap) isOperation() {}
 ```
 
 Update `valuesDefinedBy` for these operations:
@@ -2826,7 +2824,7 @@ git add compiler/ir/ir.go compiler/ir/memory_test.go
 git commit -m "feat: add arena memory ir operations -Codex Automated"
 ```
 
-**Acceptance Criteria:** IR has explicit operations for frame begin/end, reserve, place, and memory trap.
+**Acceptance Criteria:** IR has explicit operations for frame begin/end, reserve, and place; the backend emits the `_wrela_memory_oom` trap target.
 
 ### Task 12: Lower WithStmt And Arena Intrinsics To IR
 
@@ -3543,744 +3541,93 @@ git commit -m "feat: keep identity paging as target glue -Codex Automated"
 ### Task 16: CacheArena Source Surface
 
 **Files:**
-- Create: `wrela/machine/x86_64/cache_memory.wrela`
+- Create/modify: `wrela/machine/x86_64/cache_memory.wrela`
 - Modify: `compiler/sem/uefi_source_shape_test.go`
+- Modify: `compiler/codegen/uefi_source_codegen_test.go`
 
 **Purpose:** Add an explicit bounded cache memory personality separate from root and frame arenas.
 
-- [ ] **Step 1: Write failing source-shape test**
+`CacheArena` owns a bounded `MutableBytes` region and exposes fixed-slot FIFO behavior. Its slot layout is:
 
-Add:
-
-```go
-func TestCacheMemorySourceShape(t *testing.T) {
-    modules := parseUEFIModuleSet(t)
-    index := mustBuildIndex(t, modules)
-
-    cache := moduleType(t, index, "machine.x86_64.cache_memory", "CacheArena")
-    lookup := moduleType(t, index, "machine.x86_64.cache_memory", "CacheLookup")
-    if fieldTypeName(t, cache, "slot_count") != "U64" || fieldTypeName(t, cache, "slot_size") != "U64" {
-        t.Fatalf("CacheArena must expose slot_count and slot_size")
-    }
-    if fieldTypeName(t, lookup, "hit") != "Bool" || fieldTypeName(t, lookup, "bytes") != "Bytes" {
-        t.Fatalf("CacheLookup must expose hit and bytes")
-    }
-}
+```text
+valid: U64 at +0
+key: U64 at +8
+length: U64 at +16
+payload bytes at +24
 ```
 
-- [ ] **Step 2: Run test to verify failure**
-
-Run: `go test ./compiler/sem -run TestCacheMemorySourceShape -v`
-
-Expected: FAIL with `missing machine.x86_64.cache_memory.CacheArena` because the canonical UEFI module set does not yet include cache memory source.
-
-- [ ] **Step 3: Register cache source in the UEFI source test helper**
-
-In `parseUEFIModuleSet`, add the cache source path immediately after `executor_memory.wrela`:
-
-```go
-filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
-```
-
-This is required because `TestCacheMemorySourceShape` uses the same canonical platform module set as the rest of the source-shape tests.
-
-Do Steps 3 and 4 in the same edit. Do not run tests after registering the path but before creating the file; the helper will point at a missing file during that intermediate state.
-
-- [ ] **Step 4: Create source file**
-
-Create `wrela/machine/x86_64/cache_memory.wrela` with these storage contracts:
+The source surface is:
 
 ```wrela
 module machine.x86_64.cache_memory
 
-use { Bytes, MutableBytes } from machine.x86_64.executor_memory
+use { ArenaFrame, Bytes, MutableBytes } from machine.x86_64.executor_memory
 
-data CacheLookup {
-    hit: Bool
-    bytes: Bytes
-}
-
-data CachePutResult {
-    stored: Bool
-    evicted: U64
-}
+data CacheLookup { hit: Bool bytes: Bytes }
+data CachePutResult { stored: Bool evicted: U64 }
 
 class CacheArena {
     storage: MutableBytes
     slot_count: U64
     slot_size: U64
     next_victim: U64
+    initialized: U64
+
+    asm fn clear(self)
+    asm fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult
+    asm fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup
 }
 ```
 
-Task 18 adds the final `get_bytes`, `put_bytes`, and `ResponseCache` methods in the same file.
+`initialized` prevents fresh or uninitialized cache memory from false-hitting. `clear`, `put_bytes`, and `get_bytes` all establish valid-bit metadata before lookup can succeed.
 
-- [ ] **Step 5: Run verification**
-
-Run:
-
-```bash
-go test ./compiler/sem -run TestCacheMemorySourceShape -v
-git diff --check
-```
-
-Expected: focused source-shape test PASSes. Full UEFI semantic verification is covered by Task 15 after the canonical frame intrinsic skip exists.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add wrela/machine/x86_64/cache_memory.wrela compiler/sem/uefi_source_shape_test.go
-git commit -m "feat: add cache arena source contracts -Codex Automated"
-```
-
-**Acceptance Criteria:** Cache memory has explicit source types; cache storage is a bounded `MutableBytes`; lookup returns copied `Bytes`, not stable cache references.
+**Acceptance Criteria:** Cache memory has explicit source types; cache storage is a bounded `MutableBytes`; lookup returns copied `Bytes`, not stable cache references; empty or uninitialized slots cannot hit.
 
 ### Task 17: Semantic Rules For Cache Lookup And Put
 
 **Files:**
-- Modify: `compiler/sem/check.go`
 - Modify: `compiler/sem/memory.go`
+- Modify: `compiler/sem/check.go`
 - Modify: `compiler/sem/memory_test.go`
+- Modify: `compiler/sem/memory_negative_test.go`
 
-**Purpose:** Enforce that cache lookup copies into a frame and cache entries cannot escape as stable references.
+**Purpose:** Make cache lookup results carry the destination frame lifetime and reject stable references to cache-backed bytes.
 
-- [ ] **Step 1: Write failing semantic test**
+Rules:
+- `CacheArena.get_bytes(key, into)` requires `into` to be an `ArenaFrame`.
+- Named and positional calls use the same argument mapping as normal method calls.
+- The returned `CacheLookup` and its `.bytes` field carry the `into` frame lifetime.
+- A cache lookup result or its bytes cannot be stored into executor/root state or a longer-lived frame.
+- `put_bytes` accepts `Bytes` but does not preserve a stable reference to cache storage.
 
-Add:
-
-```go
-func TestCacheLookupRequiresFrameDestination(t *testing.T) {
-    modules := parseModulesForTest(t, `
-module machine.x86_64.executor_memory
-
-data Bytes { address: PhysicalAddress length: U64 }
-data MutableBytes { address: PhysicalAddress length: U64 }
-class ArenaFrame { arena_base: PhysicalAddress arena_length: U64 next_offset: U64 }
-class ExecutorMemory { arena_base: PhysicalAddress arena_length: U64 next_offset: U64 }
-`, `
-module machine.x86_64.cache_memory
-
-use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
-
-data CacheLookup { hit: Bool bytes: Bytes }
-data CachePutResult { stored: Bool evicted: U64 }
-class CacheArena {
-    storage: MutableBytes
-    slot_count: U64
-    slot_size: U64
-    next_victim: U64
-    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
-    fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult { return CachePutResult(stored = true, evicted = 0) }
-}
-class Bad {
-    cache: CacheArena
-    memory: ExecutorMemory
-    fn bad(self) -> CacheLookup {
-        return self.cache.get_bytes(key = 1, into = self.memory)
-    }
-}
-`)
-    index, ds := BuildIndex(modules)
-    ds = filterMissingImageDiagnostic(ds)
-    if len(ds) != 0 {
-        t.Fatalf("index diagnostics: %#v", ds)
-    }
-    _, diags := Check(index, modules)
-    if !hasCode(diags, diag.SEM0030) {
-        t.Fatalf("expected SEM0030, got %#v", diags)
-    }
-}
-```
-
-Add an escape test for cache lookup bytes:
-
-```go
-func TestCacheLookupBytesCannotEscapeFrame(t *testing.T) {
-    modules := parseModulesForTest(t, `
-module machine.x86_64.executor_memory
-
-data Bytes { address: PhysicalAddress length: U64 }
-data MutableBytes { address: PhysicalAddress length: U64 }
-class ArenaFrame { arena_base: PhysicalAddress arena_length: U64 next_offset: U64 }
-class ExecutorMemory {
-    arena_base: PhysicalAddress
-    arena_length: U64
-    next_offset: U64
-    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
-}
-`, `
-module machine.x86_64.cache_memory
-
-use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
-
-data CacheLookup { hit: Bool bytes: Bytes }
-data CachePutResult { stored: Bool evicted: U64 }
-class CacheArena {
-    storage: MutableBytes
-    slot_count: U64
-    slot_size: U64
-    next_victim: U64
-    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
-}
-class Bad {
-    cache: CacheArena
-    memory: ExecutorMemory
-    saved: Bytes
-    fn bad(self) {
-        with self.memory.frame(length = 64) as tick {
-            let found = self.cache.get_bytes(key = 1, into = tick)
-            self.saved = found.bytes
-        }
-    }
-}
-`)
-    index, ds := BuildIndex(modules)
-    ds = filterMissingImageDiagnostic(ds)
-    if len(ds) != 0 {
-        t.Fatalf("index diagnostics: %#v", ds)
-    }
-    _, diags := Check(index, modules)
-    if !hasCode(diags, diag.SEM0031) {
-        t.Fatalf("expected SEM0031, got %#v", diags)
-    }
-}
-```
-
-Add a direct `CacheLookup` escape test. This catches returning the wrapper itself before `.bytes` is accessed:
-
-```go
-func TestCacheLookupValueCannotEscapeFrame(t *testing.T) {
-    modules := parseModulesForTest(t, `
-module machine.x86_64.executor_memory
-
-data Bytes { address: PhysicalAddress length: U64 }
-data MutableBytes { address: PhysicalAddress length: U64 }
-class ArenaFrame { arena_base: PhysicalAddress arena_length: U64 next_offset: U64 }
-class ExecutorMemory {
-    arena_base: PhysicalAddress
-    arena_length: U64
-    next_offset: U64
-    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
-}
-`, `
-module machine.x86_64.cache_memory
-
-use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
-
-data CacheLookup { hit: Bool bytes: Bytes }
-class CacheArena {
-    storage: MutableBytes
-    slot_count: U64
-    slot_size: U64
-    next_victim: U64
-    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
-}
-class Bad {
-    cache: CacheArena
-    memory: ExecutorMemory
-    fn bad(self) -> CacheLookup {
-        with self.memory.frame(length = 64) as tick {
-            return self.cache.get_bytes(key = 1, into = tick)
-        }
-    }
-}
-`)
-    index, ds := BuildIndex(modules)
-    ds = filterMissingImageDiagnostic(ds)
-    if len(ds) != 0 {
-        t.Fatalf("index diagnostics: %#v", ds)
-    }
-    _, diags := Check(index, modules)
-    if !hasCode(diags, diag.SEM0031) {
-        t.Fatalf("expected SEM0031, got %#v", diags)
-    }
-}
-```
-
-Add a positional-argument regression for `get_bytes`. This test must pass; it proves the cache intrinsic uses the same named/positional mapping as normal call checking when it finds the `into` argument:
-
-```go
-func TestCacheLookupPositionalIntoUsesFrameLifetime(t *testing.T) {
-    modules := parseModulesForTest(t, `
-module machine.x86_64.executor_memory
-
-data Bytes { address: PhysicalAddress length: U64 }
-data MutableBytes { address: PhysicalAddress length: U64 }
-class ArenaFrame { arena_base: PhysicalAddress arena_length: U64 next_offset: U64 }
-class ExecutorMemory {
-    arena_base: PhysicalAddress
-    arena_length: U64
-    next_offset: U64
-    fn frame(self, length: U64) -> ArenaFrame { return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0) }
-}
-`, `
-module machine.x86_64.cache_memory
-
-use { Bytes, MutableBytes, ArenaFrame, ExecutorMemory } from machine.x86_64.executor_memory
-
-data CacheLookup { hit: Bool bytes: Bytes }
-class CacheArena {
-    storage: MutableBytes
-    slot_count: U64
-    slot_size: U64
-    next_victim: U64
-    fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup { return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0)) }
-}
-class Worker {
-    cache: CacheArena
-    memory: ExecutorMemory
-    fn ok(self) -> never {
-        with self.memory.frame(length = 64) as tick {
-            let found = self.cache.get_bytes(1, tick)
-            let bytes = found.bytes
-        }
-        while true {}
-    }
-}
-`)
-    index, ds := BuildIndex(modules)
-    ds = filterMissingImageDiagnostic(ds)
-    if len(ds) != 0 {
-        t.Fatalf("index diagnostics: %#v", ds)
-    }
-    _, diags := Check(index, modules)
-    if len(diags) != 0 {
-        t.Fatalf("check diagnostics: %#v", diags)
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify failure**
-
-Run: `go test ./compiler/sem -run 'TestCacheLookupRequiresFrameDestination|TestCacheLookupBytesCannotEscapeFrame|TestCacheLookupValueCannotEscapeFrame|TestCacheLookupPositionalIntoUsesFrameLifetime' -v`
-
-Expected: FAIL because normal type mismatch may occur or cache-specific diagnostic is absent.
-
-- [ ] **Step 3: Add cache call checks**
-
-In `typeCallExpr`, after receiver and method resolution but before generic method-summary propagation, handle `CacheArena.get_bytes` as an explicit memory intrinsic. This branch must verify the call arguments, record `LifetimeCacheLookup`, and then return `method.Return` immediately so Task 10's generic summary fallback cannot overwrite the cache lifetime as executor-root:
-
-```go
-if ClassifyMemoryType(recvType) == MemoryKindCacheArena && method.Name == "get_bytes" {
-    c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
-    intoArg := callArgForParam(method, expr.Args, explicitParamIndex(method, "into"))
-    if intoArg == nil {
-        return method.Return
-    }
-    intoType := c.typeExpr(moduleName, intoArg, scope, ctx)
-    if ClassifyMemoryType(intoType) != MemoryKindFrameArena {
-        c.error(expr.SpanV, diag.SEM0030, "cache lookup must copy into ArenaFrame")
-    }
-    c.rememberLifetime(expr, Lifetime{
-        Kind:  LifetimeCacheLookup,
-        Scope: c.lifetimeOfExpr(intoArg, scope).Scope,
-    })
-    return method.Return
-}
-```
-
-Add this helper next to `callArgForParam` from Task 10. It uses the same explicit-parameter indexing convention: `self` is stripped before counting.
-
-```go
-func explicitParamIndex(method *Method, name string) int {
-    if method == nil {
-        return -1
-    }
-    params := method.Params
-    if len(params) > 0 && params[0].Name == "self" {
-        params = params[1:]
-    }
-    for i, param := range params {
-        if param.Name == name {
-            return i
-        }
-    }
-    return -1
-}
-```
-
-Do not use `typeOfNamedArg` or a cache-specific `namedArgExpr` helper here. Positional calls such as `self.cache.get_bytes(1, tick)` are valid if the general argument checker accepts them, and this intrinsic must use the same named/positional mapping as Task 10.
-
-In the existing `lifetimeOfExpr` implementation from Task 9, merge the cache field case into the existing `case *ast.FieldExpr:` before the fallback that returns the base lifetime:
-
-```go
-case *ast.FieldExpr:
-    baseLifetime := c.lifetimeOfExpr(e.Base, scope)
-    if baseLifetime.Kind == LifetimeCacheLookup && e.Field == "bytes" {
-        lifetime := Lifetime{Kind: LifetimeCacheCopy, Scope: baseLifetime.Scope}
-        c.rememberLifetime(e, lifetime)
-        return lifetime
-    }
-    return baseLifetime
-```
-
-If that value is returned or stored into a longer-lived target, emit SEM0031 instead of the generic SEM0024/SEM0025:
-
-```go
-func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target Lifetime) bool {
-    if (lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) && c.lifetimeShorterThan(lifetime, target) {
-        c.error(span, diag.SEM0031, "cache lookup result cannot escape destination frame")
-        return true
-    }
-    return false
-}
-```
-
-Wire `rejectCacheEscape` into the Task 9/10 return and assignment paths. In the existing `ReturnStmt` branch, preserve Task 10's parameter-derived return short-circuit, then call `rejectCacheEscape` before emitting SEM0024:
-
-```go
-lifetime := c.lifetimeOfExpr(s.Value, scope)
-c.recordReturnLifetime(s.Value.Span(), lifetime)
-if c.currentMethodSummary != nil &&
-    (lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) &&
-    lifetime.Scope < 0 {
-    return true
-}
-if lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy {
-    if c.rejectCacheEscape(s.Value.Span(), lifetime, Lifetime{Kind: LifetimeExecutorRoot}) {
-        return true
-    }
-    c.error(s.Value.Span(), diag.SEM0024, "frame value cannot escape with block")
-}
-```
-
-In the existing `AssignStmt` branch, call it before `rejectIfLifetimeEscapes`:
-
-```go
-sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
-targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
-if !c.rejectCacheEscape(s.Value.Span(), sourceLifetime, targetLifetime) {
-    c.rejectIfLifetimeEscapes(s.Value.Span(), sourceLifetime, targetLifetime)
-}
-```
-
-- [ ] **Step 4: Run verification**
-
-Run:
-
-```bash
-go test ./compiler/sem -run 'TestCacheLookupRequiresFrameDestination|TestCacheLookupBytesCannotEscapeFrame|TestCacheLookupValueCannotEscapeFrame|TestCacheLookupPositionalIntoUsesFrameLifetime' -v
-go test ./compiler/sem -v
-git diff --check
-```
-
-Expected: all tests PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add compiler/sem/check.go compiler/sem/memory.go compiler/sem/memory_test.go
-git commit -m "feat: enforce cache frame copy semantics -Codex Automated"
-```
-
-**Acceptance Criteria:** Cache lookup destination must be `ArenaFrame`; named and positional `get_bytes` calls both map the `into` argument correctly; cache lookup bytes carry the destination frame lifetime; stable cache references are impossible in source. The `get_bytes` intrinsic returns before generic method-summary propagation so its `LifetimeCacheLookup` is not overwritten.
+**Acceptance Criteria:** Cache lookup destination must be `ArenaFrame`; named and positional `get_bytes` calls both map the `into` argument correctly; cache lookup bytes carry the destination frame lifetime; stable cache references are impossible in source.
 
 ### Task 18: Fixed-Slot FIFO Cache Assembly
 
 **Files:**
 - Modify: `wrela/machine/x86_64/cache_memory.wrela`
+- Modify: `compiler/asm/*` as needed for unsigned branches
 - Modify: `compiler/codegen/uefi_source_codegen_test.go`
+- Modify: `tests/e2e/fixtures/cache_memory/main.wrela`
+- Modify: `tests/e2e/hello_qemu_test.go`
 
-**Purpose:** Implement default eviction in cache source with deterministic fixed-slot FIFO behavior.
+**Purpose:** Implement the fixed-slot cache and prove it under QEMU.
 
-- [ ] **Step 1: Write failing codegen-shape test**
+Assembly behavior:
+- `clear()` validates that `storage.length` covers `slot_count * (slot_size + 24)`, zeroes valid/key/length metadata for every slot, resets `next_victim`, and marks the cache initialized. A zero-slot cache clears without touching storage.
+- `put_bytes` validates the same storage span, returns `stored = false` for zero-slot, undersized, or oversize values, lazily initializes the cache if needed, writes the FIFO victim slot, and reports `evicted = 1` only when the victim slot was already valid.
+- `get_bytes` validates the same storage span, returns a miss for zero-slot or undersized caches, lazily initializes the cache if needed, requires `valid == 1` before comparing keys, copies hits into the provided frame, writes a nested `Bytes` handle in the return slot, and returns a zero-length miss handle on miss.
+- Frame reservation in `get_bytes` checks unsigned overflow for alignment, length addition, arena capacity, and base-plus-offset before writing.
 
-Add:
-
-```go
-func TestCacheArenaPutBytesContainsEvictionBump(t *testing.T) {
-    checked := parseCheckedUEFIModules(t)
-    method := asmMethodFromSem(t, checked, "machine.x86_64.cache_memory", "CacheArena", "put_bytes")
-    instructions, ds, code := lowerAndEncodeAsmMethod(method)
-    if len(ds) != 0 {
-        t.Fatalf("lower/encode cache put diagnostics: %#v", ds)
-    }
-    if len(code) == 0 {
-        t.Fatal("cache put compiled to empty code")
-    }
-    for _, label := range []string{"slot_offset_loop", "slot_ready", "copy_loop", "copy_done", "victim_ready"} {
-        if !hasAsmLabel(instructions, label) {
-            t.Fatalf("cache put missing label %q in:\n%s", label, method.Body)
-        }
-    }
-    signatures := strings.Join(instructionSignatures(instructions), "\n")
-    for _, want := range []string{
-        "add r13 imm",
-        "mov r11 [r11]",
-        "mov [r11] rsi",
-        "mov [r11+8] r12",
-        "mov [rdi+24] r11",
-        "mov [r10] imm",
-    } {
-        if !strings.Contains(signatures, want) {
-            t.Fatalf("cache put missing lowered instruction %q in:\n%s", want, signatures)
-        }
-    }
-}
-
-func TestCacheArenaGetBytesCopiesIntoFrame(t *testing.T) {
-    checked := parseCheckedUEFIModules(t)
-    method := asmMethodFromSem(t, checked, "machine.x86_64.cache_memory", "CacheArena", "get_bytes")
-    instructions, ds := lowerAsmMethodInstructions(method)
-    if len(ds) != 0 {
-        t.Fatalf("lower cache get diagnostics: %#v", ds)
-    }
-    for _, label := range []string{"get_slot_loop", "get_hit", "frame_has_space", "get_copy_loop", "get_copy_done", "get_miss"} {
-        if !hasAsmLabel(instructions, label) {
-            t.Fatalf("cache get missing label %q in:\n%s", label, method.Body)
-        }
-    }
-
-    unit, ds := compileAsmMethodUnit(method)
-    if len(ds) != 0 {
-        t.Fatalf("compile cache get diagnostics: %#v", ds)
-    }
-    foundOOM := false
-    for _, rel := range unit.CallReloc {
-        if rel.Symbol == "_wrela_memory_oom" {
-            foundOOM = true
-            break
-        }
-    }
-    if !foundOOM {
-        t.Fatalf("cache get must call _wrela_memory_oom on frame reserve failure: %#v", unit.CallReloc)
-    }
-
-    signatures := strings.Join(instructionSignatures(instructions), "\n")
-    for _, want := range []string{
-        "mov r8 [r8]",
-        "mov [rdx+16] r15",
-        "mov [r10] imm",
-        "mov [r10+8] r11",
-        "mov [r10+16] r14",
-    } {
-        if !strings.Contains(signatures, want) {
-            t.Fatalf("cache get missing lowered instruction %q in:\n%s", want, signatures)
-        }
-    }
-}
-```
-
-`lowerAndEncodeAsmMethod` and `hasAsmLabel` already exist in `compiler/codegen` and are available to this same-package test; do not create new duplicate helpers.
-
-- [ ] **Step 2: Run test to verify failure**
-
-Run: `go test ./compiler/codegen -run 'TestCacheArena(PutBytesContainsEvictionBump|GetBytesCopiesIntoFrame)' -v`
-
-Expected: FAIL because cache asm still halts.
-
-- [ ] **Step 3: Implement fixed-slot layout**
-
-First, register `wrela/machine/x86_64/cache_memory.wrela` in `parseUEFIModuleFiles` inside `compiler/codegen/uefi_source_codegen_test.go`, immediately after `executor_memory.wrela`, so `parseCheckedUEFIModules(t)` sees the cache source:
-
-```go
-filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
-```
-
-Slot layout:
-
-```text
-slot bytes:
-  key: U64 at +0
-  length: U64 at +8
-  payload: slot_size bytes at +16
-```
-
-`CacheArena.storage.length` must equal or exceed `slot_count * (slot_size + 16)`.
-
-Put behavior:
-
-```text
-if bytes.length > slot_size:
-    return CachePutResult(stored = false, evicted = 0)
-slot_index = next_victim
-slot_address = storage.address + slot_index * (slot_size + 16)  // source-level view; asm loads MutableBytes handle first
-write key and length
-copy bytes.length payload bytes
-next_victim = (next_victim + 1) mod slot_count
-return CachePutResult(stored = true, evicted = 1)
-```
-
-Get behavior:
-
-```text
-for each slot:
-    if slot.key == key:
-        out = into.reserve(length = slot.length, align = 8)
-        copy slot.length bytes into out
-        return CacheLookup(hit = true, bytes = Bytes(address = out.address, length = out.length))
-return CacheLookup(hit = false, bytes = Bytes(address = 0, length = 0))
-```
-
-Use Wrela asm loops in `get_bytes` and `put_bytes`. The methods live in `machine.x86_64.cache_memory`, so asm is allowed by existing edge-capability rules. Add the final `ResponseCache` wrapper from Section 4 in the same edit.
-
-Use this implementation strategy. The current assembler does not support `imul`, `rep movsb`, indexed addressing with scale, parameter field operands such as `bytes.length`, non-self field operands such as `into.next_offset`, or nested receiver operands such as `self.storage.address`. Compute slot addresses with repeated addition and copy payloads byte by byte.
-
-The supported operand forms used below are:
-
-```text
-self.field                 receiver field only; lowers through rdi
-[reg]                      memory at register
-[reg + immediate]          memory at register plus byte offset
-[reg + Type.field]         memory at register plus field offset
-plain parameter name       parameter register, for example key -> rsi and bytes/into -> rdx
-```
-
-For compound values passed by pointer, always load fields through their parameter register plus a type field offset. For this task, `bytes` and `into` are both passed in `rdx`, so use `[rdx + Bytes.length]`, `[rdx + Bytes.address]`, `[rdx + ArenaFrame.next_offset]`, `[rdx + ArenaFrame.arena_length]`, and `[rdx + ArenaFrame.arena_base]`.
-
-For `CacheArena.storage`, remember that a `MutableBytes` data field is stored as a handle-sized field in `CacheArena`, not inline bytes. First load the `MutableBytes` handle from `[rdi + CacheArena.storage]`, then load the physical buffer address from `[handle + MutableBytes.address]`. Writing slots directly to the handle corrupts the `MutableBytes` record.
-
-```wrela
-asm fn put_bytes(self, key: U64, bytes: Bytes) -> CachePutResult {
-    mov r11, [rdi + CacheArena.slot_size]
-    mov r12, [rdx + Bytes.length]
-    cmp r12, r11
-    jle put_fits
-    mov [r10], 0
-    mov [r10 + 8], 0
-    mov rax, r10
-    ret
-
-put_fits:
-    mov r11, [rdi + CacheArena.storage]
-    mov r11, [r11 + MutableBytes.address]
-    mov r12, [rdi + CacheArena.next_victim]
-    mov r13, [rdi + CacheArena.slot_size]
-    add r13, 16
-
-slot_offset_loop:
-    cmp r12, 0
-    jle slot_ready
-    add r11, r13
-    sub r12, 1
-    jmp slot_offset_loop
-
-slot_ready:
-    mov [r11], rsi
-    mov r12, [rdx + Bytes.length]
-    mov [r11 + 8], r12
-    mov r13, [rdx + Bytes.address]
-    add r11, 16
-
-copy_loop:
-    cmp r12, 0
-    jle copy_done
-    mov al, [r13]
-    mov [r11], al
-    add r13, 1
-    add r11, 1
-    sub r12, 1
-    jmp copy_loop
-
-copy_done:
-    mov r11, [rdi + CacheArena.next_victim]
-    add r11, 1
-    mov r12, [rdi + CacheArena.slot_count]
-    cmp r11, r12
-    jl victim_ready
-    mov r11, 0
-
-victim_ready:
-    mov [rdi + CacheArena.next_victim], r11
-    mov [r10], 1
-    mov [r10 + 8], 1
-    mov rax, r10
-    ret
-}
-```
-
-Add the complete `get_bytes` body. Do not replace this with prose; this is the executable contract for lookup, frame reservation, OOM behavior, and return-slot writes:
-
-```wrela
-asm fn get_bytes(self, key: U64, into: ArenaFrame) -> CacheLookup {
-    mov r8, [rdi + CacheArena.storage]
-    mov r8, [r8 + MutableBytes.address]
-    mov r9, [rdi + CacheArena.slot_count]
-    mov r15, [rdi + CacheArena.slot_size]
-    add r15, 16
-
-get_slot_loop:
-    cmp r9, 0
-    jle get_miss
-    mov rax, [r8]
-    cmp rax, rsi
-    je get_hit
-    add r8, r15
-    sub r9, 1
-    jmp get_slot_loop
-
-get_hit:
-    mov r12, [r8 + 8]
-    mov r13, r8
-    add r13, 16
-
-    mov r14, [rdx + ArenaFrame.next_offset]
-    add r14, 7
-    mov rax, -8
-    and r14, rax
-    mov r15, r14
-    add r15, r12
-    mov rax, [rdx + ArenaFrame.arena_length]
-    cmp r15, rax
-    jle frame_has_space
-    call _wrela_memory_oom
-
-frame_has_space:
-    mov [rdx + ArenaFrame.next_offset], r15
-    mov r11, [rdx + ArenaFrame.arena_base]
-    add r11, r14
-
-    mov r14, r12
-    mov r15, r11
-
-get_copy_loop:
-    cmp r12, 0
-    jle get_copy_done
-    mov al, [r13]
-    mov [r15], al
-    add r13, 1
-    add r15, 1
-    sub r12, 1
-    jmp get_copy_loop
-
-get_copy_done:
-    mov [r10], 1
-    mov [r10 + 8], r11
-    mov [r10 + 16], r14
-    mov rax, r10
-    ret
-
-get_miss:
-    mov [r10], 0
-    mov [r10 + 8], 0
-    mov [r10 + 16], 0
-    mov rax, r10
-    ret
-}
-```
-
-Return-slot layout for `CacheLookup` is fixed for this task: `hit` at `+0`, `bytes.address` at `+8`, and `bytes.length` at `+16`.
-
-- [ ] **Step 4: Run verification**
-
-Run:
+Verification:
 
 ```bash
-go test ./compiler/codegen -run 'TestCacheArena(PutBytesContainsEvictionBump|GetBytesCopiesIntoFrame)' -v
-go test ./compiler/codegen -run UefiSource -v
+go test ./compiler/codegen -run TestCacheArena -v
+go test ./tests/e2e -run TestCacheMemoryQEMU -v
 git diff --check
 ```
 
-Expected: all tests PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add wrela/machine/x86_64/cache_memory.wrela compiler/codegen/uefi_source_codegen_test.go
-git commit -m "feat: implement fixed slot cache arena -Codex Automated"
-```
-
-**Acceptance Criteria:** Cache put never calls memory OOM for normal full-cache insertion; it evicts the FIFO victim; cache get copies into the provided frame.
+**Acceptance Criteria:** Cache put never calls memory OOM for normal full-cache insertion; it evicts the FIFO victim; cache get copies into the provided frame; empty cache lookup for key 0 does not hit; zero-length values round-trip; stale evicted entries are not returned; zero-slot and undersized cache regions do not write past backing storage.
 
 ---
 
@@ -4865,32 +4212,67 @@ func place[T any](arena *ArenaHeader, value T, size, align uint64) *T {
 Cache put:
 
 ```go
+func cacheStorageFits(cache *CacheArena) bool {
+    if cache.slotCount == 0 {
+        return false
+    }
+    entrySize := cache.slotSize + 24
+    if entrySize < cache.slotSize {
+        return false
+    }
+    required := uint64(0)
+    for slot := uint64(0); slot < cache.slotCount; slot++ {
+        next := required + entrySize
+        if next < required {
+            return false
+        }
+        required = next
+    }
+    return required <= cache.storage.length
+}
+
 func cachePut(cache *CacheArena, key uint64, bytes Bytes) CachePutResult {
+    if !cacheStorageFits(cache) {
+        return CachePutResult{stored: false, evicted: 0}
+    }
+    if cache.initialized != 1 {
+        clearCache(cache)
+    }
     if bytes.length > cache.slotSize {
         return CachePutResult{stored: false, evicted: 0}
     }
     slot := cache.nextVictim
+    if slot >= cache.slotCount {
+        slot = 0
+    }
     storageAddress := cache.storage.address // source-level view; asm first loads the MutableBytes handle, then its address field.
-    address := storageAddress + slot*(cache.slotSize+16)
-    storeU64(address+0, key)
-    storeU64(address+8, bytes.length)
-    copyBytes(address+16, bytes.address, bytes.length)
+    address := storageAddress + slot*(cache.slotSize+24)
+    evicted := loadU64(address+0) == 1
+    storeU64(address+0, 1)
+    storeU64(address+8, key)
+    storeU64(address+16, bytes.length)
+    copyBytes(address+24, bytes.address, bytes.length)
     cache.nextVictim = (cache.nextVictim + 1) % cache.slotCount
-    return CachePutResult{stored: true, evicted: 1}
+    if evicted {
+        return CachePutResult{stored: true, evicted: 1}
+    }
+    return CachePutResult{stored: true, evicted: 0}
 }
-```
 
-Cache get:
-
-```go
 func cacheGet(cache *CacheArena, key uint64, into *ArenaFrame) CacheLookup {
+    if !cacheStorageFits(cache) {
+        return CacheLookup{hit: false, bytes: Bytes{address: 0, length: 0}}
+    }
+    if cache.initialized != 1 {
+        clearCache(cache)
+    }
     storageAddress := cache.storage.address // source-level view; asm first loads the MutableBytes handle, then its address field.
     for slot := uint64(0); slot < cache.slotCount; slot++ {
-        address := storageAddress + slot*(cache.slotSize+16)
-        if loadU64(address) == key {
-            length := loadU64(address + 8)
+        address := storageAddress + slot*(cache.slotSize+24)
+        if loadU64(address) == 1 && loadU64(address+8) == key {
+            length := loadU64(address + 16)
             out := reserve(into, length, 8)
-            copyBytes(out.address, address+16, length)
+            copyBytes(out.address, address+24, length)
             return CacheLookup{hit: true, bytes: Bytes{address: out.address, length: length}}
         }
     }

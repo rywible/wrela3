@@ -151,6 +151,7 @@ type checker struct {
 	bindings                []InterruptBinding
 	runtimeBindings         []InterruptBinding
 	allowFrameCallExpr      bool
+	allowPlaceConstructor   *placeConstructorAllowance
 	exprLifetimes           map[ast.Expr]Lifetime
 	frameLifetimeStack      []int
 	frameLifetimeParents    map[int]int
@@ -600,10 +601,10 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		child := NewScope(scope)
 		child.Define(s.Name, frameType)
 		parentLifetime := c.frameReceiverLifetime(s.Expr, scope)
-		childScopeID := c.pushFrameLifetime(s.Name, s.SpanV, parentLifetime)
+		childScopeID := c.pushFrameLifetime(parentLifetime)
 		child.DefineLifetime(s.Name, Lifetime{Kind: LifetimeFrame, Scope: childScopeID})
 		terminates := c.checkStmtList(moduleName, s.Body, child, expectedReturn, ctx)
-		c.popFrameLifetime(childScopeID)
+		c.popFrameLifetime(childScopeID, s.SpanV)
 		return terminates
 	case *ast.ReturnStmt:
 		if expectedReturn == nil {
@@ -1063,7 +1064,11 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 		return c.mustType(moduleName, "Bool")
 	case *ast.FieldExpr:
 		baseType := c.typeExpr(moduleName, e.Base, scope, ctx)
-		return c.lookupField(baseType, e.Field, e.SpanV)
+		fieldType := c.lookupField(baseType, e.Field, e.SpanV)
+		if fieldType != nil && !typeCanCarryHiddenLifetime(fieldType) && !typeCanCarryHiddenLifetime(baseType) {
+			c.rememberLifetime(e, Lifetime{Kind: LifetimeExecutorRoot})
+		}
+		return fieldType
 	case *ast.ConstructorExpr:
 		return c.typeConstructorExpr(moduleName, e, scope, ctx)
 	case *ast.CallExpr:
@@ -1074,14 +1079,18 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 		if left == nil || right == nil {
 			return nil
 		}
+		lifetime := c.combineLifetime(e.SpanV, c.lifetimeOfExpr(e.Left, scope), c.lifetimeOfExpr(e.Right, scope))
 		if isComparisonOp(e.Op) {
 			c.requireSame(left, right, e.SpanV)
+			c.rememberLifetime(e, Lifetime{Kind: LifetimeExecutorRoot})
 			return c.mustType(moduleName, "Bool")
 		}
 		if (e.Op == "+" || e.Op == "-") && isAddressType(left) && isIntegerType(right) {
+			c.rememberLifetime(e, lifetime)
 			return left
 		}
 		c.requireSame(left, right, e.SpanV)
+		c.rememberLifetime(e, lifetime)
 		return left
 	default:
 		c.error(expr.Span(), diag.CG0001, "unsupported expression")
@@ -1109,6 +1118,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 	boundTypes := map[string]*Type{}
 	pathUses := map[string]DriverPathUse{}
 	seenFields := map[string]source.Span{}
+	constructorLifetime := Lifetime{Kind: LifetimeExecutorRoot}
 	for _, arg := range expr.Args {
 		field, _, _ := c.lookupFieldForArg(constructed, arg.Name)
 		if field == nil {
@@ -1123,6 +1133,12 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		argType := c.typeExpr(moduleName, arg.Value, scope, ctx)
 		fieldSpans[arg.Name] = arg.SpanV
 		c.checkTypeAssign(arg.SpanV, field.Type, argType)
+		argLifetime := c.lifetimeOfExpr(arg.Value, scope)
+		if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
+			constructorLifetime = c.combineLifetime(arg.SpanV, constructorLifetime, argLifetime)
+		} else if !c.rejectCacheEscape(arg.SpanV, argLifetime, Lifetime{Kind: LifetimeExecutorRoot}) {
+			c.rejectIfLifetimeEscapes(arg.SpanV, argLifetime, Lifetime{Kind: LifetimeExecutorRoot})
+		}
 		if named, ok := arg.Value.(*ast.NameExpr); ok {
 			fieldBindings[arg.Name] = named.Name
 			boundTypes[arg.Name] = argType
@@ -1171,6 +1187,11 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			c.graph.DriverPaths = append(c.graph.DriverPaths, DriverPathNode{Type: constructed, Span: expr.SpanV, FieldUses: pathUses})
 		}
 	}
+	if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
+		c.rememberLifetime(expr, constructorLifetime)
+	} else {
+		c.rememberLifetime(expr, Lifetime{Kind: LifetimeExecutorRoot})
+	}
 	return constructed
 }
 
@@ -1188,6 +1209,10 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		}
 	}
 	if typ.Kind == KindData {
+		return
+	}
+	if c.allowPlaceConstructor != nil && !c.allowPlaceConstructor.used && c.allowPlaceConstructor.expr == expr && typ.Kind == KindClass && !typ.Unique {
+		c.allowPlaceConstructor.used = true
 		return
 	}
 	if c.canMintInContext(ctx, typ) {
@@ -1262,7 +1287,17 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 	summary := c.ensureMethodLifetimeSummary(methodLifetimeKey(recvType, method.Name), expr.SpanV)
 	if !summary.Invalid {
-		if summary.ReturnFromParam >= 0 {
+		if summary.ReturnFromReceiver {
+			receiverLifetime := c.lifetimeOfExpr(expr.Receiver, scope)
+			if receiverLifetime.Kind == LifetimeUnknown {
+				receiverLifetime = Lifetime{Kind: LifetimeExecutorRoot}
+			}
+			if summary.ReturnKind == LifetimeCacheLookup || summary.ReturnKind == LifetimeCacheCopy {
+				c.rememberLifetime(expr, Lifetime{Kind: summary.ReturnKind, Scope: receiverLifetime.Scope})
+			} else {
+				c.rememberLifetime(expr, receiverLifetime)
+			}
+		} else if summary.ReturnFromParam >= 0 {
 			arg := callArgForParam(method, expr.Args, summary.ReturnFromParam)
 			argLifetime := c.lifetimeOfExpr(arg, scope)
 			if summary.ReturnKind == LifetimeCacheLookup || summary.ReturnKind == LifetimeCacheCopy {
@@ -1275,8 +1310,45 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 		} else {
 			c.rememberLifetime(expr, Lifetime{Kind: LifetimeExecutorRoot})
 		}
+		c.enforceMethodLifetimeRequirements(summary, method, expr, scope)
 	}
 	return method.Return
+}
+
+func (c *checker) enforceMethodLifetimeRequirements(summary MethodLifetimeSummary, method *Method, expr *ast.CallExpr, scope *Scope) {
+	for _, requirement := range summary.RootRequirements {
+		valueLifetime := Lifetime{Kind: LifetimeExecutorRoot}
+		targetLifetime := Lifetime{Kind: LifetimeExecutorRoot}
+		span := expr.SpanV
+		if requirement.FromReceiver {
+			valueLifetime = c.lifetimeOfExpr(expr.Receiver, scope)
+			span = expr.Receiver.Span()
+		} else if requirement.FromParam >= 0 {
+			arg := callArgForParam(method, expr.Args, requirement.FromParam)
+			valueLifetime = c.lifetimeOfExpr(arg, scope)
+			if arg != nil {
+				span = arg.Span()
+			}
+		}
+		if valueLifetime.Kind == LifetimeUnknown {
+			valueLifetime = Lifetime{Kind: LifetimeExecutorRoot}
+		}
+		switch {
+		case requirement.TargetReceiver:
+			targetLifetime = c.lifetimeOfExpr(expr.Receiver, scope)
+		case requirement.TargetParam >= 0:
+			targetArg := callArgForParam(method, expr.Args, requirement.TargetParam)
+			targetLifetime = c.lifetimeOfExpr(targetArg, scope)
+		case requirement.TargetRoot:
+			targetLifetime = Lifetime{Kind: LifetimeExecutorRoot}
+		}
+		if targetLifetime.Kind == LifetimeUnknown {
+			targetLifetime = Lifetime{Kind: LifetimeExecutorRoot}
+		}
+		if !c.rejectCacheEscape(span, valueLifetime, targetLifetime) {
+			c.rejectIfLifetimeEscapes(span, valueLifetime, targetLifetime)
+		}
+	}
 }
 
 func (c *checker) isExplicitInterruptBindCall(moduleName string, expr *ast.CallExpr, scope *Scope) bool {
