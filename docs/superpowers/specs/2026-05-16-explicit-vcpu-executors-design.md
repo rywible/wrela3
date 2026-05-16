@@ -43,6 +43,7 @@ Problems:
 
 The new model should make these relationships explicit and derivable:
 
+- executor slots are claimed before subscriptions, memory, and executor values are wired
 - passing a path to an executor gives the executor that path capability
 - starting an executor on a vCPU gives the compiler executor placement
 - memory is claimed for an executor and passed into its constructor
@@ -107,11 +108,70 @@ If no label is provided for a non-publishing path, the compiler may synthesize o
 
 Path sharing is not part of this design. A path capability may be passed to exactly one executor. Fanout should be modeled with topics and subscriptions, not by sharing the path itself. Milestone 1 should reject shared paths.
 
+### ExecutorSlot
+
+An `ExecutorSlot` is the source-visible identity and wiring handle for an executor before the executor value exists.
+
+This breaks the circularity between subscriptions and executor construction:
+
+```text
+subscription needs to name its subscriber
+executor constructor needs the subscription
+executor value does not exist yet
+```
+
+The image phase claims a slot first:
+
+```wrela
+let console_slot = hardware.executors.claim("console")
+```
+
+The slot is then used to wire memory and subscriptions:
+
+```wrela
+let console_memory = hardware.memory.claim_executor_arena(
+    owner = console_slot,
+    length = 0x200000,
+    align = 4096
+)
+
+let serial_rx = serial_path.rx.subscribe(subscriber = console_slot)
+```
+
+The executor value carries the same slot:
+
+```wrela
+let console = ConsoleExecutor(
+    slot = console_slot,
+    memory = console_memory,
+    serial = serial_path,
+    serial_rx = serial_rx
+)
+```
+
+The vCPU start/enter operation places that slotted executor:
+
+```wrela
+hardware.vcpu0.enter(executor = console)
+```
+
+The compiler derives:
+
+```text
+console.slot == console_slot
+serial_rx.subscriber == console_slot
+console is placed on vcpu0
+therefore serial_rx wakes vcpu0
+```
+
+`ExecutorSlot` is unique and move-only. A slot may be claimed once, used by exactly one executor value, and placed on exactly one vCPU. Subscriptions and executor memory that name a slot may only be passed to the executor carrying that same slot.
+
 ### Executor
 
 An executor is:
 
 - a source-declared executor type
+- one `ExecutorSlot`
 - one root `ExecutorMemory` arena
 - owned paths and subscriptions
 - one explicit vCPU placement
@@ -120,7 +180,10 @@ An executor is:
 An executor is not scheduled by a hidden runtime. It is explicitly started on a vCPU:
 
 ```wrela
+let hello_slot = hardware.executors.claim("hello")
+
 let hello_memory = hardware.memory.claim_executor_arena(
+    owner = hello_slot,
     length = 0x200000,
     align = 4096
 )
@@ -130,6 +193,7 @@ let serial_path = serial_driver.create_console_path(
 )
 
 let hello = HelloWorld(
+    slot = hello_slot,
     memory = hello_memory,
     serial_path = serial_path
 )
@@ -172,7 +236,16 @@ Everything is publish/subscribe, but not every topic has the same delivery polic
 
 A subscription is a read capability to a topic.
 
-Subscriptions are explicit values passed into executor constructors. The compiler uses the subscription graph to plan:
+Subscriptions are explicit values passed into executor constructors. A subscription must name its subscriber slot when it is created:
+
+```wrela
+let worker_slot = hardware.executors.claim("worker")
+let counter_in = counter_topic.subscribe(subscriber = worker_slot)
+```
+
+The compiler must verify that `counter_in` is passed only to the executor value carrying `worker_slot`.
+
+The compiler uses the subscription graph to plan:
 
 - topic layout
 - subscriber cursors
@@ -360,7 +433,7 @@ generated ISR/driver glue runs
 minimal event data is captured
 event is published to the path instance's topic
 device/APIC is acknowledged as required
-target executor is woken through the topic wake path
+subscriber executor slot's placed vCPU is woken through the topic wake path
 ISR returns
 executor loop later drains the subscription
 ```
@@ -393,6 +466,62 @@ NIC RX queue 1 path -> RX topic 1 -> executor 1
 
 For devices with one physical interrupt but multiple logical paths, the driver may demux internally into path-specific topics. That demux should be explicit in the driver/module design.
 
+### Interrupt Routes and Slots
+
+Interrupt routes should bind to path topics and subscriber slots, not directly to `hardware.vcpuN`.
+
+Illustrative shape:
+
+```wrela
+let console_slot = hardware.executors.claim("console")
+
+let serial_irq = hardware.interrupts.claim_isa_irq(
+    irq = 4,
+    vector = 0x40
+)
+
+let serial_path = serial_driver.create_console_path(
+    identity = PathIdentity(label = "console.com1"),
+    rx = serial_irq.publisher(
+        identity = TopicIdentity(label = "console.com1.rx")
+    )
+)
+
+let serial_rx = serial_path.rx.subscribe(subscriber = console_slot)
+
+let console_memory = hardware.memory.claim_executor_arena(
+    owner = console_slot,
+    length = 0x200000,
+    align = 4096
+)
+
+let console = ConsoleExecutor(
+    slot = console_slot,
+    memory = console_memory,
+    serial = serial_path,
+    serial_rx = serial_rx
+)
+
+hardware.vcpu0.enter(executor = console)
+```
+
+The source graph says:
+
+```text
+IRQ4/vector 0x40 publishes to console.com1.rx
+console_slot subscribes to console.com1.rx
+console executor carries console_slot
+console executor is placed on vcpu0
+```
+
+The compiler/backend derives the hardware route target:
+
+```text
+IRQ4/vector 0x40 -> vcpu0
+```
+
+For MSI/MSI-X, the same rule applies: the path claims an interrupt publisher, subscriptions name executor slots, and the final APIC destination is derived from the placed subscriber slot. Source should not name a vCPU as the semantic owner of an interrupt.
+
 ### Migration From `on path.interrupt`
 
 The current v0 interrupt model lowers `on path.interrupt(...)` handlers into generated interrupt context and direct executor handler calls. That shape should be treated as the old compatibility surface.
@@ -401,7 +530,7 @@ The migration target is:
 
 - interrupt-capable driver paths declare one or more typed event topics
 - generated ISR glue publishes into the path instance topic
-- executor constructors receive subscriptions to those topics
+- executor slots subscribe to those topics, and executor constructors receive those subscriptions
 - executor loops drain subscriptions explicitly
 - direct `on path.interrupt` handlers are removed or lowered only as temporary compatibility wrappers around topic consumption
 
@@ -428,11 +557,12 @@ and toward:
 
 ```wrela
 let worker_memory = hardware.memory.claim_executor_arena(
+    owner = worker_slot,
     length = 0x200000,
     align = 4096
 )
 
-let worker = Worker(memory = worker_memory, ...)
+let worker = Worker(slot = worker_slot, memory = worker_memory, ...)
 
 hardware.vcpu1.start(executor = worker)
 ```
@@ -448,6 +578,7 @@ Wrela should use the whole image graph to produce static capacity checks and pla
 Known inputs:
 
 - number of executors
+- executor slots
 - vCPU assignments
 - topic producer and subscriber graph
 - message sizes
@@ -462,8 +593,12 @@ The compiler/planner should detect:
 
 - not enough vCPUs for started executors
 - more than one executor started on one vCPU
+- executor slot not bound to an executor value
+- executor slot bound to more than one executor value
 - executor not started
 - executor started more than once
+- subscription passed to an executor with a different slot than the subscription subscriber
+- executor memory passed to an executor with a different slot than the memory owner
 - path passed to more than one executor
 - reliable topic without enough retention or backpressure policy
 - lossy topic used where the subscriber declares no tolerated gaps
@@ -499,15 +634,19 @@ If hardware topology is discovered at boot, the image performs the same check du
 The compiler should enforce:
 
 - each executor is started exactly once
+- each executor has exactly one slot
+- each executor slot is claimed once, bound once, and placed once
 - each vCPU starts at most one executor
 - every started executor has a root memory arena
 - executor memory is not shared
+- executor memory owner slot matches the receiving executor slot
 - driver root capabilities are not passed into executors
 - path capabilities are owned by the executor that receives them
 - path ownership derives from executor constructor flow, not `owner = vcpu`
 - path identities for publishing paths are source-visible and unique
 - topic publisher authority is single-owner
 - subscriptions are explicit read capabilities
+- subscription subscriber slot matches the receiving executor slot
 - interrupt-capable path topics have bounded ISR-safe publish behavior
 - sleeping loops have at least one wake source
 - waitline/IPI wake fanout is generated only from explicit subscriptions
@@ -529,24 +668,39 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
         identity = PathIdentity(label = "console.com1")
     )
 
+    let hello_slot = hardware.executors.claim("hello")
+    let worker_slot = hardware.executors.claim("worker")
+
     let producer_topic = Topic(
         message = CounterMessage,
         depth = 1024,
         delivery = bounded_gap_detecting
     )
 
-    let hello_memory = hardware.memory.claim_executor_arena(length = 0x200000, align = 4096)
-    let worker_memory = hardware.memory.claim_executor_arena(length = 0x200000, align = 4096)
+    let hello_memory = hardware.memory.claim_executor_arena(
+        owner = hello_slot,
+        length = 0x200000,
+        align = 4096
+    )
+    let worker_memory = hardware.memory.claim_executor_arena(
+        owner = worker_slot,
+        length = 0x200000,
+        align = 4096
+    )
+
+    let counter_in = producer_topic.subscribe(subscriber = worker_slot)
 
     let hello = HelloWorld(
+        slot = hello_slot,
         memory = hello_memory,
         serial = serial_console,
         counter_out = producer_topic.publisher()
     )
 
     let worker = Worker(
+        slot = worker_slot,
         memory = worker_memory,
-        counter_in = producer_topic.subscribe()
+        counter_in = counter_in
     )
 
     hardware.vcpu1.start(executor = worker)
@@ -558,6 +712,7 @@ Illustrative executor loops:
 
 ```wrela
 executor HelloWorld {
+    slot: ExecutorSlot
     memory: ExecutorMemory
     serial: SerialConsolePath
     counter_out: TopicPublisher<CounterMessage>
@@ -576,6 +731,7 @@ executor HelloWorld {
 }
 
 executor Worker {
+    slot: ExecutorSlot
     memory: ExecutorMemory
     counter_in: TopicSubscription<CounterMessage>
 
@@ -605,8 +761,10 @@ The compiler derives:
 
 - `hello` is placed on `vcpu0`
 - `worker` is placed on `vcpu1`
+- `hello.slot` is `hello_slot`
+- `worker.slot` is `worker_slot`
 - `serial_console` is owned by `hello`
-- `producer_topic` has one producer and one subscriber
+- `producer_topic` has one producer and one subscriber, `worker_slot`
 - publishing to `producer_topic` can wake `vcpu1`
 - the wake path should use cache-line wait if supported, otherwise IPI fallback
 
@@ -616,9 +774,10 @@ The first implementation milestone should prove the spine without solving every 
 
 - static target with two vCPUs
 - two executors, each explicitly started on one vCPU
+- two executor slots, each bound to exactly one executor
 - executor memory claimed independently from `OwnedHardware.memory`
 - one bounded gap-detecting SPMC topic
-- one subscription
+- one subscription naming the consumer executor slot
 - cache-line-isolated producer sequence and subscriber cursor
 - explicit executor loop using drain, arm, re-check, sleep
 - cache-line wait abstraction in source/backend shape
