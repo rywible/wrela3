@@ -30,7 +30,8 @@ type frameSave struct {
 }
 
 type compileContext struct {
-	types map[string]ir.TypeInfo
+	types        map[string]ir.TypeInfo
+	topicLayouts map[string]topicDataLayout
 }
 
 type internalReloc struct {
@@ -77,7 +78,11 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}}
 	}
 
-	ctx := compileContext{types: program.Types}
+	topicLayouts, ds := topicLayoutMap(program)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	ctx := compileContext{types: program.Types, topicLayouts: topicLayouts}
 	if ctx.types == nil {
 		ctx.types = map[string]ir.TypeInfo{}
 	}
@@ -185,6 +190,18 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		Relocs:            relocs,
 		InterruptBindings: compileInterruptBindings(program.InterruptBindings),
 	}, nil
+}
+
+func topicLayoutMap(program *ir.Program) (map[string]topicDataLayout, []diag.Diagnostic) {
+	layouts, ds := orderedTopicDataLayouts(program)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	out := make(map[string]topicDataLayout, len(layouts))
+	for _, layout := range layouts {
+		out[layout.Label] = layout
+	}
+	return out, nil
 }
 
 func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding {
@@ -416,6 +433,12 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitFieldStore(e, v, frame)
 			case *ir.InterruptContextStore:
 				emitInterruptContextStore(e, frame, v)
+			case *ir.TopicPublish:
+				emitTopicPublish(e, frame, v)
+			case *ir.TopicTryNext:
+				emitTopicTryNext(e, frame, v)
+			case *ir.TopicArmWait:
+				emitTopicArmWait(e, frame, v)
 			}
 		}
 	}
@@ -625,6 +648,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.ArenaReserve:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaPlace:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.TopicTryNext:
 		return ctx.representationSize(v.Type.Name)
 	default:
 		return 8
@@ -1144,6 +1169,12 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitFieldStore(e, v, frame)
 		case *ir.InterruptContextStore:
 			emitInterruptContextStore(e, frame, v)
+		case *ir.TopicPublish:
+			emitTopicPublish(e, frame, v)
+		case *ir.TopicTryNext:
+			emitTopicTryNext(e, frame, v)
+		case *ir.TopicArmWait:
+			emitTopicArmWait(e, frame, v)
 		}
 	}
 }
@@ -1515,6 +1546,185 @@ func emitInterruptContextStore(e *Emitter, frame Frame, store *ir.InterruptConte
 	emitCopyBytes(e, asm.MustLookup("rdi"), 0, srcBase, srcDisp, store.Size)
 }
 
+func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
+	layout, ok := e.ctx.topicLayouts[publish.TopicLabel]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
+		return
+	}
+	if (publish.Kind != "" && publish.Kind != "gap_u64") || (layout.Kind != "" && layout.Kind != "gap_u64") {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + publish.Kind})
+		return
+	}
+
+	base := asm.MustLookup("rax")
+	seq := asm.MustLookup("r10")
+	slot := asm.MustLookup("r11")
+	value := asm.MustLookup("rcx")
+
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
+	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
+	emitAddImm(e, seq, 1)
+	emitRegRegMove(e, slot, seq)
+	emitMovImmToReg(e, asm.MustLookup("rdx"), int64(layout.Depth-1))
+	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdx"))
+	emitShiftImm(e, 0x04, slot, 4)
+	emitAddImm(e, slot, int64(layout.SlotsOffset))
+	emitRegRegOp(e, 0x01, slot, base)
+	emitStoreMemFromReg(e, slot, 0, seq, 64)
+	emitLoadValue(e, frame, publish.Value, value)
+	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitMfence(e)
+	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
+}
+
+func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
+	layout, ok := e.ctx.topicLayouts[next.TopicLabel]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + next.TopicLabel})
+		return
+	}
+	outSlot, ok := frame.Slots[next]
+	if !ok {
+		return
+	}
+
+	base := asm.MustLookup("rax")
+	head := asm.MustLookup("r10")
+	cursor := asm.MustLookup("r11")
+	slot := asm.MustLookup("rcx")
+	tmp := asm.MustLookup("rdx")
+	done := e.newLabel("topic_try_next_done")
+	noMessage := e.newLabel("topic_try_next_empty")
+	noGap := e.newLabel("topic_try_next_no_gap")
+
+	emitZeroSlotRange(e, outSlot, e.ctx.representationSize(next.Type.Name))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(next.TopicLabel))
+	emitLoadSubscriptionCursor(e, frame, next.Subscription, cursor, layout)
+	emitLoadMemToReg(e, head, base, int64(layout.HeadOffset), 64)
+	emitCmpRegReg(e, cursor, head)
+	e.emitJcc(0x83, noMessage)
+	emitRegRegMove(e, tmp, head)
+	emitRegRegOp(e, 0x29, tmp, cursor)
+	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth))
+	emitCmpRegReg(e, tmp, asm.MustLookup("rdi"))
+	e.emitJcc(0x86, noGap)
+	emitStoreSlotBool(e, outSlot+1, 1)
+	emitRegRegMove(e, cursor, head)
+	emitRegRegOp(e, 0x29, cursor, asm.MustLookup("rdi"))
+	emitStoreSlotFromReg(e, tmp, outSlot+8, 64)
+	e.bindLabel(noGap)
+	emitAddImm(e, cursor, 1)
+	emitStoreSlotBool(e, outSlot, 1)
+	emitRegRegMove(e, slot, cursor)
+	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth-1))
+	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdi"))
+	emitShiftImm(e, 0x04, slot, 4)
+	emitAddImm(e, slot, int64(layout.SlotsOffset))
+	emitRegRegOp(e, 0x01, slot, base)
+	emitLoadMemToReg(e, tmp, slot, 0, 64)
+	emitStoreSlotFromReg(e, tmp, outSlot+16, 64)
+	emitLoadMemToReg(e, tmp, slot, 8, 64)
+	emitStoreSlotFromReg(e, tmp, outSlot+24, 64)
+	emitStoreSubscriptionCursor(e, frame, next.Subscription, cursor, layout)
+	e.emitJmp(done)
+	e.bindLabel(noMessage)
+	e.bindLabel(done)
+}
+
+func emitTopicArmWait(e *Emitter, frame Frame, arm *ir.TopicArmWait) {
+	layout, ok := e.ctx.topicLayouts[arm.TopicLabel]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + arm.TopicLabel})
+		return
+	}
+	emitStoreSubscriptionArmed(e, frame, arm.Subscription, layout)
+}
+
+func emitLoadSubscriptionCursor(e *Emitter, frame Frame, sub ir.Value, dst asm.Reg, layout topicDataLayout) {
+	if subscriber, ok := topicSubscriberLayout(layout, sub); ok {
+		emitMovDataAddressToReg(e, asm.MustLookup("rax"), topicDataSymbol(layout.Label))
+		emitLoadMemToReg(e, dst, asm.MustLookup("rax"), int64(subscriber.CursorOffset), 64)
+		return
+	}
+	base, disp, ok := emitSubscriptionFieldAddress(e, frame, sub, "cursor")
+	if !ok {
+		emitMovImmToReg(e, dst, 0)
+		return
+	}
+	emitLoadMemToReg(e, dst, base, disp, 64)
+}
+
+func emitStoreSubscriptionCursor(e *Emitter, frame Frame, sub ir.Value, src asm.Reg, layout topicDataLayout) {
+	if subscriber, ok := topicSubscriberLayout(layout, sub); ok {
+		emitMovDataAddressToReg(e, asm.MustLookup("rax"), topicDataSymbol(layout.Label))
+		emitStoreMemFromReg(e, asm.MustLookup("rax"), int64(subscriber.CursorOffset), src, 64)
+		return
+	}
+	base, disp, ok := emitSubscriptionFieldAddress(e, frame, sub, "cursor")
+	if ok {
+		emitStoreMemFromReg(e, base, disp, src, 64)
+	}
+}
+
+func emitStoreSubscriptionArmed(e *Emitter, frame Frame, sub ir.Value, layout topicDataLayout) {
+	base, disp, ok := emitSubscriptionFieldAddress(e, frame, sub, "armed")
+	if !ok {
+		return
+	}
+	emitMovImmToReg(e, scratchRegs[0], 1)
+	emitStoreMemFromReg(e, base, disp, scratchRegs[0], 8)
+}
+
+func emitSubscriptionFieldAddress(e *Emitter, frame Frame, sub ir.Value, field string) (asm.Reg, int64, bool) {
+	info, ok := e.ctx.typeInfo(valueType(sub))
+	if !ok {
+		return asm.Reg{}, 0, false
+	}
+	fieldInfo, ok := info.Fields[field]
+	if !ok {
+		return asm.Reg{}, 0, false
+	}
+	base, disp, ok := emitValueAddress(e, frame, sub)
+	if !ok {
+		return asm.Reg{}, 0, false
+	}
+	return base, disp + int64(fieldInfo.Offset), true
+}
+
+func topicSubscriberLayout(layout topicDataLayout, sub ir.Value) (topicDataSubscriberLayout, bool) {
+	local, ok := sub.(*ir.Local)
+	if !ok {
+		return topicDataSubscriberLayout{}, false
+	}
+	for _, subscriber := range layout.Subscribers {
+		if subscriber.Label == local.Symbol {
+			return subscriber, true
+		}
+	}
+	return topicDataSubscriberLayout{}, false
+}
+
+func emitStoreSlotBool(e *Emitter, slot int, value int64) {
+	emitMovImmToReg(e, scratchRegs[0], value)
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, 8)
+}
+
+func topicDataSymbol(label string) string {
+	return "_wrela_topic_" + sanitizeSymbol(label)
+}
+
+func emitAddImm(e *Emitter, reg asm.Reg, value int64) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+		asm.RegOperand{Reg: reg},
+		asm.ImmOperand{Value: value},
+	}})
+}
+
+func emitMfence(e *Emitter) {
+	e.emit(0x0F, 0xAE, 0xF0)
+}
+
 func emitCopyBytes(e *Emitter, dstBase asm.Reg, dstDisp int64, srcBase asm.Reg, srcDisp int64, size int) {
 	offset := 0
 	for size-offset >= 8 {
@@ -1769,6 +1979,8 @@ func valueType(value ir.Value) ir.Type {
 	case *ir.ArenaReserve:
 		return v.Type
 	case *ir.ArenaPlace:
+		return v.Type
+	case *ir.TopicTryNext:
 		return v.Type
 	default:
 		return ir.Type{}

@@ -50,7 +50,7 @@ func planTopicData(topic ir.TopicLayout) topicDataLayout {
 		next += cacheLineSize
 	}
 	layout.SlotsOffset = next
-	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*8)
+	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*16)
 	return layout
 }
 
