@@ -20,10 +20,12 @@ func TestVcpuStartupDataSymbolsAreDeterministic(t *testing.T) {
 
 	wantSymbols := []string{
 		"_wrela_ap_trampoline_blob",
+		"_wrela_vcpu0_stack",
 		"_wrela_vcpu0_ready",
 		"_wrela_vcpu0_entry",
 		"_wrela_vcpu0_stack_top",
 		"_wrela_vcpu0_context",
+		"_wrela_vcpu1_stack",
 		"_wrela_vcpu1_ready",
 		"_wrela_vcpu1_entry",
 		"_wrela_vcpu1_stack_top",
@@ -42,6 +44,11 @@ func TestVcpuStartupDataSymbolsAreDeterministic(t *testing.T) {
 			}
 			continue
 		}
+		if obj.Symbol == "_wrela_vcpu0_stack" || obj.Symbol == "_wrela_vcpu1_stack" {
+			if len(obj.Bytes) != apTrampolineVcpuStackSize {
+				t.Fatalf("object %s size = %d, want %d", obj.Symbol, len(obj.Bytes), apTrampolineVcpuStackSize)
+			}
+		}
 		if obj.Align != 64 {
 			t.Fatalf("object %s Align = %d, want 64", obj.Symbol, obj.Align)
 		}
@@ -55,13 +62,18 @@ func TestAPTrampolineBlobContract(t *testing.T) {
 	}
 	for _, want := range [][]byte{
 		{0xFA},       // cli
+		{0x0F, 0x01}, // lgdt shape
 		{0x0F, 0x22}, // mov to control register shape
 		{0x0F, 0x30}, // wrmsr
+		{0xFF, 0xD0}, // call rax handoff
 		{0xF4},       // hlt fallback
 	} {
 		if !bytes.Contains(blob, want) {
 			t.Fatalf("trampoline missing byte shape %x in %x", want, blob)
 		}
+	}
+	if len(blob) <= apTrampolineReadyOffset+4 {
+		t.Fatalf("trampoline too short for ready metadata slot: %d", len(blob))
 	}
 }
 
@@ -108,6 +120,11 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 				worker,
 				&ir.VcpuStart{VcpuID: 1, SlotLabel: "worker", Type: statusType, Executor: worker},
 			}}},
+		}, {
+			Symbol: "_wrela_method_test_Worker_run",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.Return{},
+			}}},
 		}},
 	}
 	image, ds := Compile(program)
@@ -118,9 +135,15 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 	for _, want := range [][]byte{
 		u32le(0x000C4500),
 		u32le(0x000C4608),
+		{0x0F, 0x20, 0xD8}, // mov rax, cr3 before patching trampoline PML4 slot
 	} {
 		if !bytes.Contains(code, want) {
 			t.Fatalf("start missing LAPIC command %x in %x", want, code)
+		}
+	}
+	for _, symbol := range []string{"_wrela_vcpu1_ready", "_wrela_vcpu1_stack", "_wrela_method_test_Worker_run"} {
+		if !codeReferencesSymbol(t, image, "start_worker", symbol) {
+			t.Fatalf("start_worker missing reference to %s", symbol)
 		}
 	}
 }
@@ -140,6 +163,26 @@ func TestVcpuStartAndEnterCompileTogether(t *testing.T) {
 			t.Fatalf("missing symbol %s", symbol)
 		}
 	}
+}
+
+func codeReferencesSymbol(t *testing.T, image *Image, ownerSymbol string, targetSymbol string) bool {
+	t.Helper()
+	ownerStart, ok := image.Symbols[ownerSymbol]
+	if !ok {
+		t.Fatalf("missing owner symbol %s", ownerSymbol)
+	}
+	target, ok := image.Symbols[targetSymbol]
+	if !ok {
+		t.Fatalf("missing target symbol %s", targetSymbol)
+	}
+	code := symbolBytes(t, image, ownerSymbol)
+	want := make([]byte, 8)
+	binary.LittleEndian.PutUint64(want, runtimeImageBase+target)
+	if !bytes.Contains(code, want) {
+		return false
+	}
+	_ = ownerStart
+	return true
 }
 
 func hasRelocTo(t *testing.T, image *Image, ownerSymbol string, targetSymbol string) bool {

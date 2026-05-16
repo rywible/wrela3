@@ -13,6 +13,15 @@ import (
 
 const apTrampolineBase = 0x8000
 const apTrampolineInstallSymbol = "_wrela_method_platform_uefi_types_DelegatedMemory_install_ap_trampoline"
+const apTrampolineVcpuStackSize = 16 * 1024
+
+const (
+	apTrampolinePML4Offset    = 0x7c
+	apTrampolineEntryOffset   = 0x80
+	apTrampolineStackOffset   = 0x84
+	apTrampolineContextOffset = 0x88
+	apTrampolineReadyOffset   = 0x8c
+)
 
 //go:embed testdata/ap_trampoline.bin
 var apTrampolineBlobBytes []byte
@@ -78,6 +87,11 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 
 	suffixes := []string{"ready", "entry", "stack_top", "context"}
 	for _, plan := range plans {
+		out = append(out, ir.DataObject{
+			Symbol: fmt.Sprintf("_wrela_vcpu%d_stack", plan.VcpuID),
+			Bytes:  make([]byte, apTrampolineVcpuStackSize),
+			Align:  64,
+		})
 		for _, suffix := range suffixes {
 			out = append(out, ir.DataObject{
 				Symbol: fmt.Sprintf("_wrela_vcpu%d_%s", plan.VcpuID, suffix),
@@ -95,7 +109,8 @@ func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext
 	emitHltLoop(e)
 }
 
-func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame) {
+func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
+	emitPrepareVcpuStartup(e, op, frame, ctx)
 	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
 	emitLapicWrite(e, lapicICRLow, 0x000C4500)
 	emitDelayLoop(e, 10000)
@@ -106,6 +121,50 @@ func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame) {
 	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
 	emitWaitForVcpuReady(e, op.VcpuID)
 	emitStoreVcpuStartStatus(e, op, frame)
+}
+
+func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
+	readySymbol := fmt.Sprintf("_wrela_vcpu%d_ready", op.VcpuID)
+	entrySymbol := fmt.Sprintf("_wrela_vcpu%d_entry", op.VcpuID)
+	stackTopSymbol := fmt.Sprintf("_wrela_vcpu%d_stack_top", op.VcpuID)
+	contextSymbol := fmt.Sprintf("_wrela_vcpu%d_context", op.VcpuID)
+	stackSymbol := fmt.Sprintf("_wrela_vcpu%d_stack", op.VcpuID)
+	executorType := ctx.VcpuPlans[op.SlotLabel].ExecutorType
+	if executorType.Name == "" {
+		executorType = valueType(op.Executor)
+	}
+	runSymbol := executorStartSymbol(executorType)
+
+	// Reset and expose the startup record fields for debugging/inspection.
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), readySymbol)
+	emitMovImmToReg(e, asm.MustLookup("r10"), 0)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), runSymbol)
+	emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), entrySymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), stackSymbol)
+	emitAddImm(e, asm.MustLookup("rax"), apTrampolineVcpuStackSize)
+	emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), stackTopSymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
+	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("r10"))
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), contextSymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
+
+	// Patch the SIPI-page handoff slots consumed by ap_trampoline.bin.
+	emitMovImmToReg(e, asm.MustLookup("r11"), apTrampolineBase)
+	e.emit(0x0F, 0x20, 0xD8) // mov rax, cr3
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolinePML4Offset, asm.MustLookup("rax"), 32)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), runSymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineEntryOffset, asm.MustLookup("rax"), 32)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), stackSymbol)
+	emitAddImm(e, asm.MustLookup("rax"), apTrampolineVcpuStackSize)
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineStackOffset, asm.MustLookup("rax"), 32)
+	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rax"))
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineContextOffset, asm.MustLookup("rax"), 32)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), readySymbol)
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), apTrampolineReadyOffset, asm.MustLookup("rax"), 32)
 }
 
 func executorStartSymbol(typ ir.Type) string {
@@ -145,7 +204,7 @@ func emitWaitForVcpuReady(e *Emitter, vcpuID int) {
 		asm.ImmOperand{Value: 1},
 	}})
 	e.emitJcc(0x84, done)
-	emitHltWait(e)
+	e.emitInstruction(asm.Instruction{Mnemonic: "pause"})
 	e.emitJmp(loop)
 	e.bindLabel(done)
 }

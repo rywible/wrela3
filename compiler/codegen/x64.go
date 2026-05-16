@@ -480,7 +480,7 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 			case *ir.TopicWait:
 				emitHltWait(e)
 			case *ir.VcpuStart:
-				emitVcpuStart(e, v, frame)
+				emitVcpuStart(e, v, frame, ctx)
 			case *ir.VcpuEnter:
 				emitVcpuEnter(e, v, frame, ctx)
 				hasReturn = true
@@ -1276,7 +1276,7 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 		case *ir.TopicWait:
 			emitHltWait(e)
 		case *ir.VcpuStart:
-			emitVcpuStart(e, v, frame)
+			emitVcpuStart(e, v, frame, e.ctx)
 		case *ir.VcpuEnter:
 			emitVcpuEnter(e, v, frame, e.ctx)
 		}
