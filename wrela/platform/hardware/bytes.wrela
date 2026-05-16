@@ -1,0 +1,26 @@
+module platform.hardware.bytes
+
+use { BootPanic } from platform.hardware.panic
+
+class BoundedBytes {
+    address: PhysicalAddress
+    length: U64
+    panic: BootPanic
+}
+
+class PhysicalBytes {
+    address: PhysicalAddress
+    length: U64
+    panic: BootPanic
+}
+
+class MmioRegion {
+    address: PhysicalAddress
+    length: U64
+    panic: BootPanic
+}
+
+class IoPortRegion {
+    port_base: U32
+    length: U32
+}

@@ -1,0 +1,34 @@
+module platform.acpi.root
+
+use { AcpiTable } from platform.acpi.tables
+use { MadtTable } from platform.acpi.madt
+use { McfgTable } from platform.acpi.mcfg
+use { BoundedBytes } from platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+use { UefiConfigurationTables } from platform.uefi.types
+
+class AcpiLocator {
+    panic: BootPanic
+
+    fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
+        return AcpiRoot(root_address = 0, use_xsdt = true, panic = self.panic)
+    }
+}
+
+class AcpiRoot {
+    root_address: PhysicalAddress
+    use_xsdt: Bool
+    panic: BootPanic
+
+    fn require_table(self, signature: U32) -> AcpiTable {
+        return AcpiTable(bytes = BoundedBytes(address = 0, length = 0, panic = self.panic), signature = signature, length = 0)
+    }
+
+    fn require_madt(self) -> MadtTable {
+        return MadtTable(table = self.require_table(signature = 0x43495041), panic = self.panic)
+    }
+
+    fn require_mcfg(self) -> McfgTable {
+        return McfgTable(table = self.require_table(signature = 0x4746434D), panic = self.panic)
+    }
+}

@@ -1,5 +1,7 @@
 module machine.x86_64.pci
 
+use { BootPanic } from platform.hardware.panic
+
 class PciConfigPorts {
     asm fn write32(self, address: U32, value: U32) {
         mov r10d, value
@@ -110,5 +112,52 @@ class Q35PciInterruptConfigurator {
         let header = self.read_config32(slot = 6, offset = cap)
         self.ivshmem_msix_table.write_entry0(message_address = 0xFEE00000, message_data = 0x42)
         self.write_config32(slot = 6, offset = cap + 0, value = header | 0x80000000)
+    }
+}
+
+data PciDeviceIdentity {
+    segment: U16
+    bus: U8
+    device: U8
+    function: U8
+    vendor_id: U16
+    device_id: U16
+    class_code: U8
+    subclass: U8
+    prog_if: U8
+}
+
+class PcieEcamWindow {
+    base: PhysicalAddress
+    segment: U16
+    start_bus: U8
+    end_bus: U8
+    panic: BootPanic
+}
+
+class PciDevice {
+    window: PcieEcamWindow
+    identity: PciDeviceIdentity
+    panic: BootPanic
+}
+
+class PciDeviceSet {
+    count: U64
+    device0: PciDevice
+    panic: BootPanic
+
+    fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
+        return self.device0
+    }
+}
+
+class PciDeviceSetBuilder {
+    panic: BootPanic
+
+    fn empty(self) -> PciDeviceSet {
+        let window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
+        let identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let device = PciDevice(window = window, identity = identity, panic = self.panic)
+        return PciDeviceSet(count = 0, device0 = device, panic = self.panic)
     }
 }

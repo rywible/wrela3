@@ -1,6 +1,6 @@
 module platform.uefi.transition
 
-use { DelegatedMemory, UefiHandle } from platform.uefi.types
+use { DelegatedMemory, UefiConfigurationTables, UefiHandle, UefiMemoryMap } from platform.uefi.types
 use { UefiBootServicesCalls } from platform.uefi.boot_services
 use { CpuPlan, ExecutorRegistry, OwnedHardware, MemoryPlan, Vcpu } from machine.x86_64.cpu_state
 
@@ -8,6 +8,14 @@ unique class DelegatedHardware {
     image_handle: UefiHandle
     boot_services: UefiBootServicesCalls
     delegated_memory: DelegatedMemory
+
+    fn uefi_configuration_tables(self) -> UefiConfigurationTables {
+        return UefiConfigurationTables(table_address = 0, count = 0)
+    }
+
+    fn memory_map(self) -> UefiMemoryMap {
+        return self.delegated_memory.last_memory_map
+    }
 
     fn exit_to_owned_hardware(
         self,

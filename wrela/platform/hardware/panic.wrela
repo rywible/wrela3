@@ -1,0 +1,10 @@
+module platform.hardware.panic
+
+class BootPanic {
+    asm fn fail(self, code: U64) -> never {
+        cli
+    panic_loop:
+        hlt
+        jmp panic_loop
+    }
+}

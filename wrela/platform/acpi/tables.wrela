@@ -1,0 +1,9 @@
+module platform.acpi.tables
+
+use { BoundedBytes } from platform.hardware.bytes
+
+data AcpiTable {
+    bytes: BoundedBytes
+    signature: U32
+    length: U32
+}
