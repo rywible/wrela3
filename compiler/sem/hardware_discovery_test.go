@@ -15,6 +15,14 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.discovery", "PlatformDiscoveryRoot"), "from_uefi")
 	assertMethodExists(t, moduleType(t, index, "platform.uefi.transition", "DelegatedHardware"), "uefi_configuration_tables")
 	assertMethodExists(t, moduleType(t, index, "platform.uefi.transition", "DelegatedHardware"), "memory_map")
+	plan := moduleType(t, index, "machine.x86_64.cpu_state", "HardwarePlan")
+	if fieldTypeName(t, plan, "cpus") != "CpuTopology" {
+		t.Fatalf("HardwarePlan.cpus must be CpuTopology")
+	}
+	owned := moduleType(t, index, "machine.x86_64.cpu_state", "OwnedHardware")
+	if fieldTypeName(t, owned, "hardware_plan") != "HardwarePlan" {
+		t.Fatalf("OwnedHardware.hardware_plan must be HardwarePlan")
+	}
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_madt")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_mcfg")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet"), "require_device")
@@ -47,12 +55,12 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	_ = moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
 	pci := moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet")
 	assertMethodExists(t, pci, "require_device")
-		assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")
-		dev := moduleType(t, index, "machine.x86_64.pci", "PciDevice")
-		assertMethodExists(t, dev, "claim_mmio_bar")
-		assertMethodExists(t, dev, "claim_io_bar")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")
+	dev := moduleType(t, index, "machine.x86_64.pci", "PciDevice")
+	assertMethodExists(t, dev, "claim_mmio_bar")
+	assertMethodExists(t, dev, "claim_io_bar")
 
-		interrupts := moduleType(t, index, "machine.x86_64.interrupts", "InterruptAuthority")
+	interrupts := moduleType(t, index, "machine.x86_64.interrupts", "InterruptAuthority")
 	assertMethodExists(t, interrupts, "route_isa_irq")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute"), "program")
 	route := moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute")

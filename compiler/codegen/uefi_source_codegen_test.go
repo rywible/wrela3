@@ -767,8 +767,11 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 	files = append(files, source.NewFile(source.FileID(len(files)+1), "uefi-test-harness.wrela", `
 module codegen.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
+use { BootPanic } from platform.hardware.panic
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { OwnedHardware, OwnedMemory, IoPortAuthority } from machine.x86_64.cpu_state
-use { MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
+use { InterruptVector } from machine.x86_64.interrupts
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 
 image UefiCodegenHarness {
@@ -788,9 +791,21 @@ image UefiCodegenHarness {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
+        let panic = BootPanic()
+        let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
+        let interrupts = discovery.interrupts
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+        )
         return hardware.exit_to_owned_hardware(
             memory_plan = memory_plan,
-            cpu_plan = cpu_plan
+            cpu_plan = cpu_plan,
+            hardware_plan = hardware_plan
         )
     }
 

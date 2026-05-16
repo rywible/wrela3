@@ -1,6 +1,9 @@
 module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { IoApicRoute, LocalApic } from machine.x86_64.interrupts
+use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
+use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 
 data SlotIdentity {
@@ -134,10 +137,48 @@ class Vcpu {
     local_apic_base: PhysicalAddress
 }
 
+data InterruptRoutingPlan {
+    local_apic: LocalApic
+    serial_irq4: IoApicRoute
+}
+
+data ClaimedPciPlan {
+    edu_bar0: MmioRegion
+    edu_msi: MsiCapability
+    ivshmem_rx_bar0: MmioRegion
+    ivshmem_rx_msix: MsixCapability
+    ivshmem_tx_bar0: MmioRegion
+}
+
+class ClaimedPciPlanBuilder {
+    panic: BootPanic
+
+    fn empty(self) -> ClaimedPciPlan {
+        let empty_mmio = MmioRegion(address = 0, length = 0, panic = self.panic)
+        let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
+        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let empty_device = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
+        return ClaimedPciPlan(
+            edu_bar0 = empty_mmio,
+            edu_msi = MsiCapability(device = empty_device, capability_offset = 0),
+            ivshmem_rx_bar0 = empty_mmio,
+            ivshmem_rx_msix = MsixCapability(device = empty_device, capability_offset = 0, table = empty_mmio, table_offset = 0),
+            ivshmem_tx_bar0 = empty_mmio
+        )
+    }
+}
+
+data HardwarePlan {
+    cpus: CpuTopology
+    interrupts: InterruptRoutingPlan
+    pci: ClaimedPciPlan
+}
+
 unique class OwnedHardware {
     memory: OwnedMemory
     io_ports: IoPortAuthority
     executors: ExecutorRegistry
+    hardware_plan: HardwarePlan
     vcpu0: Vcpu
     vcpu1: Vcpu
 }

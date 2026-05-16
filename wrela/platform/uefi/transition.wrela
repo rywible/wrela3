@@ -2,7 +2,7 @@ module platform.uefi.transition
 
 use { DelegatedMemory, UefiConfigurationTables, UefiHandle, UefiMemoryMap, UefiSystemTable } from platform.uefi.types
 use { UefiBootServicesCalls } from platform.uefi.boot_services
-use { CpuPlan, ExecutorRegistry, OwnedHardware, MemoryPlan, Vcpu } from machine.x86_64.cpu_state
+use { CpuPlan, ExecutorRegistry, HardwarePlan, MemoryPlan, OwnedHardware } from machine.x86_64.cpu_state
 
 unique class DelegatedHardware {
     image_handle: UefiHandle
@@ -32,7 +32,8 @@ unique class DelegatedHardware {
     fn exit_to_owned_hardware(
         self,
         memory_plan: MemoryPlan,
-        cpu_plan: CpuPlan
+        cpu_plan: CpuPlan,
+        hardware_plan: HardwarePlan
     ) -> OwnedHardware {
         let map_buffer = self.delegated_memory.allocate(length = 16384)
         let active_buffer = map_buffer
@@ -88,8 +89,9 @@ unique class DelegatedHardware {
             memory = memory_plan.owned_memory,
             io_ports = memory_plan.io_ports,
             executors = ExecutorRegistry(next_id = 0),
-            vcpu0 = Vcpu(id = 0, apic_id = 0, local_apic_base = 0),
-            vcpu1 = Vcpu(id = 1, apic_id = 1, local_apic_base = 0)
+            hardware_plan = hardware_plan,
+            vcpu0 = hardware_plan.cpus.vcpu0(local_apic_base = hardware_plan.interrupts.local_apic.base),
+            vcpu1 = hardware_plan.cpus.vcpu1(local_apic_base = hardware_plan.interrupts.local_apic.base)
         )
     }
 

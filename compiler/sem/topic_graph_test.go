@@ -690,7 +690,7 @@ module sem.explicit_interrupt_configurator
 
 use { DelegatedHardware } from platform.uefi.transition
 use { BootPanic } from platform.hardware.panic
-use { CpuPlan, ExecutorSlot, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { ClaimedPciPlanBuilder, CpuPlan, CpuTopology, EnabledCpu, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { HotPollPolicy } from machine.x86_64.executor_loop
 use { ApicInterruptController, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
@@ -719,14 +719,32 @@ image ExplicitInterruptConfigurator {
             executor_arena = MutableBytes(address = 0, length = 0),
             io_ports = IoPortAuthority()
         )
-        let cpu_plan = CpuPlan(
-            owned_stack_top = 0,
-            gdt_descriptor = Bytes(address = 0, length = 0),
-            idt_descriptor = Bytes(address = 0, length = 0),
-            cr3 = 0
-        )
-        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan)
-    }
+	        let cpu_plan = CpuPlan(
+	            owned_stack_top = 0,
+	            gdt_descriptor = Bytes(address = 0, length = 0),
+	            idt_descriptor = Bytes(address = 0, length = 0),
+	            cr3 = 0
+	        )
+	        let local_apic = LocalApic(base = 0xFEE00000, apic_id = 0, panic = BootPanic())
+	        let hardware_plan = HardwarePlan(
+	            cpus = CpuTopology(
+	                bootstrap = EnabledCpu(uid = 0, apic_id = 0),
+	                secondary = EnabledCpu(uid = 1, apic_id = 1)
+	            ),
+	            interrupts = InterruptRoutingPlan(
+	                local_apic = local_apic,
+	                serial_irq4 = IoApicRoute(
+	                    io_apic = IoApicDiscovered(id = 0, address = 0, gsi_base = 0, panic = BootPanic()),
+	                    gsi = 4,
+	                    flags = 0,
+	                    vector = InterruptVector(value = 0x40),
+	                    destination_apic_id = 0
+	                )
+	            ),
+	            pci = ClaimedPciPlanBuilder(panic = BootPanic()).empty()
+	        )
+	        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
+	    }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))

@@ -35,16 +35,20 @@ func TestForgedHardwareAuthorityRejected(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "forged-mmio-test.wrela", `
 module examples.bad
 use { BootPanic } from platform.hardware.panic
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { MmioRegion } from platform.hardware.bytes
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
+use { InterruptVector } from machine.x86_64.interrupts
 
 image BadForgedMmio {
     transitions { delegated_hardware -> owned_hardware }
 
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let fake = MmioRegion(address = 0xFEC00000, length = 4096, panic = BootPanic())
+        let panic = BootPanic()
+        let fake = MmioRegion(address = 0xFEC00000, length = 4096, panic = panic)
         let arena = MutableBytes(address = 0, length = 0)
         let owned_memory = OwnedMemory(arena = arena)
         let memory_plan = MemoryPlan(
@@ -58,7 +62,17 @@ image BadForgedMmio {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan)
+        let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
+        let interrupts = discovery.interrupts
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+        )
+        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {

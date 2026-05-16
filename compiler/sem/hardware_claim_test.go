@@ -26,7 +26,9 @@ use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
+use { InterruptVector } from machine.x86_64.interrupts
 
 image BadDuplicateBar {
     transitions { delegated_hardware -> owned_hardware }
@@ -48,7 +50,16 @@ image BadDuplicateBar {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan)
+        let interrupts = discovery.interrupts
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlanBuilder(panic = BootPanic()).empty()
+        )
+        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
@@ -63,6 +74,7 @@ use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptVector } from machine.x86_64.interrupts
 
@@ -86,7 +98,15 @@ image BadDuplicateVector {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan)
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = first
+            ),
+            pci = ClaimedPciPlanBuilder(panic = BootPanic()).empty()
+        )
+        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
