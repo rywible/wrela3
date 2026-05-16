@@ -39,4 +39,7 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, madt, "io_apics")
 	assertMethodExists(t, madt, "interrupt_source_overrides")
 	assertMethodExists(t, madt, "interrupt_authority")
+
+	assertMethodExists(t, moduleType(t, index, "platform.acpi.mcfg", "McfgTable"), "ecam_windows")
+	_ = moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
 }

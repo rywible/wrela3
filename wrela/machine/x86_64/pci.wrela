@@ -135,6 +135,19 @@ class PcieEcamWindow {
     panic: BootPanic
 }
 
+class PcieEcamWindows {
+    count: U64
+    window0: PcieEcamWindow
+    panic: BootPanic
+
+    fn append(self, window: PcieEcamWindow) {
+        if self.count == 0 {
+            self.window0 = window
+            self.count = 1
+        }
+    }
+}
+
 class PciDevice {
     window: PcieEcamWindow
     identity: PciDeviceIdentity
