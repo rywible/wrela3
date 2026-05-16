@@ -25,6 +25,14 @@ Execution rules:
 - Do not add a hidden runtime scheduler. `start` and `enter` are dispatch operations only.
 - Do not implement shared paths or ambient shared memory.
 
+Existing test helpers used by this plan:
+
+- `compiler/sem/testutil_test.go`: `parseModulesForTest`, `mustBuildIndex`, `mustCheck`, `hasCode`, `hasMessage`.
+- `compiler/sem/uefi_source_shape_test.go`: `parseUEFIModuleSet`, `moduleType`, `methodByName`.
+- `compiler/ir/interrupt_testutil_test.go`: `checkedProgramForTest`.
+- `compiler/ir/lower_test.go`: `findFunction`.
+- `compiler/codegen/*_test.go`: `symbolBytes` helpers already exist in codegen tests. When a target test file lacks that helper, add a local `symbolBytes(t, image, symbol)` helper in that file.
+
 Definition of done for a task:
 
 - All checkbox steps are complete.
@@ -58,7 +66,7 @@ Do not reopen these decisions during implementation.
 - Path ownership is established by passing the path value into an executor constructor.
 - Path capabilities are not shared.
 - Path labels and slot labels are image-global. Duplicate labels are semantic errors.
-- Topic storage is compiler-generated writable data for this plan. It is cache-line aligned and named from topic identity labels.
+- Topic storage is compiler-generated writable data for this plan. It is cache-line aligned and named from the required `TopicIdentity.label` field on each topic constructor.
 - Wrela has no generic syntax in this plan. Implement concrete `U64GapTopic`, `U64ReliableTopic`, and concrete interrupt topic types such as `SerialRxTopic`.
 - `Topic.publisher()` creates one unique publisher capability.
 - Publisher authority may be owned by an executor slot or by a driver/path capability.
@@ -73,7 +81,7 @@ Do not reopen these decisions during implementation.
 
 ## 2. Repository Layout And File Responsibilities
 
-Create or modify exactly these files.
+Create or modify the files listed below. Individual tasks repeat the exact subset they own.
 
 ```text
 compiler/diag/codes.go
@@ -136,7 +144,18 @@ tests/e2e/fixtures/hello_ivshmem/program.wrela
 tests/e2e/hello_qemu_test.go
   Hard-cut examples and e2e fixtures to slots, topics, vCPU start/enter, and interrupt topics.
 
-tests/fixtures/negative/*.wrela
+tests/fixtures/negative/on_interrupt_rejected.wrela
+tests/fixtures/negative/duplicate_slot_label.wrela
+tests/fixtures/negative/subscription_slot_mismatch.wrela
+tests/fixtures/negative/vcpu_overcommit.wrela
+tests/fixtures/negative/publisher_used_twice.wrela
+tests/fixtures/negative/invalid_vcpu_enter_order.wrela
+tests/fixtures/negative/missing_topic_identity.wrela
+tests/fixtures/negative/reliable_try_publish_ignored.wrela
+tests/fixtures/negative/subscription_used_by_wrong_executor.wrela
+tests/fixtures/negative/lossy_topic_without_gap_tolerance.wrela
+tests/fixtures/negative/sleeping_loop_without_wake_source.wrela
+tests/fixtures/negative/executor_memory_slot_mismatch.wrela
 compiler/negative_fixtures_test.go
   Adds negative fixtures for old `on`, duplicate labels, slot mismatch, publisher duplication, shared paths, vCPU overcommit, and invalid current-vCPU start order.
 ```
@@ -145,35 +164,43 @@ compiler/negative_fixtures_test.go
 
 ## 3. Parallel Work Map
 
-Serial spine:
+This plan has one interface-freeze gate, then five mostly independent workstreams. Workers must not cross file ownership without a merge note in their commit message.
 
 ```text
-Task 1 diagnostics
-Task 2 source surface
-Task 3 semantic classification
-Task 4 graph extraction
-Task 5 slot/topic semantic checks
-Task 6 hard reject old interrupt model
-Task 7 IR operations
-Task 8 lowering
-Task 9 topic data/codegen
-Task 10 gap topic codegen
-Task 11 reliable topic codegen
-Task 12 wait primitives
-Task 13 QEMU SMP
-Task 14 vCPU start/AP startup
-Task 15 interrupt-topic dispatch
-Task 16 examples/e2e
-Task 17 fixture/test hard cutover
-Task 18 final verification
+Merge Gate A: Tasks 1, 2, and 7
+  Freeze diagnostics, source/API shapes, and IR structs.
+
+Semantic Graph Lane: Tasks 3, 4, 5, 6
+  Owns compiler/sem/*.go, compiler/sem/*test.go, and negative fixtures.
+
+Topic Codegen Lane: Tasks 8, 9, 10, 11, 12
+  Owns compiler/codegen/topic_data.go, topic tests, and topic op emission in compiler/codegen/x64.go.
+
+vCPU Codegen Lane: Tasks 13, 14A-14E
+  Owns compiler/codegen/vcpu_start.go, vcpu tests, QEMU SMP, and UEFI AP trampoline install hooks.
+
+Interrupt Topic Lane: Task 15
+  Owns interrupt binding structs, lowering, interrupt dispatch codegen, and serial/EDU/ivshmem interrupt source contracts.
+
+Example/E2E Lane: Tasks 16, 17
+  Owns examples/ and tests/e2e/ after Merge Gate D.
 ```
 
-Parallel allowance:
+Merge gates:
 
-- Task 13 may run after Task 1 because QEMU args are independent.
-- Task 2 Wrela source edits can be split by module, but the task must land as one commit.
-- Task 15 interrupt-topic dispatch must wait for Tasks 7-12.
-- Task 16 examples/e2e must wait for Tasks 2, 5, 11, 14, and 15.
+- **Gate A:** Tasks 1, 2, and 7 complete. All lanes now share stable names for diagnostics, source contracts, and IR structs.
+- **Gate B:** Semantic Graph Lane complete. Topic and interrupt lanes can rely on `ImageGraph.Topics`, `TopicSubscriptions`, `TopicPublishers`, and `VcpuPlacements`.
+- **Gate C:** Topic Codegen Lane and vCPU Codegen Lane complete. E2E can start multi-vCPU fixture execution.
+- **Gate D:** Interrupt Topic Lane complete. Hello and ivshmem fixture cutover can start.
+- **Gate E:** Tasks 16 and 17 complete. Run Task 18 final verification.
+
+Disjoint parallel starts:
+
+- Task 1 and Task 13 can start immediately.
+- Task 2 can split into four sub-workers after Task 1: `cpu_state`, `executor_loop`, `topic_u64`, and serial/interrupt source contracts. Merge as one commit.
+- Task 4 starts after Task 3. Task 7 starts after Task 1. Task 14A starts after Task 13.
+- Tasks 10 and 11 can run in parallel after Task 9 because gap and reliable op emission use different IR op types. Both touch `compiler/codegen/x64.go`, so merge through one owner.
+- Task 16 fixture authoring can start after Task 3 as a compile-failing fixture, but it cannot be made passing until Gates C and D.
 
 ---
 
@@ -373,6 +400,27 @@ git commit -m "feat: reserve executor topic diagnostics -Codex Automated"
 
 **Acceptance Criteria:** Diagnostics SEM0033-SEM0048 exist with the exact meanings above.
 
+Diagnostic coverage is mandatory. Later tasks must add a failing test for each code before implementing the checker path:
+
+```text
+SEM0033 Task 5: duplicate slot/path/topic label
+SEM0034 Task 5: slot unbound, rebound, or unplaced
+SEM0035 Task 5: executor slot mismatch
+SEM0036 Task 5: invalid vCPU start/enter ordering
+SEM0037 Task 5: vCPU overcommit or insufficient target vCPUs
+SEM0038 Task 5: shared path
+SEM0039 Task 5: duplicate publisher authority
+SEM0040 Task 5: subscription used outside subscriber executor
+SEM0041 Task 5: lossy topic used by no-gap subscriber
+SEM0042 Task 6: old executor on-interrupt syntax
+SEM0043 Task 15: interrupt route missing or ambiguous
+SEM0044 Task 5: sleeping loop without wake source
+SEM0045 Task 5: reliable publish result ignored
+SEM0046 Task 9: topic depth/layout invalid
+SEM0047 Task 5: executor memory owner slot mismatch
+SEM0048 Task 5: publishing path missing explicit identity
+```
+
 ### Task 2: Wrela Source Contracts For Slots, vCPUs, Loop Policies, And Topics
 
 **Description:** Add the canonical Wrela source types used by the semantic graph and examples. These methods are source contracts; many become compiler intrinsics in later tasks.
@@ -407,14 +455,22 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 		"label": "StringLiteral",
 	})
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"depth": "U64",
+	})
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
-assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "try_publish")
-assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "publish_or_wait")
-assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableSubscription"), "try_next")
-assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
-	"label": "StringLiteral",
-})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"depth": "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "try_publish")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "publish_or_wait")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableSubscription"), "try_next")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
+		"label": "StringLiteral",
+	})
 }
 ```
 
@@ -515,7 +571,7 @@ unique class OwnedHardware {
 }
 ```
 
-Keep the old `ExecutorPlacement` declaration only while intermediate focused tests are landing. Task 17 removes all production call sites and leaves no compatibility behavior attached to the old type.
+Leave the old `ExecutorPlacement` declaration in `cpu_state.wrela` during Task 2 so existing fixtures still parse. Do not add fields or methods to it. Task 17 removes production uses and leaves the type unused outside negative tests.
 
 - [ ] **Step 4: Create `executor_loop.wrela`**
 
@@ -602,6 +658,7 @@ data U64PublishResult {
 }
 
 class U64GapTopic {
+    identity: TopicIdentity
     id: U64
     depth: U64
 
@@ -646,6 +703,7 @@ class U64GapSubscription {
 }
 
 class U64ReliableTopic {
+    identity: TopicIdentity
     id: U64
     depth: U64
 
@@ -984,7 +1042,9 @@ class EventSleepPolicy { asm fn wait(self) { hlt; ret } }
 `, `
 module machine.x86_64.topic_u64
 use { ExecutorSlot } from machine.x86_64.cpu_state
+data TopicIdentity { label: StringLiteral }
 class U64GapTopic {
+    identity: TopicIdentity
     id: U64
     depth: U64
     fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { return U64GapSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false) }
@@ -994,7 +1054,7 @@ class U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot; cursor:
 	src := `
 module test.graph
 use { ExecutorSlot, SlotIdentity, OwnedHardware } from machine.x86_64.cpu_state
-use { U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { U64GapSubscription, U64GapTopic, TopicIdentity } from machine.x86_64.topic_u64
 use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { ExecutorMemory } from machine.x86_64.executor_memory
 
@@ -1011,7 +1071,7 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(id = 0, depth = 64)
+        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
         let input = topic.subscribe(subscriber = worker_slot)
         let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = input)
         hardware.vcpu1.start(executor = worker)
@@ -1149,7 +1209,51 @@ type localOrigin struct {
 }
 ```
 
-On every `LetStmt`, after `valueType := c.typeExpr(...)`, compute and store `localOrigin` for the bound name. Constructor origins store `FieldBindings`; `hardware.executors.claim(...)` stores `SlotLabel`; `U64GapTopic(...)`, `U64ReliableTopic(...)`, and `SerialRxTopic(...)` store `TopicLabel`; `hardware.vcpu0` and `hardware.vcpu1` field origins store `VcpuID`. The `start/enter` extractor must read the executor local origin, then read `FieldBindings["slot"]`, then look up that slot local origin to fill `VcpuPlacementNode.SlotLabel`.
+Add these exact `Scope` helpers. Origins inherit through nested scopes the same way type and lifetime bindings do; do not store origins globally because shadowed locals inside `if`/`while` bodies must not rewrite outer bindings.
+
+```go
+func (s *Scope) DefineOrigin(name string, origin localOrigin) {
+	if s == nil {
+		return
+	}
+	s.origins[name] = origin
+}
+
+func (s *Scope) LookupOrigin(name string) (localOrigin, bool) {
+	if s == nil {
+		return localOrigin{}, false
+	}
+	if origin, ok := s.origins[name]; ok {
+		return origin, true
+	}
+	if s.parent != nil {
+		return s.parent.LookupOrigin(name)
+	}
+	return localOrigin{}, false
+}
+```
+
+Add `origins map[string]localOrigin` to `Scope` and initialize it in `NewScope`.
+
+Split extraction into these helpers and add one focused test for each helper before writing the helper:
+
+```go
+func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin
+func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) localOrigin
+func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType *Type, scope *Scope) localOrigin
+func (c *checker) recordGraphFromLet(name string, origin localOrigin, span source.Span)
+func (c *checker) recordGraphFromExprStmt(expr ast.Expr, scope *Scope)
+```
+
+The helper behavior is fixed:
+
+- `originForConstructor` stores `Constructor`, `Type`, and `FieldBindings` for every named constructor argument whose value is a `NameExpr`.
+- `originForConstructor` stores `TopicLabel` for `U64GapTopic`, `U64ReliableTopic`, `SerialRxTopic`, `EduInterruptTopic`, and `IvshmemDoorbellTopic` by reading `identity = TopicIdentity(label = "...")`. Missing identity on a publishing topic emits SEM0048.
+- `originForCall` stores `SlotLabel` for `hardware.executors.claim(identity = SlotIdentity(label = "..."))`.
+- `originForCall` stores `SubscriberLabel` in `TopicSubscriptionNode` for `.subscribe(subscriber = slot_name)` by resolving the subscriber local origin.
+- `originForCall` stores `TopicPublisherNode` for `.publisher()` and records the bound local name when the call is assigned.
+- `recordGraphFromExprStmt` handles `hardware.vcpuN.start(executor = name)` and `hardware.vcpuN.enter(executor = name)`. It reads the executor origin, resolves `FieldBindings["slot"]`, resolves that slot origin, and appends `VcpuPlacementNode`.
+- `hardware.vcpu0` and `hardware.vcpu1` are recognized directly from `FieldExpr{NameExpr("hardware"), "vcpu0|vcpu1"}` inside an owned_hardware phase; they do not need a local binding.
 
 - [ ] **Step 5: Verify**
 
@@ -1178,6 +1282,17 @@ git commit -m "feat: extract executor topic graph -Codex Automated"
 **Files:**
 - Modify: `compiler/sem/check.go`
 - Test: `compiler/sem/topic_graph_test.go`
+- Create: `tests/fixtures/negative/duplicate_slot_label.wrela`
+- Create: `tests/fixtures/negative/subscription_slot_mismatch.wrela`
+- Create: `tests/fixtures/negative/vcpu_overcommit.wrela`
+- Create: `tests/fixtures/negative/publisher_used_twice.wrela`
+- Create: `tests/fixtures/negative/invalid_vcpu_enter_order.wrela`
+- Create: `tests/fixtures/negative/missing_topic_identity.wrela`
+- Create: `tests/fixtures/negative/reliable_try_publish_ignored.wrela`
+- Create: `tests/fixtures/negative/subscription_used_by_wrong_executor.wrela`
+- Create: `tests/fixtures/negative/lossy_topic_without_gap_tolerance.wrela`
+- Create: `tests/fixtures/negative/sleeping_loop_without_wake_source.wrela`
+- Create: `tests/fixtures/negative/executor_memory_slot_mismatch.wrela`
 
 - [ ] **Step 1: Add graph diagnostic tests**
 
@@ -1224,6 +1339,7 @@ data U64TopicMessage { sequence: U64; value: U64 }
 data U64TopicNext { has_message: Bool; gap: Bool; missed: U64; message: U64TopicMessage }
 data U64PublishResult { published: Bool; full: Bool }
 class U64GapTopic {
+    identity: TopicIdentity
     id: U64
     depth: U64
     fn publisher(self) -> U64GapPublisher { return U64GapPublisher(topic = self) }
@@ -1240,7 +1356,7 @@ module test.invalid_graph
 use { ExecutorSlot, SlotIdentity, PathIdentity, OwnedHardware } from machine.x86_64.cpu_state
 use { ExecutorMemory } from machine.x86_64.executor_memory
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { U64GapPublisher, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { U64GapPublisher, U64GapSubscription, U64GapTopic, TopicIdentity } from machine.x86_64.topic_u64
 use { SerialConsolePath } from machine.x86_64.serial
 
 executor Worker {
@@ -1289,7 +1405,7 @@ func TestExecutorTopicGraphDiagnostics(t *testing.T) {
 			body: `
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "b"))
-        let topic = U64GapTopic(id = 0, depth = 64)
+        let topic = U64GapTopic(identity = TopicIdentity(label = "topic.mismatch"), id = 0, depth = 64)
         let input = topic.subscribe(subscriber = slot_a)
         let output = topic.publisher()
         let serial = SerialConsolePath(identity = PathIdentity(label = "console"))
@@ -1303,8 +1419,8 @@ func TestExecutorTopicGraphDiagnostics(t *testing.T) {
 			body: `
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "b"))
-        let topic_a = U64GapTopic(id = 0, depth = 64)
-        let topic_b = U64GapTopic(id = 1, depth = 64)
+        let topic_a = U64GapTopic(identity = TopicIdentity(label = "topic.a"), id = 0, depth = 64)
+        let topic_b = U64GapTopic(identity = TopicIdentity(label = "topic.b"), id = 1, depth = 64)
         let serial = SerialConsolePath(identity = PathIdentity(label = "console"))
         let a = Worker(slot = slot_a, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = topic_a.subscribe(subscriber = slot_a), output = topic_a.publisher(), serial = serial)
         let b = Worker(slot = slot_b, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 4096, arena_length = 4096, next_offset = 0), input = topic_b.subscribe(subscriber = slot_b), output = topic_b.publisher(), serial = serial)
@@ -1318,8 +1434,8 @@ func TestExecutorTopicGraphDiagnostics(t *testing.T) {
 			body: `
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "b"))
-        let topic_a = U64GapTopic(id = 0, depth = 64)
-        let topic_b = U64GapTopic(id = 1, depth = 64)
+        let topic_a = U64GapTopic(identity = TopicIdentity(label = "topic.a"), id = 0, depth = 64)
+        let topic_b = U64GapTopic(identity = TopicIdentity(label = "topic.b"), id = 1, depth = 64)
         let serial_a = SerialConsolePath(identity = PathIdentity(label = "console.a"))
         let serial_b = SerialConsolePath(identity = PathIdentity(label = "console.b"))
         let a = Worker(slot = slot_a, loop = EventSleepPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), input = topic_a.subscribe(subscriber = slot_a), output = topic_a.publisher(), serial = serial_a)
@@ -1334,7 +1450,7 @@ func TestExecutorTopicGraphDiagnostics(t *testing.T) {
 			body: `
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "b"))
-        let topic = U64GapTopic(id = 0, depth = 64)
+        let topic = U64GapTopic(identity = TopicIdentity(label = "topic.shared"), id = 0, depth = 64)
         let publisher = topic.publisher()
         let serial_a = SerialConsolePath(identity = PathIdentity(label = "console.a"))
         let serial_b = SerialConsolePath(identity = PathIdentity(label = "console.b"))
@@ -1362,7 +1478,35 @@ Run: `go test ./compiler/sem -run TestExecutorTopicGraphDiagnostics -v`
 
 Expected: FAIL because the invalid graph cases do not yet produce the expected diagnostics.
 
-- [ ] **Step 3: Implement graph validation**
+- [ ] **Step 3: Add negative fixtures matching the graph diagnostics**
+
+Create one complete `.wrela` fixture for each row below. Each fixture must include the same source-contract modules used by `executorTopicGraphDiags` in Step 1, then the invalid image body for that row, plus an exact expectation header:
+
+```wrela
+// expect: SEM0033: duplicate executor slot label "worker"
+```
+
+Use these fixture/header pairs:
+
+```text
+tests/fixtures/negative/duplicate_slot_label.wrela -> SEM0033 duplicate executor slot label "worker"
+tests/fixtures/negative/subscription_slot_mismatch.wrela -> SEM0035 subscription subscriber slot does not match executor slot
+tests/fixtures/negative/vcpu_overcommit.wrela -> SEM0037 vCPU 1 starts more than one executor
+tests/fixtures/negative/publisher_used_twice.wrela -> SEM0039 topic publisher is assigned to more than one producer
+tests/fixtures/negative/invalid_vcpu_enter_order.wrela -> SEM0036 current vCPU enter must be terminal
+tests/fixtures/negative/missing_topic_identity.wrela -> SEM0048 publishing topic requires TopicIdentity(label = ...)
+tests/fixtures/negative/reliable_try_publish_ignored.wrela -> SEM0045 reliable try_publish result must be inspected or use publish_or_wait
+tests/fixtures/negative/subscription_used_by_wrong_executor.wrela -> SEM0040 subscription value used outside subscriber executor
+tests/fixtures/negative/lossy_topic_without_gap_tolerance.wrela -> SEM0041 lossy topic requires gap-tolerant subscriber policy
+tests/fixtures/negative/sleeping_loop_without_wake_source.wrela -> SEM0044 sleeping executor has no wake source
+tests/fixtures/negative/executor_memory_slot_mismatch.wrela -> SEM0047 executor memory owner slot does not match executor slot
+```
+
+Run: `go test ./compiler -run TestNegativeFixtures -v`
+
+Expected: FAIL before checker implementation, PASS after Step 4.
+
+- [ ] **Step 4: Implement graph validation**
 
 Add `checkExecutorTopicGraph()` and call it from `Check` after `checkExecutorWiring()`:
 
@@ -1386,21 +1530,22 @@ Required behavior:
 - Shared path produces SEM0038. Update old shared-path tests from SEM0011 to SEM0038 in the same commit.
 - Publisher value passed to more than one producer field produces SEM0039.
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 5: Verify**
 
 Run:
 
 ```bash
 go test ./compiler/sem -run 'TestExecutorTopicGraphDiagnostics|TestExecutorSlotTopicGraphExtraction|TestExecutorTopicKindClassification' -v
+go test ./compiler -run TestNegativeFixtures -v
 git diff --check
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add compiler/sem/check.go compiler/sem/topic_graph_test.go
+git add compiler/sem/check.go compiler/sem/topic_graph_test.go tests/fixtures/negative/duplicate_slot_label.wrela tests/fixtures/negative/subscription_slot_mismatch.wrela tests/fixtures/negative/vcpu_overcommit.wrela tests/fixtures/negative/publisher_used_twice.wrela tests/fixtures/negative/invalid_vcpu_enter_order.wrela tests/fixtures/negative/missing_topic_identity.wrela tests/fixtures/negative/reliable_try_publish_ignored.wrela tests/fixtures/negative/subscription_used_by_wrong_executor.wrela tests/fixtures/negative/lossy_topic_without_gap_tolerance.wrela tests/fixtures/negative/sleeping_loop_without_wake_source.wrela tests/fixtures/negative/executor_memory_slot_mismatch.wrela
 git commit -m "feat: enforce executor topic graph -Codex Automated"
 ```
 
@@ -1534,13 +1679,16 @@ package ir
 import "testing"
 
 func TestVcpuDispatchOpsDefineShape(t *testing.T) {
-	start := &VcpuStart{VcpuID: 1, Executor: &Local{Symbol: "worker"}, SlotLabel: "worker"}
+	start := &VcpuStart{VcpuID: 1, Executor: &Local{Symbol: "worker"}, SlotLabel: "worker", Type: Type{Name: "VcpuStartStatus"}}
 	enter := &VcpuEnter{VcpuID: 0, Executor: &Local{Symbol: "main"}, SlotLabel: "main"}
 	if start.VcpuID != 1 || enter.VcpuID != 0 {
 		t.Fatalf("bad vcpu ids")
 	}
 	if _, ok := any(start).(Operation); !ok {
 		t.Fatal("VcpuStart must be operation")
+	}
+	if len(valuesDefinedBy(start)) != 1 {
+		t.Fatal("VcpuStart must define VcpuStartStatus")
 	}
 	if _, ok := any(enter).(Operation); !ok {
 		t.Fatal("VcpuEnter must be operation")
@@ -1603,7 +1751,9 @@ type VcpuStart struct {
 	VcpuID    int
 	Executor  Value
 	SlotLabel string
+	Type      Type
 }
+func (*VcpuStart) isValue() {}
 func (*VcpuStart) isOperation() {}
 
 type VcpuEnter struct {
@@ -1614,7 +1764,7 @@ type VcpuEnter struct {
 func (*VcpuEnter) isOperation() {}
 ```
 
-Update `valuesDefinedBy` to return values for `ReliableTopicTryPublish` and `TopicTryNext`.
+Update `valuesDefinedBy` to return values for `ReliableTopicTryPublish`, `TopicTryNext`, and `VcpuStart`. `VcpuEnter` does not define a value because it is terminal.
 
 Extend `Program`:
 
@@ -1675,13 +1825,60 @@ git commit -m "feat: add topic vcpu ir ops -Codex Automated"
 Append to `compiler/ir/topic_test.go`:
 
 ```go
+// Add fmt plus compiler/parse, compiler/sem, and compiler/source to the import block.
+func checkedProgramFromSourcesForTest(t *testing.T, sources ...string) *sem.CheckedProgram {
+	t.Helper()
+	files := make([]*source.File, len(sources))
+	for i, text := range sources {
+		files[i] = source.NewFile(source.FileID(i+1), fmt.Sprintf("m%d.wrela", i), text)
+	}
+	modules, ds := parse.ParseGraph(source.Graph{Files: files})
+	if len(ds) != 0 {
+		t.Fatalf("parse diagnostics: %#v", ds)
+	}
+	index, ds := sem.BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	checked, ds := sem.Check(index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+	return checked
+}
+
 func TestLowerTopicPublishAndTryNext(t *testing.T) {
-	checked := checkedProgramForTest(t, `
+	checked := checkedProgramFromSourcesForTest(t, `
+module machine.x86_64.cpu_state
+data ExecutorSlot { id: U64 }
+`, `
+module machine.x86_64.executor_memory
+class ExecutorMemory { arena_base: PhysicalAddress; arena_length: U64; next_offset: U64 }
+`, `
+module machine.x86_64.executor_loop
+class EventSleepPolicy { asm fn wait(self) { hlt; ret } }
+`, `
+module machine.x86_64.topic_u64
+use { ExecutorSlot } from machine.x86_64.cpu_state
+data TopicIdentity { label: StringLiteral }
+data U64TopicMessage { sequence: U64; value: U64 }
+data U64TopicNext { has_message: Bool; gap: Bool; missed: U64; message: U64TopicMessage }
+class U64GapTopic { identity: TopicIdentity; id: U64; depth: U64 }
+class U64GapSubscription {
+    topic: U64GapTopic
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+    asm fn try_next(self) -> U64TopicNext { ret }
+    fn arm_wait(self) { self.armed = true }
+}
+`, `
 module test.lower_topic
-use { ExecutorSlot, SlotIdentity, OwnedHardware } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.cpu_state
 use { ExecutorMemory } from machine.x86_64.executor_memory
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { U64GapTopic, TopicIdentity } from machine.x86_64.topic_u64
+use { U64GapSubscription } from machine.x86_64.topic_u64
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
@@ -1766,16 +1963,35 @@ if isIRVcpu(recvType) && (e.Method == "start" || e.Method == "enter") {
 	vcpuID := ctx.vcpuIDForValue(receiver)
 	ops := append(receiverOps, executorOps...)
 	if e.Method == "start" {
-		ops = append(ops, &VcpuStart{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel})
 		statusType := ctx.resolveType("machine.x86_64.cpu_state", "VcpuStartStatus")
-		return executor, ops, statusType
+		op := &VcpuStart{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(statusType)}
+		ops = append(ops, op)
+		return op, ops, statusType
 	}
 	ops = append(ops, &VcpuEnter{VcpuID: vcpuID, Executor: executor, SlotLabel: slotLabel})
 	return executor, ops, ctx.resolveType(moduleName, "never")
 }
 ```
 
-Implement `topicLabelForValue`, `slotLabelForExecutorValue`, and `vcpuIDForValue` using metadata from `checked.ImageGraph`.
+Add lowering cases for reliable producer wait and loop wait:
+
+```go
+if isIRReliablePublisher(recvType) && e.Method == "wait_for_subscriber_advance" {
+	op := &ReliableTopicWaitForAdvance{TopicLabel: ctx.topicLabelForValue(receiver)}
+	ops := append(receiverOps, op)
+	return receiver, ops, recvType
+}
+if isIRLoopPolicy(recvType) && e.Method == "wait" {
+	slotLabel := ctx.currentExecutorSlotLabel(receiverType)
+	op := &TopicWait{SlotLabel: slotLabel, Policy: recvType.Name}
+	ops := append(receiverOps, op)
+	return receiver, ops, recvType
+}
+```
+
+Do not lower `is_wait_armed()` specially. It remains a normal field-backed method from the Wrela source contract and compiles through ordinary call/field lowering until a later optimizer inlines it.
+
+Implement `topicLabelForValue`, `slotLabelForExecutorValue`, `vcpuIDForValue`, and `currentExecutorSlotLabel` using metadata from `checked.ImageGraph`.
 
 - [ ] **Step 4: Verify**
 
@@ -1824,6 +2040,7 @@ package codegen
 import (
 	"bytes"
 	"testing"
+
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
@@ -1851,6 +2068,31 @@ func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 		t.Fatalf("topic size too small: %d", counter.TotalSize)
 	}
 }
+
+func TestTopicDataLayoutOrderIsDeterministic(t *testing.T) {
+	program := &ir.Program{
+		Topics: []ir.TopicLayout{
+			{Label: "z.topic", Kind: "gap_u64", Depth: 64, Subscribers: []string{"worker"}},
+			{Label: "a.topic", Kind: "gap_u64", Depth: 64, Subscribers: []string{"worker"}},
+		},
+	}
+	ordered := orderedTopicDataLayouts(program)
+	if ordered[0].Label != "a.topic" || ordered[1].Label != "z.topic" {
+		t.Fatalf("layouts not sorted: %#v", ordered)
+	}
+}
+
+func TestTopicDataObjectStartsAligned(t *testing.T) {
+	objects := []ir.DataObject{
+		{Symbol: "prefix", Bytes: []byte{1}},
+		{Symbol: "topic", Bytes: make([]byte, 64), Align: 64},
+	}
+	data := []byte{}
+	offsets := appendDataObjects(&data, objects)
+	if offsets["topic"]%64 != 0 {
+		t.Fatalf("topic offset = %d, want 64-byte aligned", offsets["topic"])
+	}
+}
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -1866,7 +2108,11 @@ Create `compiler/codegen/topic_data.go`:
 ```go
 package codegen
 
-import "github.com/ryanwible/wrela3/compiler/ir"
+import (
+	"sort"
+
+	"github.com/ryanwible/wrela3/compiler/ir"
+)
 
 const cacheLineSize = 64
 
@@ -1890,7 +2136,19 @@ func alignUp64(v uint64) uint64 {
 
 func planTopicData(program *ir.Program) map[string]topicDataLayout {
 	out := map[string]topicDataLayout{}
-	for _, topic := range program.Topics {
+	for _, layout := range orderedTopicDataLayouts(program) {
+		out[layout.Label] = layout
+	}
+	return out
+}
+
+func orderedTopicDataLayouts(program *ir.Program) []topicDataLayout {
+	out := []topicDataLayout{}
+	topics := append([]ir.TopicLayout{}, program.Topics...)
+	sort.Slice(topics, func(i, j int) bool {
+		return topics[i].Label < topics[j].Label
+	})
+	for _, topic := range topics {
 		offset := uint64(0)
 		layout := topicDataLayout{
 			Label: topic.Label,
@@ -1913,7 +2171,7 @@ func planTopicData(program *ir.Program) map[string]topicDataLayout {
 		layout.RingOffset = offset
 		offset += topic.Depth * cacheLineSize
 		layout.TotalSize = alignUp64(offset)
-		out[topic.Label] = layout
+		out = append(out, layout)
 	}
 	return out
 }
@@ -1924,10 +2182,30 @@ func planTopicData(program *ir.Program) map[string]topicDataLayout {
 Extend `buildData(program)` so every topic emits a zeroed writable data object:
 
 ```go
-for _, layout := range planTopicData(program) {
+for _, layout := range orderedTopicDataLayouts(program) {
 	symbol := "_wrela_topic_" + sanitizeSymbol(layout.Label)
 	data := make([]byte, layout.TotalSize)
-	objects = append(objects, ir.DataObject{Symbol: symbol, Bytes: data})
+	objects = append(objects, ir.DataObject{Symbol: symbol, Bytes: data, Align: 64})
+}
+```
+
+Add `Align uint64` to `ir.DataObject`. Update `appendDataObjects` so every object starts at its requested alignment:
+
+```go
+func appendDataObjects(out *[]byte, objects []ir.DataObject) map[string]uint64 {
+	offsets := map[string]uint64{}
+	for _, obj := range objects {
+		align := obj.Align
+		if align == 0 {
+			align = 1
+		}
+		for uint64(len(*out))%align != 0 {
+			*out = append(*out, 0)
+		}
+		offsets[obj.Symbol] = uint64(len(*out))
+		*out = append(*out, obj.Bytes...)
+	}
+	return offsets
 }
 ```
 
@@ -2015,7 +2293,60 @@ Expected: FAIL because topic ops are not emitted.
 
 - [ ] **Step 3: Implement gap publish**
 
-Emit this algorithm:
+Add these switch cases inside `compileFunction` in `compiler/codegen/x64.go`, next to the existing IR operation cases:
+
+```go
+case *ir.TopicPublish:
+	emitTopicPublish(e, v, frame, ctx)
+case *ir.TopicTryNext:
+	emitTopicTryNext(e, v, frame, ctx)
+case *ir.TopicArmWait:
+	emitTopicArmWait(e, v, frame, ctx)
+```
+
+Add these helper signatures below the existing arena helpers in `compiler/codegen/x64.go`:
+
+```go
+func emitTopicPublish(e *Emitter, op *ir.TopicPublish, frame Frame, ctx compileContext) {
+	layout := ctx.TopicLayouts[op.TopicLabel]
+	base := topicBaseSymbol(op.TopicLabel)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), base)
+	emitRegRegMove(e, asm.MustLookup("r11"), asm.MustLookup("rax"))
+	emitLoadMemToReg(e, asm.MustLookup("rax"), asm.MustLookup("r11"), int64(layout.ProducerSequenceOffset), 64)
+	emitRegRegMove(e, asm.MustLookup("rbx"), asm.MustLookup("rax"))
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup("rbx")}, asm.ImmOperand{Value: 1}}})
+	emitTopicSlotAddress(e, layout, asm.MustLookup("rax"), asm.MustLookup("r12"))
+	emitStoreMemFromReg(e, asm.MustLookup("r12"), 0, asm.MustLookup("rbx"), 64)
+	emitLoadValue(e, frame, op.Value, asm.MustLookup("r10"))
+	emitStoreMemFromReg(e, asm.MustLookup("r12"), 8, asm.MustLookup("r10"), 64)
+	emitMFence(e)
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(layout.ProducerSequenceOffset), asm.MustLookup("rbx"), 64)
+	for _, subscriber := range layout.Subscribers {
+		emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(layout.SubscriberWaitlineOffsets[subscriber]), asm.MustLookup("rbx"), 64)
+	}
+}
+
+func topicBaseSymbol(label string) string {
+	return "_wrela_topic_" + sanitizeSymbol(label)
+}
+
+func emitTopicSlotAddress(e *Emitter, layout topicDataLayout, sequenceReg asm.Reg, dst asm.Reg) {
+	mask := int64(layout.Depth - 1)
+	emitRegRegMove(e, dst, sequenceReg)
+	e.emitInstruction(asm.Instruction{Mnemonic: "and", Operands: []asm.Operand{asm.RegOperand{Reg: dst}, asm.ImmOperand{Value: mask}}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "shl", Operands: []asm.Operand{asm.RegOperand{Reg: dst}, asm.ImmOperand{Value: 6}}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{asm.RegOperand{Reg: dst}, asm.RegOperand{Reg: asm.MustLookup("r11")}}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{asm.RegOperand{Reg: dst}, asm.ImmOperand{Value: int64(layout.RingOffset)}}})
+}
+
+func emitMFence(e *Emitter) {
+	e.emit(0x0F, 0xAE, 0xF0)
+}
+```
+
+If `compileContext` does not yet carry topic layouts, add `TopicLayouts map[string]topicDataLayout` and populate it once from `planTopicData(program)` before compiling functions.
+
+The helper must emit this exact behavior:
 
 ```text
 base = &_wrela_topic_counter
@@ -2066,7 +2397,51 @@ subscription.armed = false
 return has_message=true, gap=false, message={sequence=expected,value=value}
 ```
 
-Construct `U64TopicNext` into the hidden return record using existing record-return conventions.
+Store the `U64TopicNext` result through this helper. It writes into the value slot for the `TopicTryNext` op; it does not use the function-level `RecordReturnSlot`.
+
+```go
+type topicNextResultRegs struct {
+	HasMessage bool
+	Gap        bool
+	Missed     asm.Reg
+	Sequence   asm.Reg
+	Value      asm.Reg
+}
+
+func emitStoreTopicNextResult(e *Emitter, op *ir.TopicTryNext, frame Frame, regs topicNextResultRegs) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		panic("missing result slot for TopicTryNext")
+	}
+	nextInfo, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		panic("missing TypeInfo for U64TopicNext")
+	}
+	msgInfo, ok := e.ctx.typeInfo(ir.Type{Module: "machine.x86_64.topic_u64", Name: "U64TopicMessage"})
+	if !ok {
+		panic("missing TypeInfo for U64TopicMessage")
+	}
+
+	emitStoreBoolField(e, slot+nextInfo.Fields["has_message"].Offset, regs.HasMessage)
+	emitStoreBoolField(e, slot+nextInfo.Fields["gap"].Offset, regs.Gap)
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(slot+nextInfo.Fields["missed"].Offset), regs.Missed, 64)
+
+	msgOffset := slot + nextInfo.Fields["message"].Offset
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(msgOffset+msgInfo.Fields["sequence"].Offset), regs.Sequence, 64)
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(msgOffset+msgInfo.Fields["value"].Offset), regs.Value, 64)
+}
+
+func emitStoreBoolField(e *Emitter, offset int, value bool) {
+	imm := int64(0)
+	if value {
+		imm = 1
+	}
+	emitMovImmToReg(e, asm.MustLookup("rax"), imm)
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(offset), asm.MustLookup("rax"), 8)
+}
+```
+
+For the `has_message=false` paths, pass zeroed scratch registers for `Missed`, `Sequence`, and `Value` unless the path returns `gap=true`; the gap path must pass the computed `missed` register and zeroed message registers.
 
 - [ ] **Step 5: Implement arm**
 
@@ -2115,17 +2490,106 @@ func TestReliableTopicPublishChecksSlowestSubscriber(t *testing.T) {
 		t.Fatalf("reliable publish must compare against subscriber cursor: %x", publish)
 	}
 }
+
 ```
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `go test ./compiler/codegen -run TestReliableTopicPublishChecksSlowestSubscriber -v`
+Run:
+
+```bash
+go test ./compiler/codegen -run TestReliableTopicPublishChecksSlowestSubscriber -v
+```
 
 Expected: FAIL because reliable publish does not inspect subscriber cursors.
 
 - [ ] **Step 3: Implement reliable try_publish**
 
-Emit this algorithm:
+Add a compile switch case:
+
+```go
+case *ir.ReliableTopicTryPublish:
+	emitReliableTopicTryPublish(e, v, frame, ctx)
+case *ir.ReliableTopicWaitForAdvance:
+	emitReliableTopicWaitForAdvance(e, v, frame, ctx)
+```
+
+Add this helper skeleton and fill only the marked record-return stores using existing field offsets from `ctx.typeInfo(op.Type)`:
+
+```go
+func emitReliableTopicTryPublish(e *Emitter, op *ir.ReliableTopicTryPublish, frame Frame, ctx compileContext) {
+	layout := ctx.TopicLayouts[op.TopicLabel]
+	base := topicBaseSymbol(op.TopicLabel)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), base)
+	emitRegRegMove(e, asm.MustLookup("r11"), asm.MustLookup("rax"))
+	emitLoadMemToReg(e, asm.MustLookup("rax"), asm.MustLookup("r11"), int64(layout.ProducerSequenceOffset), 64)
+	emitMinSubscriberCursor(e, layout, asm.MustLookup("r13"))
+	emitRegRegMove(e, asm.MustLookup("r14"), asm.MustLookup("rax"))
+	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup("r14")}, asm.RegOperand{Reg: asm.MustLookup("r13")}}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup("r14")}, asm.ImmOperand{Value: int64(layout.Depth)}}})
+	fullLabel := e.newLabel("reliable_full")
+	doneLabel := e.newLabel("reliable_done")
+	e.emitJcc(0x83, fullLabel) // jae
+
+	emitRegRegMove(e, asm.MustLookup("rbx"), asm.MustLookup("rax"))
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{asm.RegOperand{Reg: asm.MustLookup("rbx")}, asm.ImmOperand{Value: 1}}})
+	emitTopicSlotAddress(e, layout, asm.MustLookup("rax"), asm.MustLookup("r12"))
+	emitStoreMemFromReg(e, asm.MustLookup("r12"), 0, asm.MustLookup("rbx"), 64)
+	emitLoadValue(e, frame, op.Value, asm.MustLookup("r10"))
+	emitStoreMemFromReg(e, asm.MustLookup("r12"), 8, asm.MustLookup("r10"), 64)
+	emitMFence(e)
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(layout.ProducerSequenceOffset), asm.MustLookup("rbx"), 64)
+	for _, subscriber := range layout.Subscribers {
+		emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(layout.SubscriberWaitlineOffsets[subscriber]), asm.MustLookup("rbx"), 64)
+	}
+	emitStorePublishResult(e, op, frame, true, false)
+	e.emitJmp(doneLabel)
+
+	e.bindLabel(fullLabel)
+	emitStorePublishResult(e, op, frame, false, true)
+	e.bindLabel(doneLabel)
+}
+
+func emitMinSubscriberCursor(e *Emitter, layout topicDataLayout, dst asm.Reg) {
+	first := layout.Subscribers[0]
+	emitLoadMemToReg(e, dst, asm.MustLookup("r11"), int64(layout.SubscriberCursorOffsets[first]), 64)
+	for _, subscriber := range layout.Subscribers[1:] {
+		emitLoadMemToReg(e, asm.MustLookup("r10"), asm.MustLookup("r11"), int64(layout.SubscriberCursorOffsets[subscriber]), 64)
+		e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{asm.RegOperand{Reg: dst}, asm.RegOperand{Reg: asm.MustLookup("r10")}}})
+		keepLabel := e.newLabel("min_cursor_keep")
+		e.emitJcc(0x86, keepLabel) // jbe
+		emitRegRegMove(e, dst, asm.MustLookup("r10"))
+		e.bindLabel(keepLabel)
+	}
+}
+```
+
+Add this helper next to the other value-result emitters:
+
+```go
+func emitStorePublishResult(e *Emitter, op *ir.ReliableTopicTryPublish, frame Frame, published bool, full bool) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		panic("missing result slot for ReliableTopicTryPublish")
+	}
+	publishedValue := int64(0)
+	if published {
+		publishedValue = 1
+	}
+	fullValue := int64(0)
+	if full {
+		fullValue = 1
+	}
+	emitMovImmToReg(e, asm.MustLookup("rax"), publishedValue)
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(slot+0), asm.MustLookup("rax"), 8)
+	emitMovImmToReg(e, asm.MustLookup("rax"), fullValue)
+	emitStoreMemFromReg(e, asm.MustLookup("rbp"), int64(slot+1), asm.MustLookup("rax"), 8)
+}
+```
+
+Use the same `frame.Slots` lookup shape as `emitConstruct`. The two bool fields are stored at byte offsets 0 and 1 for `U64PublishResult`; `8` is the width in bits, not bytes. Add a focused unit assertion that the emitted stores for `published=true, full=false` write bytes `01 00`, not two eight-byte words.
+
+This helper emits:
 
 ```text
 producer = [producer_sequence]
@@ -2146,7 +2610,27 @@ For one subscriber, `min_cursor` is that subscriber's cursor line. For multiple 
 
 - [ ] **Step 4: Implement wait_for_subscriber_advance**
 
-Emit this algorithm for `ReliableTopicWaitForAdvance`:
+Add a producer waitline to `topicDataLayout`:
+
+```go
+ProducerWaitlineOffset uint64
+```
+
+Allocate it after `ProducerSequenceOffset` and before subscriber cursor lines. Then implement:
+
+```go
+func emitReliableTopicWaitForAdvance(e *Emitter, op *ir.ReliableTopicWaitForAdvance, frame Frame, ctx compileContext) {
+	layout := ctx.TopicLayouts[op.TopicLabel]
+	base := topicBaseSymbol(op.TopicLabel)
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), base)
+	emitRegRegMove(e, asm.MustLookup("r11"), asm.MustLookup("rax"))
+	emitMinSubscriberCursor(e, layout, asm.MustLookup("r13"))
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(layout.ProducerWaitlineOffset), asm.MustLookup("r13"), 64)
+	emitHltWait(e)
+}
+```
+
+The helper emits:
 
 ```text
 arm producer waitline for this topic
@@ -2156,7 +2640,7 @@ hlt fallback wait
 return
 ```
 
-The first implementation may use `hlt` fallback. Task 12 adds cache-line wait instruction selection.
+This task uses `hlt` fallback. Task 12 adds cache-line wait instruction selection.
 
 - [ ] **Step 5: Verify**
 
@@ -2184,6 +2668,7 @@ git commit -m "feat: emit reliable topic operations -Codex Automated"
 
 **Files:**
 - Modify: `compiler/codegen/x64.go`
+- Create: `compiler/codegen/lapic.go`
 - Create: `compiler/codegen/wait_test.go`
 
 - [ ] **Step 1: Add wait byte tests**
@@ -2254,7 +2739,47 @@ Use existing assembler support for register setup and emit the two monitor/mwait
 
 - [ ] **Step 4: Wire `TopicWait`**
 
-For `TopicWait`, use fallback `hlt` by default. Add a compile option or internal constant for monitor/mwait selection; keep the default fallback until CPUID/profile plumbing exists.
+For `TopicWait`, use fallback `hlt` by default. Add `SlotVcpu map[string]int` to `compileContext`, populated from `program.VcpuStarts`.
+
+Create `compiler/codegen/lapic.go`:
+
+```go
+package codegen
+
+import "github.com/ryanwible/wrela3/compiler/asm"
+
+const (
+	lapicBase    = 0xFEE00000
+	lapicICRLow  = 0x300
+	lapicICRHigh = 0x310
+)
+
+func emitLapicWrite(e *Emitter, offset uint32, value uint32) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("r11")},
+		asm.ImmOperand{Value: lapicBase},
+	}})
+	emitMovImmToReg(e, asm.MustLookup("rax"), int64(value))
+	emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(offset), asm.MustLookup("rax"), 32)
+}
+```
+
+Add this helper for producer wake fanout in `compiler/codegen/x64.go`:
+
+```go
+func emitWakeSubscriberSlots(e *Emitter, subscribers []string, ctx compileContext) {
+	for _, slot := range subscribers {
+		vcpuID := ctx.SlotVcpu[slot]
+		if vcpuID == 0 {
+			continue
+		}
+		emitLapicWrite(e, lapicICRHigh, uint32(vcpuID)<<24)
+		emitLapicWrite(e, lapicICRLow, 0x00004000|0xF0) // fixed delivery IPI vector 0xF0
+	}
+}
+```
+
+Put the LAPIC constants and `emitLapicWrite` in `compiler/codegen/lapic.go`; Task 14D reuses the same helper for AP startup. Call `emitWakeSubscriberSlots` after publishing to topic waitlines. Coalescing uses the subscriber waitline value: when the waitline already equals the new sequence, skip the IPI. This task emits the comparison inline before the LAPIC write.
 
 - [ ] **Step 5: Verify**
 
@@ -2270,7 +2795,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add compiler/codegen/x64.go compiler/codegen/wait_test.go compiler/asm/encode.go compiler/asm/*test.go
+git add compiler/codegen/x64.go compiler/codegen/lapic.go compiler/codegen/wait_test.go
 git commit -m "feat: add topic wait primitives -Codex Automated"
 ```
 
@@ -2348,18 +2873,16 @@ git commit -m "feat: add qemu smp option -Codex Automated"
 
 **Acceptance Criteria:** QEMU tests can request `-smp 2`.
 
-### Task 14: vCPU Start And Bootstrap AP Trampoline
+### Task 14A: vCPU Startup Data Records
 
-**Description:** Implement `hardware.vcpu1.start(executor = worker)` and `hardware.vcpu0.enter(executor = hello)` for a static two-vCPU q35 target.
+**Description:** Add deterministic startup data symbols for vCPU0 and vCPU1. This task is junior-safe because it only creates data layout and tests.
 
 **Files:**
 - Create: `compiler/codegen/vcpu_start.go`
 - Create: `compiler/codegen/vcpu_start_test.go`
-- Modify: `compiler/codegen/x64.go`
-- Modify: `wrela/platform/uefi/types.wrela`
-- Modify: `wrela/platform/uefi/transition.wrela`
+- Modify: `compiler/ir/ir.go`
 
-- [ ] **Step 1: Add vCPU start codegen tests**
+- [ ] **Step 1: Add startup data tests**
 
 Create `compiler/codegen/vcpu_start_test.go`:
 
@@ -2368,148 +2891,448 @@ package codegen
 
 import (
 	"bytes"
+	"encoding/binary"
+	"strings"
 	"testing"
+
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
-func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
+func TestVcpuStartupDataSymbolsAreDeterministic(t *testing.T) {
 	program := &ir.Program{
-		VcpuStarts: []ir.VcpuStartPlan{{VcpuID: 1, SlotLabel: "worker", Terminal: false}},
-		Functions: []ir.Function{{
-			Symbol: "start_worker",
-			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
-				&ir.VcpuStart{VcpuID: 1, SlotLabel: "worker", Executor: &ir.Local{Symbol: "worker"}},
-			}}},
-		}},
+		VcpuStarts: []ir.VcpuStartPlan{
+			{VcpuID: 0, SlotLabel: "hello", Terminal: true},
+			{VcpuID: 1, SlotLabel: "worker", Terminal: false},
+		},
 	}
-	image, ds := Compile(program)
-	if len(ds) != 0 { t.Fatalf("Compile diagnostics: %#v", ds) }
-	code := symbolBytes(t, image, "start_worker")
-	if !bytes.Contains(code, []byte{0x00, 0x03, 0x00, 0x00}) {
-		t.Fatalf("start must contain INIT/SIPI style APIC command immediates: %x", code)
+	objects := vcpuStartupData(program)
+	got := []string{}
+	for _, obj := range objects {
+		got = append(got, obj.Symbol)
+		if obj.Align != 64 {
+			t.Fatalf("%s align = %d, want 64", obj.Symbol, obj.Align)
+		}
+	}
+	want := []string{
+		"_wrela_vcpu0_ready",
+		"_wrela_vcpu0_entry",
+		"_wrela_vcpu0_stack_top",
+		"_wrela_vcpu0_context",
+		"_wrela_vcpu1_ready",
+		"_wrela_vcpu1_entry",
+		"_wrela_vcpu1_stack_top",
+		"_wrela_vcpu1_context",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("symbols = %#v, want %#v", got, want)
 	}
 }
 ```
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `go test ./compiler/codegen -run TestVcpuStartEmitsLapicIcrWrites -v`
+Run: `go test ./compiler/codegen -run TestVcpuStartupDataSymbolsAreDeterministic -v`
 
-Expected: FAIL because `VcpuStart` is not emitted.
+Expected: FAIL with undefined `VcpuStartPlan` or `vcpuStartupData`.
 
-- [ ] **Step 3: Define startup records**
+- [ ] **Step 3: Confirm IR plan structs**
+
+Confirm Task 7 already added `ir.VcpuStartPlan` and `Program.VcpuStarts`. Do not define a duplicate type in codegen.
+
+- [ ] **Step 4: Add startup data helpers**
 
 Create `compiler/codegen/vcpu_start.go`:
 
 ```go
 package codegen
 
-const (
-	apTrampolineBase = 0x8000
-	lapicBase        = 0xFEE00000
-	lapicICRLow      = 0x300
-	lapicICRHigh     = 0x310
+import (
+	"fmt"
+	"sort"
+
+	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
-type vcpuStartupRecord struct {
-	ReadyOffset uint64
-	EntryOffset uint64
-	StackTopOffset uint64
-	ContextOffset uint64
-	Cr3Offset uint64
+const (
+	apTrampolineBase = 0x8000
+)
+
+func vcpuStartupData(program *ir.Program) []ir.DataObject {
+	plans := append([]ir.VcpuStartPlan{}, program.VcpuStarts...)
+	sort.Slice(plans, func(i, j int) bool { return plans[i].VcpuID < plans[j].VcpuID })
+	out := []ir.DataObject{}
+	for _, plan := range plans {
+		for _, suffix := range []string{"ready", "entry", "stack_top", "context"} {
+			out = append(out, ir.DataObject{
+				Symbol: fmt.Sprintf("_wrela_vcpu%d_%s", plan.VcpuID, suffix),
+				Bytes: make([]byte, 8),
+				Align: 64,
+			})
+		}
+	}
+	return out
 }
 ```
 
-Generate writable data symbols:
+- [ ] **Step 5: Wire data into `.data`**
 
-```text
-_wrela_vcpu1_ready
-_wrela_vcpu1_entry
-_wrela_vcpu1_stack_top
-_wrela_vcpu1_context
-```
+In `buildData(program)`, append `vcpuStartupData(program)` after topic data and before interrupt runtime data.
 
-- [ ] **Step 4: Install AP trampoline during owned transition**
-
-In `transition.wrela`, after paging/GDT/IDT are built and before returning `OwnedHardware`, call a new delegated memory asm helper:
-
-```wrela
-self.delegated_memory.install_ap_trampoline(
-    trampoline_base = 0x8000,
-    cr3_value = pml4,
-    gdt_base = gdt.address
-)
-```
-
-The helper copies a generated trampoline byte blob to `0x8000`.
-
-Trampoline required behavior:
-
-```text
-real mode entry at 0x8000
-cli
-load temporary GDT descriptor
-enable PAE
-load shared CR3
-enable long mode in EFER
-enable paging/protected mode
-far jump to 64-bit label
-load vcpu1 stack top
-load vcpu1 context pointer
-call vcpu1 entry
-hlt loop if entry returns
-```
-
-Use a generated byte blob in codegen for the first implementation. Do not hand-assemble through Wrela parser if operand support is missing.
-
-- [ ] **Step 5: Emit APIC INIT/SIPI**
-
-For `VcpuStart{VcpuID: 1}`, emit:
-
-```text
-write APIC ID 1 to ICR high
-write INIT to ICR low
-short delay loop
-write SIPI vector apTrampolineBase >> 12 to ICR low
-short delay loop
-write SIPI again
-wait until _wrela_vcpu1_ready == 1 or timeout loop expires
-return VcpuStartStatus(started=true,id=1)
-```
-
-Use xAPIC MMIO at `0xFEE00000`. This plan targets static QEMU q35 with APIC ID 1 for vCPU1.
-
-- [ ] **Step 6: Emit current vCPU enter**
-
-For `VcpuEnter{VcpuID: 0}`, emit:
-
-```text
-copy executor context into _wrela_vcpu0_context
-call executor start function with context receiver
-if it returns, hlt loop
-```
-
-This operation is terminal at source level.
-
-- [ ] **Step 7: Verify**
+- [ ] **Step 6: Verify and commit**
 
 Run:
 
 ```bash
-go test ./compiler/codegen -run 'TestVcpuStartEmitsLapicIcrWrites|Vcpu' -v
+go test ./compiler/codegen -run TestVcpuStartupDataSymbolsAreDeterministic -v
 git diff --check
+git add compiler/ir/ir.go compiler/codegen/vcpu_start.go compiler/codegen/vcpu_start_test.go compiler/codegen/x64.go
+git commit -m "feat: add vcpu startup data records -Codex Automated"
 ```
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+**Acceptance Criteria:** vCPU startup data exists for vCPU0 and vCPU1, is sorted by vCPU ID, and is 64-byte aligned.
 
-```bash
-git add compiler/codegen/vcpu_start.go compiler/codegen/vcpu_start_test.go compiler/codegen/x64.go wrela/platform/uefi/types.wrela wrela/platform/uefi/transition.wrela
-git commit -m "feat: emit static two vcpu startup -Codex Automated"
+### Task 14B: Terminal vCPU Enter Codegen
+
+**Description:** Emit `hardware.vcpu0.enter(executor = hello)` as a terminal call into the executor start function. This task does not start secondary CPUs.
+
+**Files:**
+- Modify: `compiler/codegen/x64.go`
+- Modify: `compiler/codegen/vcpu_start.go`
+- Test: `compiler/codegen/vcpu_start_test.go`
+
+- [ ] **Step 1: Add vCPU enter test**
+
+Append to `compiler/codegen/vcpu_start_test.go`:
+
+```go
+func TestVcpuEnterCallsExecutorStartAndHaltsIfReturned(t *testing.T) {
+	execType := ir.Type{Name: "Hello", Module: "test", Kind: ir.TypeKindExecutor}
+	program := &ir.Program{
+		VcpuStarts: []ir.VcpuStartPlan{{VcpuID: 0, SlotLabel: "hello", ExecutorType: execType, Terminal: true}},
+		Functions: []ir.Function{{
+			Symbol: "enter_hello",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.VcpuEnter{VcpuID: 0, SlotLabel: "hello", Executor: &ir.Local{Symbol: "hello"}},
+			}}},
+		}},
+	}
+	image, ds := Compile(program)
+	if len(ds) != 0 { t.Fatalf("Compile diagnostics: %#v", ds) }
+	code := symbolBytes(t, image, "enter_hello")
+	if !bytes.Contains(code, []byte{0xF4}) {
+		t.Fatalf("enter must contain hlt fallback if executor returns: %x", code)
+	}
+	if !hasRelocTo(image, "enter_hello", "_wrela_method_test_Hello_run") {
+		t.Fatalf("enter_hello missing relocation to executor run")
+	}
+}
+
+func hasRelocTo(image *Image, ownerSymbol string, targetSymbol string) bool {
+	ownerRVA := image.Symbols[ownerSymbol]
+	for _, reloc := range image.Relocs {
+		if reloc.Symbol == targetSymbol && reloc.Offset >= ownerRVA {
+			return true
+		}
+	}
+	return false
+}
 ```
 
-**Acceptance Criteria:** Static q35 vCPU1 startup exists, vCPU0 enter is terminal, startup records are generated, and QEMU can be run with two vCPUs in later e2e tasks.
+- [ ] **Step 2: Run and verify failure**
+
+Run: `go test ./compiler/codegen -run TestVcpuEnterCallsExecutorStartAndHaltsIfReturned -v`
+
+Expected: FAIL because `VcpuEnter` is not emitted.
+
+- [ ] **Step 3: Add codegen hook**
+
+In the `compileFunction` operation switch:
+
+```go
+case *ir.VcpuEnter:
+	emitVcpuEnter(e, v, frame, ctx)
+	hasReturn = true
+```
+
+Add:
+
+```go
+func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
+	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
+	e.emitCall(executorStartSymbol(ctx.VcpuPlans[op.SlotLabel].ExecutorType))
+	emitHltLoop(e)
+}
+
+func executorStartSymbol(typ ir.Type) string {
+	return symbolName("method", typ.Module, typ.Name, "run")
+}
+
+func emitHltLoop(e *Emitter) {
+	loop := e.newLabel("hlt_loop")
+	e.bindLabel(loop)
+	e.emit(0xF4)
+	e.emitJmp(loop)
+}
+```
+
+Add `VcpuPlans map[string]ir.VcpuStartPlan` to `compileContext`.
+
+- [ ] **Step 4: Verify and commit**
+
+Run:
+
+```bash
+go test ./compiler/codegen -run TestVcpuEnterCallsExecutorStartAndHaltsIfReturned -v
+git diff --check
+git add compiler/codegen/x64.go compiler/codegen/vcpu_start.go compiler/codegen/vcpu_start_test.go
+git commit -m "feat: emit terminal vcpu enter -Codex Automated"
+```
+
+Expected: PASS.
+
+**Acceptance Criteria:** `VcpuEnter` calls the placed executor start method and cannot fall through to later source code.
+
+### Task 14C: AP Trampoline Blob Contract
+
+**Description:** Freeze the AP trampoline byte blob contract and installation point. This task is senior-owned because real-mode to long-mode AP startup is target-specific x86 work.
+
+**Files:**
+- Modify: `compiler/codegen/vcpu_start.go`
+- Test: `compiler/codegen/vcpu_start_test.go`
+- Modify: `wrela/platform/uefi/types.wrela`
+- Modify: `wrela/platform/uefi/transition.wrela`
+
+- [ ] **Step 1: Add trampoline blob tests**
+
+Append:
+
+```go
+func TestAPTrampolineBlobContract(t *testing.T) {
+	blob := apTrampolineBlob()
+	if len(blob) > 4096 {
+		t.Fatalf("AP trampoline must fit in one 4KiB SIPI page, got %d bytes", len(blob))
+	}
+	for _, want := range [][]byte{
+		{0xFA},       // cli
+		{0x0F, 0x22}, // mov to control register shape
+		{0x0F, 0x30}, // wrmsr
+		{0xF4},       // hlt fallback
+	} {
+		if !bytes.Contains(blob, want) {
+			t.Fatalf("trampoline missing byte shape %x in %x", want, blob)
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run and verify failure**
+
+Run: `go test ./compiler/codegen -run TestAPTrampolineBlobContract -v`
+
+Expected: FAIL with undefined `apTrampolineBlob`.
+
+- [ ] **Step 3: Add explicit senior implementation block**
+
+Add `func apTrampolineBlob() []byte` in `compiler/codegen/vcpu_start.go`. The implementation must be produced from checked-in assembly source in a comment immediately above the byte slice. The byte slice must be reviewed by a senior engineer before merge. Use this exact comment header above the function:
+
+```go
+// apTrampolineBlob is assembled from the real-mode/long-mode transition
+// listing below. Update the listing and bytes in the same commit.
+//
+// Origin: 0x8000. SIPI vector: apTrampolineBase >> 12.
+// Contract:
+// - set _wrela_vcpu1_ready to 1 after entering long mode
+// - load _wrela_vcpu1_stack_top into rsp
+// - load _wrela_vcpu1_context into rdi
+// - call _wrela_vcpu1_entry
+// - hlt loop if the executor returns
+```
+
+This is the only task in the plan that may not be assigned to a junior engineer.
+
+- [ ] **Step 4: Add install hook source**
+
+Add an asm method to the delegated memory authority in `wrela/platform/uefi/types.wrela`:
+
+```wrela
+asm fn install_ap_trampoline(self, trampoline_base: PhysicalAddress, source: PhysicalAddress, length: U64) {
+    mov rdi, trampoline_base
+    mov rsi, source
+    mov rcx, length
+copy:
+    cmp rcx, 0
+    je done
+    mov al, [rsi]
+    mov [rdi], al
+    add rsi, 1
+    add rdi, 1
+    sub rcx, 1
+    jmp copy
+done:
+    ret
+}
+```
+
+In `transition.wrela`, call `install_ap_trampoline` before returning `OwnedHardware`. The source address is a compiler-emitted static data symbol for `apTrampolineBlob`.
+
+- [ ] **Step 5: Verify and commit**
+
+Run:
+
+```bash
+go test ./compiler/codegen -run TestAPTrampolineBlobContract -v
+git diff --check
+git add compiler/codegen/vcpu_start.go compiler/codegen/vcpu_start_test.go wrela/platform/uefi/types.wrela wrela/platform/uefi/transition.wrela
+git commit -m "feat: add ap trampoline contract -Codex Automated"
+```
+
+Expected: PASS after senior-owned blob bytes are present.
+
+**Acceptance Criteria:** AP trampoline contract, install hook, and byte-shape tests exist. The exact byte blob is senior-reviewed.
+
+### Task 14D: LAPIC INIT/SIPI Emission
+
+**Description:** Emit xAPIC INIT/SIPI commands for `VcpuStart{VcpuID: 1}` and return `VcpuStartStatus`.
+
+**Files:**
+- Modify: `compiler/codegen/vcpu_start.go`
+- Modify: `compiler/codegen/x64.go`
+- Test: `compiler/codegen/vcpu_start_test.go`
+
+- [ ] **Step 1: Add LAPIC emission test**
+
+Append:
+
+```go
+func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
+	statusType := ir.Type{Name: "VcpuStartStatus", Module: "machine.x86_64.cpu_state", Kind: ir.TypeKindData}
+	program := &ir.Program{
+		VcpuStarts: []ir.VcpuStartPlan{{VcpuID: 1, SlotLabel: "worker", Terminal: false}},
+		Functions: []ir.Function{{
+			Symbol: "start_worker",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.VcpuStart{VcpuID: 1, SlotLabel: "worker", Type: statusType, Executor: &ir.Local{Symbol: "worker"}},
+			}}},
+		}},
+	}
+	image, ds := Compile(program)
+	if len(ds) != 0 { t.Fatalf("Compile diagnostics: %#v", ds) }
+	code := symbolBytes(t, image, "start_worker")
+	for _, want := range [][]byte{
+		u32le(0x000C4500), // INIT level assert
+		u32le(0x000C4608), // SIPI vector 0x08
+	} {
+		if !bytes.Contains(code, want) {
+			t.Fatalf("start missing LAPIC command %x in %x", want, code)
+		}
+	}
+}
+
+func u32le(v uint32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, v)
+	return out
+}
+```
+
+- [ ] **Step 2: Implement helper**
+
+Add:
+
+```go
+func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4500)
+	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
+	emitDelayLoop(e, 10000)
+	emitLapicWrite(e, lapicICRHigh, uint32(op.VcpuID)<<24)
+	emitLapicWrite(e, lapicICRLow, 0x000C4600|uint32(apTrampolineBase>>12))
+	emitWaitForVcpuReady(e, op.VcpuID)
+	emitStoreVcpuStartStatus(e, op, frame)
+}
+```
+
+Reuse `emitLapicWrite` from `compiler/codegen/lapic.go`. `emitStoreVcpuStartStatus` writes `started=true` and `id=op.VcpuID` into the value slot for `op`.
+
+- [ ] **Step 3: Verify and commit**
+
+Run:
+
+```bash
+go test ./compiler/codegen -run TestVcpuStartEmitsLapicIcrWrites -v
+git diff --check
+git add compiler/codegen/x64.go compiler/codegen/vcpu_start.go compiler/codegen/vcpu_start_test.go
+git commit -m "feat: emit lapic vcpu start -Codex Automated"
+```
+
+Expected: PASS.
+
+**Acceptance Criteria:** `VcpuStart` writes INIT/SIPI commands, waits for ready, and produces `VcpuStartStatus`.
+
+### Task 14E: vCPU Startup Integration Check
+
+**Description:** Prove the vCPU start data, trampoline contract, LAPIC command path, and terminal enter path compile together.
+
+**Files:**
+- Modify: `compiler/codegen/vcpu_start_test.go`
+
+- [ ] **Step 1: Add integration test**
+
+Append:
+
+```go
+func TestVcpuStartAndEnterCompileTogether(t *testing.T) {
+	program := twoVcpuProgramForCodegenTest()
+	image, ds := Compile(program)
+	if len(ds) != 0 { t.Fatalf("Compile diagnostics: %#v", ds) }
+	for _, symbol := range []string{
+		"_wrela_vcpu0_context",
+		"_wrela_vcpu1_context",
+		"_wrela_vcpu1_ready",
+	} {
+		if _, ok := image.Symbols[symbol]; !ok {
+			t.Fatalf("missing symbol %s", symbol)
+		}
+	}
+}
+
+func twoVcpuProgramForCodegenTest() *ir.Program {
+	execType := ir.Type{Name: "Worker", Module: "test", Kind: ir.TypeKindExecutor}
+	statusType := ir.Type{Name: "VcpuStartStatus", Module: "machine.x86_64.cpu_state", Kind: ir.TypeKindData}
+	return &ir.Program{
+		VcpuStarts: []ir.VcpuStartPlan{
+			{VcpuID: 0, SlotLabel: "hello", ExecutorType: execType, Terminal: true},
+			{VcpuID: 1, SlotLabel: "worker", ExecutorType: execType, Terminal: false},
+		},
+		Functions: []ir.Function{{
+			Symbol: "start_and_enter",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.VcpuStart{VcpuID: 1, SlotLabel: "worker", Type: statusType, Executor: &ir.Local{Symbol: "worker"}},
+				&ir.VcpuEnter{VcpuID: 0, SlotLabel: "hello", Executor: &ir.Local{Symbol: "hello"}},
+			}}},
+		}},
+	}
+}
+```
+
+- [ ] **Step 2: Verify and commit**
+
+Run:
+
+```bash
+go test ./compiler/codegen -run TestVcpuStartAndEnterCompileTogether -v
+git diff --check
+git add compiler/codegen/vcpu_start_test.go
+git commit -m "test: cover two vcpu startup codegen -Codex Automated"
+```
+
+Expected: PASS.
+
+**Acceptance Criteria:** vCPU codegen has one integration test covering data symbols, secondary start, and bootstrap enter.
 
 ---
 
@@ -2521,7 +3344,7 @@ git commit -m "feat: emit static two vcpu startup -Codex Automated"
 
 ### Task 15: Generate Interrupt Topic Dispatch Instead Of Executor Callbacks
 
-**Description:** Replace old interrupt dispatch units that call executor handlers with ISR glue that publishes into path-owned topics.
+**Description:** Replace old interrupt dispatch units that call executor handlers with ISR glue that publishes into path-owned topics. This task is senior-owned as a whole; a junior may execute individual steps after the senior owner freezes the `InterruptBinding` struct in Step 1.
 
 **Files:**
 - Modify: `compiler/ir/ir.go`
@@ -2530,6 +3353,7 @@ git commit -m "feat: emit static two vcpu startup -Codex Automated"
 - Modify: `compiler/codegen/interrupt_test.go`
 - Modify: `wrela/machine/x86_64/serial.wrela`
 - Modify: `wrela/machine/x86_64/edu.wrela`
+- Modify: `wrela/machine/x86_64/ivshmem.wrela`
 
 - [ ] **Step 1: Add interrupt-topic test**
 
@@ -2558,7 +3382,15 @@ func TestInterruptDispatchPublishesTopicInsteadOfCallingOnHandler(t *testing.T) 
 }
 ```
 
-Add `TopicLabel string` to `ir.InterruptBinding`.
+Add these fields to `ir.InterruptBinding`:
+
+```go
+TopicLabel string
+TopicKind string
+PublisherOwnerKind string // "driver_path"
+PublisherOwnerLabel string
+SubscriberSlots []string
+```
 
 - [ ] **Step 2: Run and verify failure**
 
@@ -2568,32 +3400,51 @@ Expected: FAIL because old dispatch calls handler functions.
 
 - [ ] **Step 3: Lower path interrupt publisher bindings**
 
-Use graph data from Task 4 to create interrupt bindings:
+Replace `lowerInterruptBindings` with topic-based binding construction. The core loop is:
 
-```text
-path interrupt event function
-topic label
-event storage
-vector
-subscriber slots
+```go
+for _, route := range ctx.checked.ImageGraph.InterruptTopicRoutes {
+	eventType := ctx.irType(route.EventType)
+	eventInfo := mustTypeInfo(ctx.program.Types, eventType)
+	ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, ir.InterruptBinding{
+		EventSymbol: route.EventSymbol,
+		EventFunctionSymbol: route.EventFunctionSymbol,
+		EventStorageSymbol: fmt.Sprintf("_wrela_interrupt_event_%02x", route.Vector),
+		EventStorageSize: storageSizeOrEight(eventInfo),
+		Vector: route.Vector,
+		TopicLabel: route.TopicLabel,
+		TopicKind: route.TopicKind,
+		PublisherOwnerKind: "driver_path",
+		PublisherOwnerLabel: route.PathLabel,
+		SubscriberSlots: append([]string{}, route.SubscriberSlots...),
+	})
+}
+sort.Slice(ctx.program.InterruptBindings, func(i, j int) bool {
+	return ctx.program.InterruptBindings[i].Vector < ctx.program.InterruptBindings[j].Vector
+})
 ```
 
-Do not create `OnHandler`.
+Do not append to `program.OnHandlers`. Do not set `HandlerFunctionSymbol`.
 
 - [ ] **Step 4: Emit ISR topic publish**
 
-Replace old dispatch algorithm with:
+Replace `buildInterruptDispatchUnit` with this exact call sequence:
 
-```text
-save registers
-load path receiver
-call path event function
-publish returned event to topic ring
-wake subscriber waitlines / IPI fallback
-write local APIC EOI
-restore registers
-iretq
+```go
+func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding) compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	emitInterruptSave(e)
+	e.emitCall(binding.EventFunctionSymbol)
+	emitInterruptEventStore(e, binding)
+	emitInterruptTopicPublish(e, binding)
+	emitLocalApicEOI(e)
+	emitInterruptRestore(e)
+	e.emit(0x48, 0xCF) // iretq
+	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}
+}
 ```
+
+`emitInterruptTopicPublish` is not allowed to call a Wrela executor method. It must call the same topic-ring helpers as Task 10, using `binding.TopicLabel` and `binding.TopicKind`.
 
 For serial rx, publish event as:
 
@@ -2602,7 +3453,12 @@ slot sequence at +0
 byte at +8
 ```
 
-For EDU/ivshmem, publish status as U32 widened in a 64-byte slot.
+For EDU/ivshmem, publish status as U32 widened in a 64-byte slot. All interrupt topic slot layouts remain:
+
+```text
+slot + 0: U64 sequence
+slot + 8: payload field 0 widened to U64
+```
 
 - [ ] **Step 5: Update Wrela interrupt source**
 
@@ -2699,7 +3555,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add compiler/ir/ir.go compiler/ir/lower.go compiler/codegen/x64.go compiler/codegen/interrupt_test.go wrela/machine/x86_64/serial.wrela wrela/machine/x86_64/edu.wrela
+git add compiler/ir/ir.go compiler/ir/lower.go compiler/codegen/x64.go compiler/codegen/interrupt_test.go wrela/machine/x86_64/serial.wrela wrela/machine/x86_64/edu.wrela wrela/machine/x86_64/ivshmem.wrela
 git commit -m "feat: publish interrupts to topics -Codex Automated"
 ```
 
@@ -2800,8 +3656,8 @@ phase owned_hardware(hardware: OwnedHardware) -> never {
         align = 4096
     )
 
-    let counter_topic = U64GapTopic(id = 0, depth = 64)
-    let result_topic = U64ReliableTopic(id = 1, depth = 4)
+    let counter_topic = U64GapTopic(identity = TopicIdentity(label = "multi.counter"), id = 0, depth = 64)
+    let result_topic = U64ReliableTopic(identity = TopicIdentity(label = "multi.result"), id = 1, depth = 4)
 
     let producer = Producer(
         slot = producer_slot,
@@ -2833,6 +3689,27 @@ Only `producer` receives `serial_path`. The consumer publishes `64` through `res
 - [ ] **Step 4: Rewrite hello**
 
 Rewrite `examples/hello/main.wrela` and `examples/hello/program.wrela`:
+
+These source APIs already exist before this plan and keep their behavior:
+
+```text
+hardware.io_ports.claim_com1()
+SerialDriver(...).initialize()
+ExecutorMemory.bytes(value = ...)
+ExecutorMemory.halt_forever()
+SerialConsolePath.write(...)
+SerialConsolePath.write_byte(...)
+SerialConsolePath.ack_receive(...)
+EduMsiPath.ack_completed(...)
+Q35PciInterruptConfigurator.edu_bar0()
+```
+
+These signatures change in this plan and must be updated in the same commit as the hello rewrite:
+
+```wrela
+fn create_console_path(self, identity: PathIdentity, rx: SerialRxPublisher) -> SerialConsolePath
+fn claim_executor_arena(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory
+```
 
 Use this owned-hardware wiring shape:
 
@@ -2931,7 +3808,10 @@ git commit -m "test: verify explicit vcpu topics in qemu -Codex Automated"
 - Modify: `tests/e2e/fixtures/hello_ivshmem/program.wrela`
 - Modify: `tests/e2e/fixtures/arena_memory/main.wrela`
 - Modify: `tests/e2e/fixtures/cache_memory/main.wrela`
-- Modify: affected compiler tests
+- Modify: `compiler/integration_test.go`
+- Modify: `compiler/sem/types_test.go`
+- Modify: `compiler/ir/lower_test.go`
+- Modify: `compiler/codegen/interrupt_test.go`
 
 - [ ] **Step 1: Run old-shape search**
 
