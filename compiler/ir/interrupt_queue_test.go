@@ -54,6 +54,16 @@ func TestInterruptQueueRejectsZeroPayloadSize(t *testing.T) {
 	}
 }
 
+func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
+	checked := checkedProgramFromSourceForTest(t, interruptQueueBoundsSource)
+	checked.ImageGraph.InterruptQueues[0].Capacity = uint64(1) << 63
+	checked.ImageGraph.InterruptQueues[0].PayloadSize = 2
+	_, ds := Lower(checked)
+	if !hasDiagCode(ds, diag.SEM0060) {
+		t.Fatalf("expected SEM0060 for backing size overflow, got %#v", ds)
+	}
+}
+
 func TestInterruptQueueLowersLayout(t *testing.T) {
 	checked := checkedProgramFromSourceForTest(t, interruptQueueBoundsSource)
 	program, ds := Lower(checked)

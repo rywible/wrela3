@@ -560,7 +560,11 @@ type builtDataSection struct {
 
 func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnostic) {
 	writable := append([]ir.DataObject{}, program.WritableData...)
-	writable = append(writable, interruptQueueDataObjects(program)...)
+	queueObjects, ds := interruptQueueDataObjects(program)
+	if len(ds) != 0 {
+		return Section{}, nil, ds
+	}
+	writable = append(writable, queueObjects...)
 	topicObjects, ds := topicDataObjects(program)
 	if len(ds) != 0 {
 		return Section{}, nil, ds
@@ -1432,6 +1436,14 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	case "mul", "*":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegIMul(e, scratchRegs[0], scratchRegs[1])
+	case "/":
+		if op.Type.Name != "U64" {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: /"})
+			return
+		}
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegOp(e, 0x31, asm.MustLookup("rdx"), asm.MustLookup("rdx"))
+		emitUnsignedDivReg(e, scratchRegs[1])
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
 		if !ok || constValue.Value > 63 {

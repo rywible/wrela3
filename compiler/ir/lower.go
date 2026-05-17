@@ -996,6 +996,10 @@ func (ctx *lowerContext) lowerInterruptQueueLayouts() {
 			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue payload layout is invalid")
 			continue
 		}
+		if _, ok := interruptQueueLayoutBackingSize(queue.Capacity, queue.PayloadSize); !ok {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue backing size overflows 64-bit arithmetic")
+			continue
+		}
 		source := sources[queue.Label]
 		ctx.program.InterruptQueues = append(ctx.program.InterruptQueues, InterruptQueueLayout{
 			Label:        queue.Label,
@@ -1008,6 +1012,15 @@ func (ctx *lowerContext) lowerInterruptQueueLayouts() {
 			Overflow:     queue.Overflow,
 		})
 	}
+}
+
+const interruptQueueLayoutHeaderSize = uint64(32)
+
+func interruptQueueLayoutBackingSize(capacity, payloadSize uint64) (uint64, bool) {
+	if payloadSize != 0 && capacity > (^uint64(0)-interruptQueueLayoutHeaderSize)/payloadSize {
+		return 0, false
+	}
+	return interruptQueueLayoutHeaderSize + capacity*payloadSize, true
 }
 
 func (ctx *lowerContext) resolveExecutorSeedLabel(label string) string {

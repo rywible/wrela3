@@ -37,6 +37,72 @@ func TestArenaGraphRejectsDuplicateIdentity(t *testing.T) {
 	}
 }
 
+const reverseStaticChildAtSource = `
+module examples.reverse_static_child_at
+use { BootPanic } from platform.hardware.panic
+use { ArenaIdentity, ArenaPolicy, PhysicalRegionAuthority } from platform.hardware.memory
+use { ExecutorSlot } from machine.x86_64.executor_slot
+
+class GoodRoot {
+    fn build(self) {
+        let region = PhysicalRegionAuthority(base = 0x200000, length = 0x10000, align = 4096, provenance = 1, panic = BootPanic())
+        let root = region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let high = root.child_at(identity = ArenaIdentity(label = "high"), offset = 0x4000, length = 0x1000, align = 4096)
+        let low = root.child_at(identity = ArenaIdentity(label = "low"), offset = 0x2000, length = 0x1000, align = 4096)
+        let implicit = root.executor_memory(owner = ExecutorSlot(id = 0), length = 0x1000, align = 4096)
+    }
+}`
+
+func TestArenaGraphAllowsLowerNonOverlappingRootChildAt(t *testing.T) {
+	checked, ds := checkTrustedPlatformSourceForTest(t, "platform.test.reverse_root_child_at", reverseStaticChildAtSource)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	high := arenaNodeByLabelForTest(checked.ImageGraph.Arenas, "high")
+	low := arenaNodeByLabelForTest(checked.ImageGraph.Arenas, "low")
+	if high.Base != 0x204000 || low.Base != 0x202000 {
+		t.Fatalf("reverse static arenas = high %#v low %#v", high, low)
+	}
+}
+
+func TestArenaGraphImplicitAllocationUsesStaticChildAtCursorMax(t *testing.T) {
+	checked, ds := checkTrustedPlatformSourceForTest(t, "platform.test.reverse_root_implicit", reverseStaticChildAtSource)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	executor := arenaNodeByKindAndParentForTest(checked.ImageGraph.Arenas, "executor_memory", "root")
+	if executor.Base != 0x205000 || executor.Offset != 0x5000 {
+		t.Fatalf("implicit arena should follow max static end, got %#v", executor)
+	}
+}
+
+const reverseNestedChildAtSource = `
+module examples.reverse_nested_child_at
+use { BootPanic } from platform.hardware.panic
+use { ArenaIdentity, ArenaPolicy, PhysicalRegionAuthority } from platform.hardware.memory
+
+class GoodRoot {
+    fn build(self) {
+        let region = PhysicalRegionAuthority(base = 0x200000, length = 0x20000, align = 4096, provenance = 1, panic = BootPanic())
+        let root = region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let parent = root.child_at(identity = ArenaIdentity(label = "parent"), offset = 0x8000, length = 0x8000, align = 4096)
+        let high = parent.child_at(identity = ArenaIdentity(label = "nested_high"), offset = 0x4000, length = 0x1000, align = 4096)
+        let low = parent.child_at(identity = ArenaIdentity(label = "nested_low"), offset = 0x2000, length = 0x1000, align = 4096)
+    }
+}`
+
+func TestArenaGraphAllowsLowerNonOverlappingNestedChildAt(t *testing.T) {
+	checked, ds := checkTrustedPlatformSourceForTest(t, "platform.test.reverse_nested_child_at", reverseNestedChildAtSource)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	high := arenaNodeByLabelForTest(checked.ImageGraph.Arenas, "nested_high")
+	low := arenaNodeByLabelForTest(checked.ImageGraph.Arenas, "nested_low")
+	if high.Base != 0x20c000 || low.Base != 0x20a000 {
+		t.Fatalf("reverse nested arenas = high %#v low %#v", high, low)
+	}
+}
+
 const executorMemoryNearSource = `
 module examples.executor_memory_near
 use { BootPanic } from platform.hardware.panic
@@ -238,4 +304,22 @@ func arenaReportByLabelForTest(arenas []report.ArenaReport, label string) report
 		}
 	}
 	return report.ArenaReport{}
+}
+
+func arenaNodeByLabelForTest(arenas []ArenaNode, label string) ArenaNode {
+	for _, arena := range arenas {
+		if arena.Label == label {
+			return arena
+		}
+	}
+	return ArenaNode{}
+}
+
+func arenaNodeByKindAndParentForTest(arenas []ArenaNode, kind string, parent string) ArenaNode {
+	for _, arena := range arenas {
+		if arena.Kind == kind && arena.Parent == parent {
+			return arena
+		}
+	}
+	return ArenaNode{}
 }

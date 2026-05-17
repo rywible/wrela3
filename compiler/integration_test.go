@@ -540,10 +540,25 @@ func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 			t.Fatalf("missing %s.%s method", decl.typeName, decl.method)
 		}
 		if !strings.Contains(methodSource, "if aligned_offset < self.next_offset") {
-			t.Fatalf("%s.%s must reject placements behind the monotonic cursor", decl.typeName, decl.method)
+			t.Fatalf("%s.%s must check placements against the monotonic cursor", decl.typeName, decl.method)
 		}
-		if !strings.Contains(methodSource, "self.next_offset = end") {
-			t.Fatalf("%s.%s must reserve explicit placements in the runtime cursor", decl.typeName, decl.method)
+		if !strings.Contains(methodSource, "if end > self.next_offset") {
+			t.Fatalf("%s.%s must allow lower non-overlapping static placements and reserve only the max end", decl.typeName, decl.method)
+		}
+	}
+
+	for _, typeName := range []string{"RootArena", "ChildArena"} {
+		methodSource := methodSourceForTypeFromDataDecl(source, typeName, "interrupt_queue")
+		if methodSource == "" {
+			t.Fatalf("missing %s.interrupt_queue method", typeName)
+		}
+		overflowGuard := "if capacity > (0 - 1) / payload.size"
+		multiply := "let bytes = capacity * payload.size"
+		if !strings.Contains(methodSource, overflowGuard) {
+			t.Fatalf("%s.interrupt_queue must reject backing-size overflow before multiplying capacity by payload.size", typeName)
+		}
+		if strings.Index(methodSource, overflowGuard) > strings.Index(methodSource, multiply) {
+			t.Fatalf("%s.interrupt_queue must check backing-size overflow before computing backing bytes", typeName)
 		}
 	}
 }

@@ -203,24 +203,26 @@ func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
 }
 
 type checker struct {
-	index                    *Index
-	modules                  []*ast.Module
-	currentType              *Type
-	currentPhase             string
-	diags                    []diag.Diagnostic
-	ownedRoot                *Type
-	graph                    ImageGraph
-	allowFrameCallExpr       bool
-	allowPlaceConstructor    *placeConstructorAllowance
-	exprLifetimes            map[ast.Expr]Lifetime
-	frameLifetimeStack       []int
-	frameLifetimeParents     map[int]int
-	nextFrameScope           int
-	methodLifetimeTargets    map[string]methodLifetimeTarget
-	methodLifetimeSummaries  map[string]MethodLifetimeSummary
-	activeMethodSummaries    map[string]bool
-	currentMethodSummary     *MethodLifetimeSummary
-	seenSharedIRQSource      map[string]bool
+	index                   *Index
+	modules                 []*ast.Module
+	currentType             *Type
+	currentPhase            string
+	diags                   []diag.Diagnostic
+	ownedRoot               *Type
+	graph                   ImageGraph
+	allowFrameCallExpr      bool
+	allowPlaceConstructor   *placeConstructorAllowance
+	exprLifetimes           map[ast.Expr]Lifetime
+	frameLifetimeStack      []int
+	frameLifetimeParents    map[int]int
+	nextFrameScope          int
+	methodLifetimeTargets   map[string]methodLifetimeTarget
+	methodLifetimeSummaries map[string]MethodLifetimeSummary
+	activeMethodSummaries   map[string]bool
+	currentMethodSummary    *MethodLifetimeSummary
+	seenSharedIRQSource     map[string]bool
+	// TODO: scope these discovered plan facts to constructor expression IDs if
+	// images ever allow multiple CPU or hardware plan builders.
 	cpuFeatureLoopStrategy   string
 	cpuFeatureLoopFallback   string
 	hardwarePlanWakeStrategy string
@@ -2384,6 +2386,8 @@ func (c *checker) recordTimerRoute(route TimerRouteNode) {
 		if existing.Label != route.Label || existing.Vector != route.Vector || existing.TopicLabel != route.TopicLabel {
 			continue
 		}
+		// A timer route can be observed through multiple subscriptions; preserve
+		// one route row and merge subscriber slots.
 		existing.SubscriberSlots = appendUniqueString(existing.SubscriberSlots, route.SubscriberSlots...)
 		return
 	}

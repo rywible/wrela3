@@ -37,6 +37,8 @@ func apTrampolineBlob() []byte {
 }
 
 func validateAPStartupContract() []diag.Diagnostic {
+	// Regression guard: the production trampoline is embedded today, but future
+	// configurable trampoline inputs must still satisfy the same SIPI contract.
 	return validateAPStartupContractForBlob(apTrampolineBase, apTrampolineBlobBytes)
 }
 

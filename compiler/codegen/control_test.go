@@ -445,6 +445,52 @@ func TestCompileShiftAndBitOrOpcodes(t *testing.T) {
 	}
 }
 
+func TestCompileBinaryUnsignedDiv(t *testing.T) {
+	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
+	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}
+	quotient := &ir.Binary{Op: "/", Left: left, Right: right, Type: ir.Type{Name: "U64"}}
+	fn := ir.Function{
+		Symbol: "unsigned_div",
+		Params: []ir.Value{left, right},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{quotient, &ir.Return{Value: quotient}},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := image.Sections[0].Data
+	if !bytes.Contains(code, []byte{0x48, 0x31, 0xD2}) {
+		t.Fatalf("expected xor rdx, rdx before div, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x49, 0xF7, 0xF2}) {
+		t.Fatalf("expected div r10 encoding, got %#x", code)
+	}
+}
+
+func TestCompileBinarySignedDivRejected(t *testing.T) {
+	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "I64"}}
+	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "I64"}}
+	quotient := &ir.Binary{Op: "/", Left: left, Right: right, Type: ir.Type{Name: "I64"}}
+	fn := ir.Function{
+		Symbol: "signed_div",
+		Params: []ir.Value{left, right},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{quotient, &ir.Return{Value: quotient}},
+		}},
+	}
+
+	_, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if !hasDiagnosticCode(diags, diag.CG0001) {
+		t.Fatalf("expected CG0001 for unsupported signed division, got %#v", diags)
+	}
+}
+
 func TestCompileShiftAcceptsU32Operands(t *testing.T) {
 	u32 := ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}
 	value := &ir.Param{Symbol: "value", Type: u32}

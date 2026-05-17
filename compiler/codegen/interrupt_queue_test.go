@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
@@ -52,6 +53,18 @@ func TestInterruptQueuePublishesPayloadBeforeTail(t *testing.T) {
 	}
 	if !(payloadAt < fenceAt && fenceAt < tailAt) {
 		t.Fatalf("queue push must publish payload before fenced tail store: payload=%d fence=%d tail=%d code=%#x", payloadAt, fenceAt, tailAt, unit.Bytes)
+	}
+}
+
+func TestInterruptQueueDataObjectRejectsBackingSizeOverflow(t *testing.T) {
+	_, ds := Compile(&ir.Program{InterruptQueues: []ir.InterruptQueueLayout{{
+		Label:        "irq.serial.rx",
+		Capacity:     uint64(1) << 63,
+		PayloadSize:  2,
+		PayloadAlign: 8,
+	}}})
+	if !hasDiagnosticCode(ds, diag.CG0001) {
+		t.Fatalf("expected CG0001 for backing size overflow, got %#v", ds)
 	}
 }
 
@@ -107,6 +120,15 @@ func countDataRelocs(unit compiledUnit, symbol string) int {
 func hasCallReloc(unit compiledUnit, symbol string) bool {
 	for _, reloc := range unit.CallReloc {
 		if reloc.Symbol == symbol {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDiagnosticCode(ds []diag.Diagnostic, code string) bool {
+	for _, d := range ds {
+		if d.Code == code {
 			return true
 		}
 	}

@@ -230,6 +230,10 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	capacity, _ := arenaUnsignedIntArg(expr, "capacity")
 	payloadKind, payloadSize, payloadAlign := interruptPayloadKind(namedArgExpr(expr.Args, "payload"))
+	payloadBytes, payloadBytesOK := interruptQueuePayloadBytes(capacity, payloadSize)
+	if !payloadBytesOK {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue backing size overflows 64-bit arithmetic")
+	}
 	c.graph.InterruptQueues = append(c.graph.InterruptQueues, InterruptQueueNode{
 		Label:        label,
 		Owner:        owner,
@@ -240,7 +244,16 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 		Overflow:     overflow,
 		Span:         expr.SpanV,
 	})
-	c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, owner, "interrupt_queue", capacity*payloadSize, payloadAlign, expr.SpanV))
+	if payloadBytesOK {
+		c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, owner, "interrupt_queue", payloadBytes, payloadAlign, expr.SpanV))
+	}
+}
+
+func interruptQueuePayloadBytes(capacity, payloadSize uint64) (uint64, bool) {
+	if payloadSize != 0 && capacity > ^uint64(0)/payloadSize {
+		return 0, false
+	}
+	return capacity * payloadSize, true
 }
 
 func dmaOwnerIdentity(expr ast.Expr, scope *Scope) string {

@@ -58,14 +58,18 @@ data RootArena {
         if aligned_offset > self.region.length - length {
             self.region.panic.fail(code = 0xAC070001)
         }
-        if aligned_offset < self.next_offset {
-            self.region.panic.fail(code = 0xAC070001)
-        }
         let end = aligned_offset + length
         if end > self.region.length {
             self.region.panic.fail(code = 0xAC070001)
         }
-        self.next_offset = end
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
         return ChildArena(root = self, identity = identity, base = base, length = length, next_offset = 0)
     }
 
@@ -100,6 +104,18 @@ data RootArena {
     }
 
     fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        if capacity == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.size == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.align == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if capacity > (0 - 1) / payload.size {
+            self.region.panic.fail(code = 0xAC070001)
+        }
         let bytes = capacity * payload.size
         let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
         let storage = MutableBytes(address = child.base, length = child.length)
@@ -144,18 +160,34 @@ data ChildArena {
         if aligned_offset > self.length - length {
             self.root.region.panic.fail(code = 0xAC070001)
         }
-        if aligned_offset < self.next_offset {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
         let end = aligned_offset + length
         if end > self.length {
             self.root.region.panic.fail(code = 0xAC070001)
         }
-        self.next_offset = end
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.root.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
         return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
     }
 
     fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        if capacity == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.size == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.align == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if capacity > (0 - 1) / payload.size {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
         let bytes = capacity * payload.size
         let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
         let storage = MutableBytes(address = child.base, length = child.length)

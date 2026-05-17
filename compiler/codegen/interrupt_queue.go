@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
+	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
@@ -18,8 +19,11 @@ func interruptQueueDataSymbol(label string) string {
 	return "_wrela_interrupt_queue_" + sanitizeSymbol(label)
 }
 
-func interruptQueueDataObject(q ir.InterruptQueueLayout) ir.DataObject {
-	size := uint64(interruptQueueHeaderSize) + q.Capacity*q.PayloadSize
+func interruptQueueDataObject(q ir.InterruptQueueLayout) (ir.DataObject, bool) {
+	size, ok := interruptQueueDataSize(q)
+	if !ok {
+		return ir.DataObject{}, false
+	}
 	data := make([]byte, size)
 	binary.LittleEndian.PutUint64(data[interruptQueueCapacityOffset:], q.Capacity)
 	align := q.PayloadAlign
@@ -30,12 +34,24 @@ func interruptQueueDataObject(q ir.InterruptQueueLayout) ir.DataObject {
 		Symbol: interruptQueueDataSymbol(q.Label),
 		Bytes:  data,
 		Align:  align,
-	}
+	}, true
 }
 
-func interruptQueueDataObjects(program *ir.Program) []ir.DataObject {
+func interruptQueueDataSize(q ir.InterruptQueueLayout) (uint64, bool) {
+	const header = uint64(interruptQueueHeaderSize)
+	if q.PayloadSize != 0 && q.Capacity > (^uint64(0)-header)/q.PayloadSize {
+		return 0, false
+	}
+	size := header + q.Capacity*q.PayloadSize
+	if size > uint64(int(^uint(0)>>1)) {
+		return 0, false
+	}
+	return size, true
+}
+
+func interruptQueueDataObjects(program *ir.Program) ([]ir.DataObject, []diag.Diagnostic) {
 	if program == nil || len(program.InterruptQueues) == 0 {
-		return nil
+		return nil, nil
 	}
 	queues := append([]ir.InterruptQueueLayout{}, program.InterruptQueues...)
 	sort.Slice(queues, func(i, j int) bool {
@@ -43,9 +59,13 @@ func interruptQueueDataObjects(program *ir.Program) []ir.DataObject {
 	})
 	out := make([]ir.DataObject, 0, len(queues))
 	for _, queue := range queues {
-		out = append(out, interruptQueueDataObject(queue))
+		object, ok := interruptQueueDataObject(queue)
+		if !ok {
+			return nil, []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.CG0001, Message: "interrupt queue backing size overflows data object size"}}
+		}
+		out = append(out, object)
 	}
-	return out
+	return out, nil
 }
 
 func interruptQueueByVector(program *ir.Program) map[uint8]ir.InterruptQueueLayout {

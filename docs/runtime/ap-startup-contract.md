@@ -1,6 +1,6 @@
 # AP Startup Contract
 
-The bootstrap processor starts application processors through a real-mode SIPI trampoline.
+The bootstrap processor starts application processors through a real-mode SIPI trampoline. The compiler backend validates this embedded trampoline contract before it emits an image.
 
 Required invariants:
 

@@ -42,6 +42,21 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 	}
 }
 
+func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-overflow.wrela", interruptQueueSource(`
+        let queue = root.interrupt_queue(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            capacity = 0x8000000000000000,
+            payload = InterruptPayloadKind(kind = 1, size = 2, align = 8),
+            overflow = InterruptOverflowPolicy(mode = 2)
+        )
+`))
+	if !hasCode(ds, diag.SEM0060) {
+		t.Fatalf("expected SEM0060, got %#v", ds)
+	}
+}
+
 func TestSharedInterruptAllowsMultipleSourceClaims(t *testing.T) {
 	checked, ds := checkUEFIModulesWithExtraSource(t, "shared-irq-good.wrela", sharedIRQSource(`
         let route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
