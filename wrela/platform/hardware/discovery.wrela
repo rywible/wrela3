@@ -99,7 +99,7 @@ class PlatformDiscoveryRoot {
                 enabled = enabled_cpus,
                 locality0 = locality0,
                 locality1 = locality1,
-                features = CpuFeatureFacts(monitor_mwait_available = true)
+                features = CpuFeatureFacts(monitor_mwait_available = false)
             ),
             timers = TimerDiscovery(
                 local_apic_timer_available = true,

@@ -8,10 +8,21 @@ import (
 	"github.com/ryanwible/wrela3/compiler/report"
 )
 
-func TestWaitFallbackEmitsHlt(t *testing.T) {
+func TestWaitFallbackEmitsStiHlt(t *testing.T) {
 	unit := compileWaitFallbackUnitForTest()
-	if !bytes.Contains(unit.Bytes, []byte{0xF4}) {
-		t.Fatalf("fallback wait must emit hlt: %x", unit.Bytes)
+	if !bytes.Contains(unit.Bytes, []byte{0xFB, 0xF4}) {
+		t.Fatalf("fallback wait must emit sti+hlt: %x", unit.Bytes)
+	}
+}
+
+func TestTopicWaitFallbackUsesStiHlt(t *testing.T) {
+	unit := compileTopicWaitUnitForTest(ir.TopicWait{
+		SlotLabel:       "worker",
+		UseMonitorMwait: false,
+		Fallback:        "sti_hlt",
+	})
+	if !bytes.Contains(unit.Bytes, []byte{0xFB, 0xF4}) {
+		t.Fatalf("topic wait fallback must emit sti+hlt: %x", unit.Bytes)
 	}
 }
 

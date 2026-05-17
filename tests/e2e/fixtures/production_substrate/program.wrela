@@ -18,9 +18,11 @@ data RunScratch {
 executor BackgroundWorker {
     slot: ExecutorSlot
     loop: HotPollPolicy
+    worker_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         while true {
+            let tick = self.worker_ticks.try_next()
             self.loop.wait()
         }
     }
@@ -42,12 +44,12 @@ executor ProductionSubstrateProgram {
     ivshmem_tx: IvshmemDoorbellPeerPath
     serial_irq_source: SharedInterruptSource
     serial_irq_queue: InterruptQueue
-    worker_ticks: TimerTickSubscription
+    console_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick_frame {
             self.serial_path.write(self.memory.bytes(value = "production substrate\n"))
-            let tick = self.worker_ticks.try_next()
+            let tick = self.console_ticks.try_next()
             if tick.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -77,7 +79,7 @@ executor ProductionSubstrateProgram {
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
                 self.ivshmem_rx.ack_doorbell(event = ivshmem_event.message)
             }
-            let tick_event = self.worker_ticks.try_next()
+            let tick_event = self.console_ticks.try_next()
             if tick_event.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -85,7 +87,7 @@ executor ProductionSubstrateProgram {
             self.serial_rx.arm_wait()
             self.edu_interrupts.arm_wait()
             self.ivshmem_events.arm_wait()
-            self.worker_ticks.arm_wait()
+            self.console_ticks.arm_wait()
 
             let serial_retry = self.serial_rx.try_next()
             if serial_retry.has_message {
@@ -104,7 +106,7 @@ executor ProductionSubstrateProgram {
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
                 self.ivshmem_rx.ack_doorbell(event = ivshmem_retry.message)
             }
-            let tick_retry = self.worker_ticks.try_next()
+            let tick_retry = self.console_ticks.try_next()
             if tick_retry.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -115,7 +117,7 @@ executor ProductionSubstrateProgram {
                             if self.serial_rx.is_wait_armed() {
                                 if self.edu_interrupts.is_wait_armed() {
                                     if self.ivshmem_events.is_wait_armed() {
-                                        if self.worker_ticks.is_wait_armed() {
+                                        if self.console_ticks.is_wait_armed() {
                                             self.loop.wait()
                                         }
                                     }

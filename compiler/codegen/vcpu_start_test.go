@@ -129,6 +129,12 @@ func TestAPStartupContractConstants(t *testing.T) {
 	if len(validateAPStartupContract()) != 0 {
 		t.Fatalf("AP startup contract diagnostics: %#v", validateAPStartupContract())
 	}
+	if ds := validateAPStartupContractForBlob(0x100000, apTrampolineBlob()); len(ds) == 0 {
+		t.Fatalf("AP startup contract must reject trampoline base above SIPI range")
+	}
+	if ds := validateAPStartupContractForBlob(apTrampolineBase, make([]byte, apTrampolineReadyOffset)); len(ds) == 0 {
+		t.Fatalf("AP startup contract must reject blobs missing handoff metadata")
+	}
 }
 
 func TestAPReadyWaitIsBounded(t *testing.T) {

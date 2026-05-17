@@ -48,7 +48,14 @@ func TestTimerTickTopicPayloadLayoutRecorded(t *testing.T) {
 	if topic.PayloadType != "machine.x86_64.topic_payload.TimerTickPayload" {
 		t.Fatalf("payload type = %q", topic.PayloadType)
 	}
-	if topic.PayloadSize == 0 || topic.PayloadAlign == 0 {
-		t.Fatalf("payload layout not recorded: %#v", topic)
+	if topic.PayloadSize != 24 || topic.PayloadAlign != 8 {
+		t.Fatalf("payload layout = size %d align %d, want size 24 align 8: %#v", topic.PayloadSize, topic.PayloadAlign, topic)
+	}
+	payload := moduleType(t, checked.Index, "machine.x86_64.topic_payload", "TimerTickPayload")
+	if len(payload.Fields) != 3 ||
+		payload.Fields[0].Name != "sequence" ||
+		payload.Fields[1].Name != "monotonic_us" ||
+		payload.Fields[2].Name != "source_id" {
+		t.Fatalf("TimerTickPayload field order drifted: %#v", payload.Fields)
 	}
 }

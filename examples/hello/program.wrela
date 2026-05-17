@@ -16,9 +16,11 @@ data RunScratch {
 executor BackgroundWorker {
     slot: ExecutorSlot
     loop: HotPollPolicy
+    worker_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         while true {
+            let tick = self.worker_ticks.try_next()
             self.loop.wait()
         }
     }
@@ -34,13 +36,13 @@ executor HelloWorld {
     serial_rx: SerialRxSubscription
     edu_path: EduMsiPath
     edu_interrupts: EduInterruptSubscription
-    worker_ticks: TimerTickSubscription
+    console_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick {
             let scratch = tick.place(RunScratch(hello = self.memory.bytes(value = "hello from wrela\n")))
             self.serial_path.write(scratch.hello)
-            let first_tick = self.worker_ticks.try_next()
+            let first_tick = self.console_ticks.try_next()
             if first_tick.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -63,14 +65,14 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
                 self.edu_path.ack_completed(event = edu_event.message)
             }
-            let tick_event = self.worker_ticks.try_next()
+            let tick_event = self.console_ticks.try_next()
             if tick_event.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
 
             self.serial_rx.arm_wait()
             self.edu_interrupts.arm_wait()
-            self.worker_ticks.arm_wait()
+            self.console_ticks.arm_wait()
 
             let serial_retry = self.serial_rx.try_next()
             if serial_retry.has_message {
@@ -84,7 +86,7 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
                 self.edu_path.ack_completed(event = edu_retry.message)
             }
-            let tick_retry = self.worker_ticks.try_next()
+            let tick_retry = self.console_ticks.try_next()
             if tick_retry.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -93,7 +95,7 @@ executor HelloWorld {
                     if tick_retry.has_message == false {
                         if self.serial_rx.is_wait_armed() {
                             if self.edu_interrupts.is_wait_armed() {
-                                if self.worker_ticks.is_wait_armed() {
+                                if self.console_ticks.is_wait_armed() {
                                     self.loop.wait()
                                 }
                             }

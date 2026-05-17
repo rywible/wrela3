@@ -14,7 +14,8 @@ func TestProductionSubstrateRegressionScans(t *testing.T) {
 		root      string
 		forbidden []string
 	}{
-		{name: "raw memory shortcuts", root: "examples", forbidden: []string{"MutableBytes(address = 0x", "arena_base = 0x"}},
+		{name: "raw memory shortcuts examples", root: "examples", forbidden: []string{"MutableBytes(address = 0x", "arena_base = 0x"}},
+		{name: "raw memory shortcuts e2e fixtures", root: filepath.Join("tests", "e2e", "fixtures"), forbidden: []string{"MutableBytes(address = 0x", "arena_base = 0x"}},
 		{name: "hidden scheduler", root: "wrela", forbidden: []string{"class Scheduler", "RunnableQueue", "work_steal", "spawn_on_any_cpu"}},
 		{name: "q35 assumptions", root: "wrela", forbidden: []string{"q35", "two-vCPU", "static q35"}},
 	}

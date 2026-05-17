@@ -23,6 +23,10 @@ image HelloSerial {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let root = PlatformDiscoveryRoot(panic = BootPanic())
         let discovery = root.from_uefi(hardware = hardware)
+        let pci = discovery.pci
+        let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
+        let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
+        let ivshmem_tx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 1)
         let root_region = discovery.memory.require_usable_region(
             min_base = 0x200000,
             length = 0x600000,
@@ -67,10 +71,6 @@ image HelloSerial {
         let serial_irq_source = shared_serial_route.claim_source(
             identity = InterruptSourceIdentity(label = "serial.rx")
         )
-        let pci = discovery.pci
-        let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
-        let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
-        let ivshmem_tx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 1)
         let hardware_plan = HardwarePlan(
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
@@ -151,7 +151,8 @@ image HelloSerial {
         )
         let serial_rx = serial_rx_topic.subscribe(subscriber = console_slot)
         let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = console_slot)
-        let worker_ticks = hardware.hardware_plan.timer.subscribe(subscriber = console_slot)
+        let worker_ticks = hardware.hardware_plan.timer.subscribe(subscriber = worker_slot)
+        let console_ticks = hardware.hardware_plan.timer.subscribe(subscriber = console_slot)
         let edu_path = EduMsiPath(
             identity = PathIdentity(label = "hello.edu"),
             mmio = hardware.hardware_plan.pci.edu_bar0,
@@ -167,9 +168,9 @@ image HelloSerial {
             serial_rx = serial_rx,
             edu_path = edu_path,
             edu_interrupts = edu_interrupts,
-            worker_ticks = worker_ticks
+            console_ticks = console_ticks
         )
-        let worker = BackgroundWorker(slot = worker_slot, loop = HotPollPolicy())
+        let worker = BackgroundWorker(slot = worker_slot, loop = HotPollPolicy(), worker_ticks = worker_ticks)
         let worker_status = hardware.vcpu1.start(executor = worker)
         if worker_status.started == false {
             serial_path.write(worker_memory.bytes(value = "panic: vcpu1 start failed\n"))

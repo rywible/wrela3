@@ -1223,9 +1223,18 @@ func emitHltWait(e *Emitter) {
 	e.emit(0xF4)
 }
 
+func emitStiHltWait(e *Emitter) {
+	e.emit(0xFB)
+	emitHltWait(e)
+}
+
 func emitTopicWait(e *Emitter, wait ir.TopicWait) {
 	if wait.UseMonitorMwait {
 		emitMonitorMwait(e, asm.MustLookup("rax"))
+		return
+	}
+	if wait.Fallback == "sti_hlt" {
+		emitStiHltWait(e)
 		return
 	}
 	emitHltWait(e)
@@ -1260,7 +1269,7 @@ func emitMonitorMwait(e *Emitter, addressReg asm.Reg) {
 
 func compileWaitFallbackUnitForTest() compiledUnit {
 	e := &Emitter{Labels: map[string]int{}}
-	emitHltWait(e)
+	emitStiHltWait(e)
 	return compiledUnit{Symbol: "wait_fallback_test", Bytes: e.Code}
 }
 

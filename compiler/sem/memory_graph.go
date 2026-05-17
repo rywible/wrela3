@@ -116,10 +116,10 @@ func (c *checker) recordRootArenaChildAt(expr *ast.CallExpr, receiverOrigin loca
 		Span:   expr.SpanV,
 	}
 	if labelOk && hasOffset && hasLength && hasAlign {
-		arena.Offset = alignArenaOffset(offset, align)
+		arena.Base = alignArenaOffset(receiverOrigin.ArenaBase+offset, align)
+		arena.Offset = arena.Base - receiverOrigin.ArenaBase
 		arena.Bytes = length
 		arena.Align = align
-		arena.Base = receiverOrigin.ArenaBase + arena.Offset
 	}
 	c.graph.Arenas = append(c.graph.Arenas, arena)
 }
@@ -136,10 +136,10 @@ func (c *checker) recordChildArenaChildAt(expr *ast.CallExpr, receiverOrigin loc
 		Span:   expr.SpanV,
 	}
 	if labelOk && hasOffset && hasLength && hasAlign {
-		arena.Offset = alignArenaOffset(offset, align)
+		arena.Base = alignArenaOffset(receiverOrigin.ArenaBase+offset, align)
+		arena.Offset = arena.Base - receiverOrigin.ArenaBase
 		arena.Bytes = length
 		arena.Align = align
-		arena.Base = receiverOrigin.ArenaBase + arena.Offset
 	}
 	c.graph.Arenas = append(c.graph.Arenas, arena)
 }
@@ -152,7 +152,7 @@ func (c *checker) recordRootArenaExecutorMemory(moduleName string, expr *ast.Cal
 }
 
 func (c *checker) implicitArenaAllocation(receiverOrigin localOrigin, label string, owner string, kind string, length uint64, align uint64, span source.Span) ArenaNode {
-	offset := c.nextImplicitArenaOffset(receiverOrigin.ArenaLabel, align)
+	offset := c.nextImplicitArenaOffset(receiverOrigin.ArenaBase, receiverOrigin.ArenaLabel, align)
 	return ArenaNode{
 		Label:  label,
 		Parent: receiverOrigin.ArenaLabel,
@@ -166,7 +166,7 @@ func (c *checker) implicitArenaAllocation(receiverOrigin localOrigin, label stri
 	}
 }
 
-func (c *checker) nextImplicitArenaOffset(parent string, align uint64) uint64 {
+func (c *checker) nextImplicitArenaOffset(parentBase uint64, parent string, align uint64) uint64 {
 	var next uint64
 	for _, arena := range c.graph.Arenas {
 		if arena.Parent != parent || !arenaHasStaticRange(arena) {
@@ -176,17 +176,23 @@ func (c *checker) nextImplicitArenaOffset(parent string, align uint64) uint64 {
 			next = end
 		}
 	}
-	return alignArenaOffset(next, align)
+	return alignArenaOffset(parentBase+next, align) - parentBase
 }
 
 func (c *checker) recordRootArenaExecutorMemoryNear(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
 	c.recordRootArenaExecutorMemory(moduleName, expr, receiverOrigin, scope)
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	satisfied := false
+	fallback := "unknown_locality"
+	if knownPlacementTarget(namedArgExpr(expr.Args, "near")) {
+		satisfied = true
+		fallback = ""
+	}
 	c.graph.PlacementDecisions = append(c.graph.PlacementDecisions, PlacementDecisionNode{
 		SlotLabel: owner,
 		Target:    "cpu",
-		Satisfied: false,
-		Fallback:  "unknown_locality",
+		Satisfied: satisfied,
+		Fallback:  fallback,
 		Span:      expr.SpanV,
 	})
 }
@@ -239,6 +245,25 @@ func dmaOwnerIdentity(expr ast.Expr, scope *Scope) string {
 		return key
 	}
 	return ""
+}
+
+func knownPlacementTarget(expr ast.Expr) bool {
+	placement, ok := expr.(*ast.ConstructorExpr)
+	if !ok || placement == nil {
+		return false
+	}
+	value := constValueFromExpr(placement)
+	known, ok := value.fieldBool("known")
+	if !ok || !known {
+		return false
+	}
+	if _, ok := value.fieldUint("kind"); !ok {
+		return false
+	}
+	if _, ok := value.fieldUint("id"); !ok {
+		return false
+	}
+	return true
 }
 
 func (c *checker) interruptQueueOwnerLabel(moduleName string, expr ast.Expr, scope *Scope) string {

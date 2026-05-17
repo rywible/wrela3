@@ -69,6 +69,7 @@ func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
 	}
 	for _, fact := range g.APICFacts {
 		r.Hardware.APIC.Mode = fact.Mode
+		r.Hardware.APIC.SelectedAPICMode = selectedAPICModeValue(fact.Mode)
 		r.Hardware.APIC.Required = fact.Required
 		r.Hardware.APIC.Fallback = fact.Fallback
 	}
@@ -98,6 +99,16 @@ func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
 			Known:  framebuffer.Known,
 		}
 	}
+}
+
+func selectedAPICModeValue(mode string) uint32 {
+	if mode == "x2apic_preferred" || mode == "x2apic_required" || mode == "x2apic_with_xapic_fallback" {
+		return 2
+	}
+	if mode != "" {
+		return 1
+	}
+	return 0
 }
 
 func appendPCIClaimReport(r *report.ImageReport, claim HardwareClaimNode) {

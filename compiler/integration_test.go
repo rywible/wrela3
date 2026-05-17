@@ -140,6 +140,7 @@ func TestHelloUsesProductionSubstrate(t *testing.T) {
 		"executor_memory_near(",
 		"require_separate_physical_cores(",
 		"require_periodic(period_us = 1000)",
+		"timer.subscribe(subscriber = worker_slot)",
 		"route_shared_irq(",
 	} {
 		if !strings.Contains(main, want) {
@@ -155,6 +156,24 @@ func TestHelloUsesProductionSubstrate(t *testing.T) {
 		if strings.Contains(main, forbidden) {
 			t.Fatalf("hello main contains forbidden shortcut %q", forbidden)
 		}
+	}
+}
+
+func TestHelloWakeStrategyDefaultsToStiHlt(t *testing.T) {
+	checked := checkProgramAt(t, "examples/hello/main.wrela")
+	reportImage := sem.BuildImageReport(checked)
+	found := false
+	for _, wake := range reportImage.Runtime.WakePaths {
+		if wake.SlotLabel != "console" {
+			continue
+		}
+		found = true
+		if wake.Strategy != "sti_hlt" || wake.Fallback != "sti_hlt" {
+			t.Fatalf("console wake path = %#v, want sti_hlt strategy and fallback", wake)
+		}
+	}
+	if !found {
+		t.Fatalf("console wake path missing: %#v", reportImage.Runtime.WakePaths)
 	}
 }
 
@@ -575,6 +594,16 @@ func compileHelloProgram(t *testing.T) *ir.Program {
 
 func compileProgramAt(t *testing.T, rootPath string) *ir.Program {
 	t.Helper()
+	checked := checkProgramAt(t, rootPath)
+	program, ds := ir.Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", ds)
+	}
+	return program
+}
+
+func checkProgramAt(t *testing.T, rootPath string) *sem.CheckedProgram {
+	t.Helper()
 	repoRoot := resolveRepoRoot(".")
 	graph, err := source.LoadGraph(source.Options{
 		RootPath: filepath.Join(repoRoot, rootPath),
@@ -598,11 +627,7 @@ func compileProgramAt(t *testing.T, rootPath string) *ir.Program {
 	if len(ds) != 0 {
 		t.Fatalf("Check diagnostics: %#v", ds)
 	}
-	program, ds := ir.Lower(checked)
-	if len(ds) != 0 {
-		t.Fatalf("Lower diagnostics: %#v", ds)
-	}
-	return program
+	return checked
 }
 
 func symbolBytes(t *testing.T, image *codegen.Image, symbol string) []byte {

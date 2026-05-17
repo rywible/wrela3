@@ -1963,6 +1963,7 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	}
 	if IsTopicType(typ) {
 		if payloadType, kind, ok := TopicPayloadTypeForTopic(typ); ok {
+			payloadType = c.resolvePayloadType(moduleName, payloadType)
 			origin.TopicKind = kind
 			origin.TopicPayloadType = qualifiedTypeName(payloadType)
 			origin.TopicPayloadSize, origin.TopicPayloadAlign, _ = payloadLayoutFromType(payloadType)
@@ -2058,7 +2059,7 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 					return localOrigin{
 						Type:       valueType,
 						ArenaLabel: label,
-						ArenaBase:  alignArenaOffset(offset, align) + receiverOrigin.ArenaBase,
+						ArenaBase:  alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
 						ArenaBytes: length,
 						ArenaAlign: align,
 					}
@@ -2075,7 +2076,7 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 					return localOrigin{
 						Type:       valueType,
 						ArenaLabel: label,
-						ArenaBase:  alignArenaOffset(offset, align) + receiverOrigin.ArenaBase,
+						ArenaBase:  alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
 						ArenaBytes: length,
 						ArenaAlign: align,
 					}
@@ -2141,9 +2142,9 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		}
 		origin.TopicLabel = "timer.periodic"
 		origin.TopicKind = "timer_tick"
-		origin.TopicPayloadType = "machine.x86_64.topic_payload.TimerTickPayload"
-		origin.TopicPayloadSize = 24
-		origin.TopicPayloadAlign = 8
+		payloadType := c.resolvePayloadType(moduleName, resolveBuiltinTopicPayload("machine.x86_64.topic_payload", "TimerTickPayload"))
+		origin.TopicPayloadType = qualifiedTypeName(payloadType)
+		origin.TopicPayloadSize, origin.TopicPayloadAlign, _ = payloadLayoutFromType(payloadType)
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case receiverType.Module == "machine.x86_64.interrupts" && receiverType.Name == "InterruptAuthority" && expr.Method == "route_shared_irq":
 		args := callConstArgs(expr)
@@ -2204,7 +2205,7 @@ func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueTy
 	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.CpuFeatureFacts" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.CpuDiscovery" &&
 		expr.Field == "features":
-		origin.LoopStrategy = "monitor_mwait"
+		origin.LoopStrategy = "sti_hlt"
 		origin.LoopFallback = "sti_hlt"
 	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.ExecutorRegistry" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.OwnedHardware" &&
@@ -2223,7 +2224,7 @@ func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueTy
 	case qualifiedTypeName(valueType) == "machine.x86_64.executor_loop.WakeStrategy" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
 		expr.Field == "wake_strategy":
-		origin.LoopStrategy = "monitor_mwait"
+		origin.LoopStrategy = "sti_hlt"
 		origin.LoopFallback = "sti_hlt"
 	case qualifiedTypeName(valueType) == "machine.x86_64.timer.TimerAuthority" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
@@ -2305,7 +2306,7 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 		}
 		c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{TopicLabel: origin.TopicLabel, SubscriberLabel: origin.SlotLabel, Binding: name, Span: span})
 		if origin.IsTimerRoute {
-			c.graph.TimerRoutes = append(c.graph.TimerRoutes, TimerRouteNode{
+			c.recordTimerRoute(TimerRouteNode{
 				Label:           origin.TimerLabel,
 				Source:          origin.TimerSource,
 				PeriodUS:        origin.TimerPeriodUS,
@@ -2335,6 +2336,47 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case origin.Type.Kind == KindExecutor:
 		c.updateExecutorGraphNode(origin, span)
 	}
+}
+
+func (c *checker) recordTimerRoute(route TimerRouteNode) {
+	for i := range c.graph.TimerRoutes {
+		existing := &c.graph.TimerRoutes[i]
+		if existing.Label != route.Label || existing.Vector != route.Vector || existing.TopicLabel != route.TopicLabel {
+			continue
+		}
+		existing.SubscriberSlots = appendUniqueString(existing.SubscriberSlots, route.SubscriberSlots...)
+		return
+	}
+	c.graph.TimerRoutes = append(c.graph.TimerRoutes, route)
+}
+
+func appendUniqueString(out []string, values ...string) []string {
+	for _, value := range values {
+		seen := false
+		for _, existing := range out {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func (c *checker) resolvePayloadType(moduleName string, typ *Type) *Type {
+	if typ == nil || len(typ.Fields) != 0 {
+		return typ
+	}
+	if resolved := c.resolveType(moduleName, qualifiedTypeName(typ)); resolved != nil {
+		return resolved
+	}
+	if resolved := c.resolveType(typ.Module, typ.Name); resolved != nil {
+		return resolved
+	}
+	return typ
 }
 
 func (c *checker) recordSharedInterruptSourceOrigin(origin localOrigin, span source.Span) {
@@ -2841,6 +2883,10 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 		if (e.Op == "+" || e.Op == "-") && isAddressType(left) && isIntegerType(right) {
 			c.rememberLifetime(e, lifetime)
 			return left
+		}
+		if e.Op == "-" && isAddressType(left) && isAddressType(right) {
+			c.rememberLifetime(e, lifetime)
+			return c.mustType(moduleName, "U64")
 		}
 		c.requireSame(left, right, e.SpanV)
 		c.rememberLifetime(e, lifetime)

@@ -126,6 +126,7 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		"local_apic_timer_available = true",
 		"pit_available = true",
 		"known = false",
+		"features = CpuFeatureFacts(monitor_mwait_available = false)",
 	} {
 		if !strings.Contains(discoverySource, want) {
 			t.Fatalf("hardware discovery source missing %q", want)
@@ -159,6 +160,13 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("interrupt route source missing %q", want)
 		}
+	}
+	interruptsSource := readRepoFile(t, "wrela/machine/x86_64/interrupts.wrela")
+	if !strings.Contains(interruptsSource, "panic.fail(code = 0xAC040005)") {
+		t.Fatalf("interrupt overflow source missing %q", "self.panic.fail(code = 0xAC040005)")
+	}
+	if !strings.Contains(interruptsSource, "self.panic.fail(code = 0xAC040006)") {
+		t.Fatalf("interrupt overflow source missing %q", "self.panic.fail(code = 0xAC040006)")
 	}
 }
 

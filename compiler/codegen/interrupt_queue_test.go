@@ -28,6 +28,14 @@ func TestInterruptQueueDropNewestSetsOverflowFlag(t *testing.T) {
 	}
 }
 
+func TestInterruptQueueDropNewestAndSetFlagWakesOwnerOnOverflow(t *testing.T) {
+	q := ir.InterruptQueueLayout{Label: "irq.serial.rx", Owner: "console", Capacity: 1, PayloadSize: 8, PayloadAlign: 8, Overflow: "drop_newest_and_set_flag"}
+	unit := compileInterruptQueuePushWithContextForTest(q, compileContext{SlotVcpu: map[string]int{"console": 1}})
+	if got := countDataRelocs(unit, "_wrela_vcpu1_apic_id_command"); got < 2 {
+		t.Fatalf("drop-newest-and-set-flag must wake on overflow and after successful enqueue, got %d data relocs: %#v", got, unit.DataReloc)
+	}
+}
+
 func TestInterruptQueueDropOldestAdvancesHeadAndSetsOverflowFlag(t *testing.T) {
 	q := ir.InterruptQueueLayout{Label: "irq.serial.rx", Capacity: 1, PayloadSize: 8, PayloadAlign: 8, Overflow: "drop_oldest_and_set_flag"}
 	unit := compileInterruptQueuePushForTest(q)
@@ -65,6 +73,16 @@ func hasDataReloc(unit compiledUnit, symbol string) bool {
 		}
 	}
 	return false
+}
+
+func countDataRelocs(unit compiledUnit, symbol string) int {
+	count := 0
+	for _, reloc := range unit.DataReloc {
+		if reloc.Symbol == symbol {
+			count++
+		}
+	}
+	return count
 }
 
 func hasCallReloc(unit compiledUnit, symbol string) bool {

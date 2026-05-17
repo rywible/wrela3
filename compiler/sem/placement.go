@@ -86,7 +86,7 @@ func (c *checker) recordPlacementConstraint(moduleName string, expr *ast.CallExp
 		A:         a,
 		B:         b,
 		Required:  required,
-		Satisfied: false,
+		Satisfied: required,
 		Fallback:  fallback,
 		Span:      expr.SpanV,
 	})

@@ -37,11 +37,35 @@ func apTrampolineBlob() []byte {
 }
 
 func validateAPStartupContract() []diag.Diagnostic {
-	if apTrampolineBase >= 0x100000 {
+	return validateAPStartupContractForBlob(apTrampolineBase, apTrampolineBlobBytes)
+}
+
+func validateAPStartupContractForBlob(base int, blob []byte) []diag.Diagnostic {
+	if base >= 0x100000 {
 		return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline must be below 1 MiB"}}
 	}
-	if apTrampolineBase%4096 != 0 {
+	if base%4096 != 0 {
 		return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline must be 4 KiB aligned"}}
+	}
+	if len(blob) == 0 || len(blob) > 4096 {
+		return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline must fit in one SIPI page"}}
+	}
+	for _, bound := range []struct {
+		name   string
+		offset int
+		bytes  int
+	}{
+		{name: "local APIC base metadata", offset: apTrampolineLocalApicBaseOffset, bytes: 8},
+		{name: "PML4 metadata", offset: apTrampolinePML4Offset, bytes: 8},
+		{name: "entry metadata", offset: apTrampolineEntryOffset, bytes: 8},
+		{name: "stack metadata", offset: apTrampolineStackOffset, bytes: 8},
+		{name: "context metadata", offset: apTrampolineContextOffset, bytes: 8},
+		{name: "ready metadata", offset: apTrampolineReadyOffset, bytes: 8},
+		{name: "IDT descriptor metadata", offset: apTrampolineIDTDescriptorOffset, bytes: 10},
+	} {
+		if len(blob) < bound.offset+bound.bytes {
+			return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline blob missing " + bound.name}}
+		}
 	}
 	return nil
 }

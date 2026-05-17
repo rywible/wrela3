@@ -77,6 +77,9 @@ func TestPlacementConstraintsRecorded(t *testing.T) {
 	if preferred.Kind != "same_cache_group" || preferred.Required || preferred.Fallback != "unknown_locality" {
 		t.Fatalf("preferred placement constraint = %#v", preferred)
 	}
+	if required.Satisfied != true {
+		t.Fatalf("required placement constraint unexpectedly unsatisfied = %#v", required)
+	}
 	if len(checked.ImageGraph.PlacementDecisions) != 1 {
 		t.Fatalf("placement decisions = %#v", checked.ImageGraph.PlacementDecisions)
 	}

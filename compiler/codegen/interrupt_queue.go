@@ -96,8 +96,12 @@ func emitInterruptQueuePushPayload(e *Emitter, q ir.InterruptQueueLayout, payloa
 
 func emitInterruptQueueFullPolicy(e *Emitter, q ir.InterruptQueueLayout, base asm.Reg, head asm.Reg, tail asm.Reg, enqueue string, done string) {
 	switch q.Overflow {
-	case "drop_newest", "drop_newest_and_set_flag":
+	case "drop_newest":
 		emitStoreImm8ToMem(e, base, interruptQueueOverflowOffset, 1)
+		e.emitJmp(done)
+	case "drop_newest_and_set_flag":
+		emitStoreImm8ToMem(e, base, interruptQueueOverflowOffset, 1)
+		emitWakeSlot(e, q.Owner, e.ctx)
 		e.emitJmp(done)
 	case "drop_oldest", "drop_oldest_and_set_flag":
 		emitStoreImm8ToMem(e, base, interruptQueueOverflowOffset, 1)

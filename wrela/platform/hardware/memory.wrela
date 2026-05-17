@@ -43,18 +43,19 @@ data RootArena {
     }
 
     fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
-        let aligned_offset = (offset + align - 1) & (0 - align)
-        if aligned_offset < offset {
+        let requested_base = self.region.base + offset
+        if requested_base < self.region.base {
             self.region.panic.fail(code = 0xAC070001)
         }
+        let base = (requested_base + align - 1) & (0 - align)
+        if base < requested_base {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let aligned_offset = base - self.region.base
         if length > self.region.length {
             self.region.panic.fail(code = 0xAC070001)
         }
         if aligned_offset > self.region.length - length {
-            self.region.panic.fail(code = 0xAC070001)
-        }
-        let base = self.region.base + aligned_offset
-        if base < self.region.base {
             self.region.panic.fail(code = 0xAC070001)
         }
         let end = aligned_offset + length
@@ -125,18 +126,19 @@ data ChildArena {
     }
 
     fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
-        let aligned_offset = (offset + align - 1) & (0 - align)
-        if aligned_offset < offset {
+        let requested_base = self.base + offset
+        if requested_base < self.base {
             self.root.region.panic.fail(code = 0xAC070001)
         }
+        let base = (requested_base + align - 1) & (0 - align)
+        if base < requested_base {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let aligned_offset = base - self.base
         if length > self.length {
             self.root.region.panic.fail(code = 0xAC070001)
         }
         if aligned_offset > self.length - length {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
-        let base = self.base + aligned_offset
-        if base < self.base {
             self.root.region.panic.fail(code = 0xAC070001)
         }
         let end = aligned_offset + length

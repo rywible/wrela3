@@ -96,9 +96,10 @@ type BARReport struct {
 }
 
 type APICReport struct {
-	Mode     string `json:"mode"`
-	Required bool   `json:"required"`
-	Fallback string `json:"fallback,omitempty"`
+	Mode             string `json:"mode"`
+	SelectedAPICMode uint32 `json:"selected_apic_mode"`
+	Required         bool   `json:"required"`
+	Fallback         string `json:"fallback,omitempty"`
 }
 
 type TimerReport struct {

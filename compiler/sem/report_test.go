@@ -108,7 +108,7 @@ func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 	if len(r.AuthorityAudit.HardwareClaims) != 1 || r.AuthorityAudit.HardwareClaims[0].Owner != "delegated_hardware" {
 		t.Fatalf("hardware claims missing from report: %#v", r.AuthorityAudit.HardwareClaims)
 	}
-	if r.Hardware.APIC.Mode != "xapic_fallback" {
+	if r.Hardware.APIC.Mode != "xapic_fallback" || r.Hardware.APIC.SelectedAPICMode != 1 {
 		t.Fatalf("APIC mode missing from report: %#v", r.Hardware.APIC)
 	}
 	if len(r.Hardware.Timers) != 1 || r.Hardware.Timers[0].Source != "local_apic_pit_calibrated" {
