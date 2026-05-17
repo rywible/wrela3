@@ -50,54 +50,49 @@ data PcieEcamWindow {
 data PcieEcamWindows {
     count: U64
     window0: PcieEcamWindow
+    window1: PcieEcamWindow
+    window2: PcieEcamWindow
+    window3: PcieEcamWindow
     panic: BootPanic
+
+    fn at(self, index: U64) -> PcieEcamWindow {
+        if index == 0 { return self.window0 }
+        if index == 1 { return self.window1 }
+        if index == 2 { return self.window2 }
+        if index == 3 { return self.window3 }
+        self.panic.fail(code = 0xAC060014)
+    }
 
     fn enumerate(self) -> PciDeviceSet {
         if self.count == 0 {
             self.panic.fail(code = 0xAC060013)
         }
         let devices = PciDeviceSetBuilder(panic = self.panic).empty()
-        let bus = self.window0.start_bus
-        while bus <= self.window0.end_bus {
-            let device = 0
-            while device < 32 {
-                let function = 0
-                let scan_more_functions = true
-                while function < 8 {
-                    let vendor_device = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0)
-                    if (vendor_device & 0xFFFF) != 0xFFFF {
-                        devices.append(window = self.window0, bus = bus, device = device, function = function)
-                        if function == 0 {
-                            let header = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
-                            if (header & 0x00800000) == 0 {
-                                scan_more_functions = false
-                            }
-                        }
-                    } else {
-                        if function == 0 {
-                            scan_more_functions = false
-                        }
-                    }
-                    if scan_more_functions == false {
-                        function = 8
-                    }
-                    function = function + 1
-                }
-                device = device + 1
-            }
-            if bus == self.window0.end_bus {
-                return devices
-            }
-            bus = bus + 1
+        let index = 0
+        while index < self.count {
+            devices.scan_window(window = self.at(index = index))
+            index = index + 1
         }
         return devices
     }
 
     fn append(self, window: PcieEcamWindow) {
+        if self.count >= 4 {
+            self.panic.fail(code = 0xAC060015)
+        }
         if self.count == 0 {
             self.window0 = window
-            self.count = 1
         }
+        if self.count == 1 {
+            self.window1 = window
+        }
+        if self.count == 2 {
+            self.window2 = window
+        }
+        if self.count == 3 {
+            self.window3 = window
+        }
+        self.count = self.count + 1
     }
 }
 
@@ -312,6 +307,46 @@ data PciDeviceSet {
         if self.count == 14 { self.device14 = value }
         if self.count == 15 { self.device15 = value }
         self.count = self.count + 1
+    }
+
+    fn scan_window(self, window: PcieEcamWindow) {
+        let bus = window.start_bus
+        while bus <= window.end_bus {
+            self.scan_bus(window = window, bus = bus)
+            if bus == window.end_bus {
+                return
+            }
+            bus = bus + 1
+        }
+    }
+
+    fn scan_bus(self, window: PcieEcamWindow, bus: U8) {
+        let device = 0
+        while device < 32 {
+            let function = 0
+            let scan_more_functions = true
+            while function < 8 {
+                let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
+                if (vendor_device & 0xFFFF) != 0xFFFF {
+                    self.append(window = window, bus = bus, device = device, function = function)
+                    if function == 0 {
+                        let header = window.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
+                        if (header & 0x00800000) == 0 {
+                            scan_more_functions = false
+                        }
+                    }
+                } else {
+                    if function == 0 {
+                        scan_more_functions = false
+                    }
+                }
+                if scan_more_functions == false {
+                    function = 8
+                }
+                function = function + 1
+            }
+            device = device + 1
+        }
     }
 
     fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
