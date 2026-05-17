@@ -93,6 +93,9 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 	if ctx.types == nil {
 		ctx.types = map[string]ir.TypeInfo{}
 	}
+	if ds := validateAPStartupContract(); len(ds) != 0 {
+		return nil, ds
+	}
 
 	units := make([]compiledUnit, 0, len(program.Functions)+len(program.AsmMethods)+len(program.InterruptBindings)+1)
 	for _, fn := range program.Functions {
@@ -129,6 +132,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		units = append(units, unit)
 	}
 	units = append(units, compileMemoryTrapUnit())
+	units = append(units, compileAPStartupTimeoutTrapUnit())
 
 	sections := []Section{{Name: ".text", Data: nil, Characteristics: 0x60000020}}
 	symbols := map[string]uint64{}
@@ -470,6 +474,13 @@ func compileMemoryTrapUnit() compiledUnit {
 			0xEB, 0xFD,
 		},
 	}
+}
+
+func compileAPStartupTimeoutTrapUnit() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	e.emitInstruction(asm.Instruction{Mnemonic: "cli"})
+	emitHltLoop(e)
+	return compiledUnit{Symbol: "_wrela_ap_startup_timeout", Bytes: e.Code}
 }
 
 type builtDataSection struct {

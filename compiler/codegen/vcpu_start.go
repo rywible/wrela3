@@ -14,7 +14,7 @@ import (
 const apTrampolineBase = 0x8000
 const apTrampolineInstallSymbol = "_wrela_method_platform_uefi_types_DelegatedMemory_install_ap_trampoline"
 const apTrampolineVcpuStackSize = 16 * 1024
-const apStartupDelayLoopCount = 70_000
+const apStartupReadyPollLimit = 10_000_000
 const apicICRInitAssert = 0x00004500
 
 const (
@@ -34,6 +34,16 @@ func apTrampolineBlob() []byte {
 	out := make([]byte, len(apTrampolineBlobBytes))
 	copy(out, apTrampolineBlobBytes)
 	return out
+}
+
+func validateAPStartupContract() []diag.Diagnostic {
+	if apTrampolineBase >= 0x100000 {
+		return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline must be below 1 MiB"}}
+	}
+	if apTrampolineBase%4096 != 0 {
+		return []diag.Diagnostic{{Phase: diagnosticPhase, Code: diag.SEM0074, Message: "AP trampoline must be 4 KiB aligned"}}
+	}
+	return nil
 }
 
 func apTrampolineDataObject() ir.DataObject {
@@ -127,11 +137,9 @@ func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext
 	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
 	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), apicICRInitAssert)
-	emitDelayLoop(e, apStartupDelayLoopCount)
 	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
 	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
-	emitDelayLoop(e, apStartupDelayLoopCount)
 	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
 	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
@@ -313,6 +321,8 @@ func emitDelayLoop(e *Emitter, count int64) {
 func emitWaitForVcpuReady(e *Emitter, vcpuID int) {
 	loop := e.newLabel("vcpu_ready")
 	done := e.newLabel("vcpu_ready_done")
+	timeout := e.newLabel("vcpu_ready_timeout")
+	emitMovImmToReg(e, asm.MustLookup("rcx"), apStartupReadyPollLimit)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), fmt.Sprintf("_wrela_vcpu%d_ready", vcpuID))
 	e.bindLabel(loop)
 	emitLoadMemToReg(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
@@ -321,8 +331,19 @@ func emitWaitForVcpuReady(e *Emitter, vcpuID int) {
 		asm.ImmOperand{Value: 1},
 	}})
 	e.emitJcc(0x84, done)
+	e.emitInstruction(asm.Instruction{Mnemonic: "sub", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rcx")},
+		asm.ImmOperand{Value: 1},
+	}})
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rcx")},
+		asm.ImmOperand{Value: 0},
+	}})
+	e.emitJcc(0x84, timeout)
 	e.emitInstruction(asm.Instruction{Mnemonic: "pause"})
 	e.emitJmp(loop)
+	e.bindLabel(timeout)
+	emitCallReloc(e, "_wrela_ap_startup_timeout")
 	e.bindLabel(done)
 }
 

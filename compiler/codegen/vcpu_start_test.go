@@ -119,6 +119,35 @@ func TestAPTrampolineBlobContract(t *testing.T) {
 	}
 }
 
+func TestAPStartupContractConstants(t *testing.T) {
+	if apTrampolineBase != 0x8000 {
+		t.Fatalf("apTrampolineBase = %#x, want 0x8000", apTrampolineBase)
+	}
+	if apTrampolineBase%4096 != 0 || apTrampolineBase >= 0x100000 {
+		t.Fatalf("AP trampoline must be 4 KiB aligned below 1 MiB")
+	}
+	if len(validateAPStartupContract()) != 0 {
+		t.Fatalf("AP startup contract diagnostics: %#v", validateAPStartupContract())
+	}
+}
+
+func TestAPReadyWaitIsBounded(t *testing.T) {
+	unit := compileVcpuStartForTest(t)
+	code := unit.Bytes
+	if !bytes.Contains(code, encodeImm32ForTest(apStartupReadyPollLimit)) {
+		t.Fatalf("AP ready wait missing poll limit %d in %x", apStartupReadyPollLimit, code)
+	}
+	found := false
+	for _, reloc := range unit.CallReloc {
+		if reloc.Symbol == "_wrela_ap_startup_timeout" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("AP ready wait must call timeout trap, relocs = %#v", unit.CallReloc)
+	}
+}
+
 func TestVcpuEnterCallsExecutorStartAndHaltsIfReturned(t *testing.T) {
 	execType := ir.Type{Name: "Hello", Module: "test", Kind: ir.TypeKindExecutor}
 	hello := &ir.Local{Symbol: "hello", Type: execType}
