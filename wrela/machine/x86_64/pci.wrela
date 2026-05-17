@@ -14,6 +14,23 @@ data PciDeviceIdentity {
     class_code: U8
     subclass: U8
     prog_if: U8
+    revision: U8
+    header_type: U8
+    interrupt_pin: U8
+    interrupt_line: U8
+}
+
+data PciBridgeBusRange {
+    primary: U8
+    secondary: U8
+    subordinate: U8
+}
+
+data PciFunctionFacts {
+    identity: PciDeviceIdentity
+    has_msi: Bool
+    has_msix: Bool
+    bridge_range: PciBridgeBusRange
 }
 
 data PciInterruptRoute {
@@ -147,6 +164,27 @@ data PciDevice {
         return IoPortRegion(port_base = base, length = size)
     }
 
+    fn find_capability_optional(self, capability_id: U8) -> U16 {
+        let status = self.read_config32(offset = 0x04)
+        if (status & 0x00100000) == 0 {
+            return 0
+        }
+        let ptr = self.read_config32(offset = 0x34) & 0xFC
+        let remaining = 48
+        while remaining != 0 {
+            if ptr == 0 {
+                return 0
+            }
+            let header = self.read_config32(offset = ptr)
+            if (header & 0xFF) == capability_id {
+                return ptr
+            }
+            ptr = (header >> 8) & 0xFC
+            remaining = remaining - 1
+        }
+        return 0
+    }
+
     fn find_capability(self, capability_id: U8) -> U16 {
         let status = self.read_config32(offset = 0x04)
         if (status & 0x00100000) == 0 {
@@ -166,6 +204,21 @@ data PciDevice {
             remaining = remaining - 1
         }
         self.panic.fail(code = 0xAC060022)
+    }
+
+    fn facts(self) -> PciFunctionFacts {
+        let bridge_data = self.read_config32(offset = 0x18)
+        let interrupt_data = self.read_config32(offset = 0x3C)
+        return PciFunctionFacts(
+            identity = self.identity,
+            has_msi = self.find_capability_optional(capability_id = 0x05) != 0,
+            has_msix = self.find_capability_optional(capability_id = 0x11) != 0,
+            bridge_range = PciBridgeBusRange(
+                primary = self.identity.bus,
+                secondary = (bridge_data >> 8) & 0xFF,
+                subordinate = (bridge_data >> 16) & 0xFF
+            )
+        )
     }
 
     fn enable_mmio_and_bus_master(self) {
@@ -272,12 +325,35 @@ data PciDeviceSet {
         self.panic.fail(code = 0xAC060011)
     }
 
+    fn contains(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8) -> Bool {
+        let index = 0
+        while index < self.count {
+            let existing = self.at(index = index)
+            if existing.identity.segment == window.segment {
+                if existing.identity.bus == bus {
+                    if existing.identity.device == device {
+                        if existing.identity.function == function {
+                            return true
+                        }
+                    }
+                }
+            }
+            index = index + 1
+        }
+        return false
+    }
+
     fn append(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8) {
+        if self.contains(window = window, bus = bus, device = device, function = function) == true {
+            return
+        }
         if self.count >= 16 {
             self.panic.fail(code = 0xAC060012)
         }
         let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
         let class_reg = window.read_config32(bus = bus, device = device, function = function, offset = 8)
+        let header = window.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
+        let interrupt_data = window.read_config32(bus = bus, device = device, function = function, offset = 0x3C)
         let id = PciDeviceIdentity(
             segment = window.segment,
             bus = bus,
@@ -287,7 +363,11 @@ data PciDeviceSet {
             device_id = vendor_device >> 16,
             class_code = class_reg >> 24,
             subclass = (class_reg >> 16) & 0xFF,
-            prog_if = (class_reg >> 8) & 0xFF
+            prog_if = (class_reg >> 8) & 0xFF,
+            revision = class_reg & 0xFF,
+            header_type = (header >> 16) & 0xFF,
+            interrupt_pin = (interrupt_data >> 8) & 0xFF,
+            interrupt_line = interrupt_data & 0xFF
         )
         let value = PciDevice(window = window, identity = id, panic = self.panic)
         if self.count == 0 { self.device0 = value }
@@ -312,7 +392,7 @@ data PciDeviceSet {
     fn scan_window(self, window: PcieEcamWindow) {
         let bus = window.start_bus
         while bus <= window.end_bus {
-            self.scan_bus(window = window, bus = bus)
+            self.scan_bus_depth(window = window, bus = bus, depth = 0)
             if bus == window.end_bus {
                 return
             }
@@ -320,32 +400,59 @@ data PciDeviceSet {
         }
     }
 
-    fn scan_bus(self, window: PcieEcamWindow, bus: U8) {
+    fn scan_bus_depth(self, window: PcieEcamWindow, bus: U8, depth: U64) {
         let device = 0
         while device < 32 {
             let function = 0
             let scan_more_functions = true
             while function < 8 {
-                let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
-                if (vendor_device & 0xFFFF) != 0xFFFF {
-                    self.append(window = window, bus = bus, device = device, function = function)
-                    if function == 0 {
+                if function == 0 {
+                    let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
+                    if (vendor_device & 0xFFFF) != 0xFFFF {
                         let header = window.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
                         if (header & 0x00800000) == 0 {
                             scan_more_functions = false
                         }
-                    }
-                } else {
-                    if function == 0 {
+                    } else {
                         scan_more_functions = false
                     }
                 }
+                self.scan_function(window = window, bus = bus, device = device, function = function, depth = depth)
                 if scan_more_functions == false {
                     function = 8
                 }
                 function = function + 1
             }
             device = device + 1
+        }
+    }
+
+    fn scan_function(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8, depth: U64) {
+        if depth > 8 {
+            self.panic.fail(code = 0xAC060016)
+        }
+        let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
+        if (vendor_device & 0xFFFF) == 0xFFFF {
+            return
+        }
+        self.append(window = window, bus = bus, device = device, function = function)
+        let class_reg = window.read_config32(bus = bus, device = device, function = function, offset = 8)
+        let class_code = class_reg >> 24
+        if class_code == 0x06 {
+            let subclass = (class_reg >> 16) & 0xFF
+            if subclass == 0x04 {
+                let buses = window.read_config32(bus = bus, device = device, function = function, offset = 0x18)
+                let secondary = (buses >> 8) & 0xFF
+                let subordinate = (buses >> 16) & 0xFF
+                let next = secondary
+                while next <= subordinate {
+                    self.scan_bus_depth(window = window, bus = next, depth = depth + 1)
+                    if next == subordinate {
+                        return
+                    }
+                    next = next + 1
+                }
+            }
         }
     }
 
@@ -373,7 +480,7 @@ class PciDeviceSetBuilder {
 
     fn empty(self) -> PciDeviceSet {
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
-        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0, revision = 0, header_type = 0, interrupt_pin = 0, interrupt_line = 0)
         let empty = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
         return PciDeviceSet(count = 0, device0 = empty, device1 = empty, device2 = empty, device3 = empty, device4 = empty, device5 = empty, device6 = empty, device7 = empty, device8 = empty, device9 = empty, device10 = empty, device11 = empty, device12 = empty, device13 = empty, device14 = empty, device15 = empty, panic = self.panic)
     }

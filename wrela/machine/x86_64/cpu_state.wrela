@@ -156,7 +156,7 @@ class ClaimedPciPlanBuilder {
     fn empty(self) -> ClaimedPciPlan {
         let empty_mmio = MmioRegion(address = 0, length = 0, panic = self.panic)
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
-        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0, revision = 0, header_type = 0, interrupt_pin = 0, interrupt_line = 0)
         let empty_device = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
         return ClaimedPciPlan(
             edu_bar0 = empty_mmio,
