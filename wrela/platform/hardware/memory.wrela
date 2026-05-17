@@ -1,0 +1,131 @@
+module platform.hardware.memory
+
+use { BootPanic } from platform.hardware.panic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { CacheArena } from machine.x86_64.cache_memory
+use { PciDevice } from machine.x86_64.pci
+
+data ArenaIdentity {
+    label: StringLiteral
+}
+
+data ArenaPolicy {
+    evict_cache_by_default: Bool
+}
+
+data PhysicalRegionAuthority {
+    base: PhysicalAddress
+    length: U64
+    align: U64
+    provenance: U64
+    panic: BootPanic
+
+    fn create_arena(self, identity: ArenaIdentity, policy: ArenaPolicy) -> RootArena {
+        return RootArena(region = self, identity = identity, policy = policy, next_offset = 0)
+    }
+
+    fn bytes(self) -> MutableBytes {
+        return MutableBytes(address = self.base, length = self.length)
+    }
+}
+
+class RootArena {
+    region: PhysicalRegionAuthority
+    identity: ArenaIdentity
+    policy: ArenaPolicy
+    next_offset: U64
+
+    fn child(self, identity: ArenaIdentity, length: U64, align: U64) -> ChildArena {
+        return self.child_at(identity = identity, offset = self.next_offset, length = length, align = align)
+    }
+
+    fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
+        let aligned_offset = (offset + align - 1) & (0 - align)
+        if aligned_offset < offset {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if length > self.region.length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset > self.region.length - length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let base = self.region.base + aligned_offset
+        if base < self.region.base {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let end = aligned_offset + length
+        if end > self.region.length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        self.next_offset = end
+        return ChildArena(root = self, identity = identity, base = base, length = length, next_offset = 0)
+    }
+
+    fn executor_memory(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
+        let child = self.child(identity = ArenaIdentity(label = "executor.memory"), length = length, align = align)
+        return ExecutorMemory(arena_base = child.base, arena_length = child.length, next_offset = 0)
+    }
+
+    fn cache_arena(self, identity: ArenaIdentity, length: U64, align: U64) -> CacheArena {
+        let child = self.child(identity = identity, length = length, align = align)
+        return CacheArena(
+            storage = MutableBytes(address = child.base, length = child.length),
+            slot_count = 0,
+            slot_size = 0,
+            next_victim = 0,
+            initialized = 0
+        )
+    }
+
+    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer {
+        let child = self.child(identity = identity, length = length, align = align)
+        return DmaBuffer(
+            owner = owner,
+            identity = identity,
+            bytes = MutableBytes(address = child.base, length = child.length)
+        )
+    }
+}
+
+class ChildArena {
+    root: RootArena
+    identity: ArenaIdentity
+    base: PhysicalAddress
+    length: U64
+    next_offset: U64
+
+    fn child(self, identity: ArenaIdentity, length: U64, align: U64) -> ChildArena {
+        return self.child_at(identity = identity, offset = self.next_offset, length = length, align = align)
+    }
+
+    fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
+        let aligned_offset = (offset + align - 1) & (0 - align)
+        if aligned_offset < offset {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if length > self.length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset > self.length - length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let base = self.base + aligned_offset
+        if base < self.base {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let end = aligned_offset + length
+        if end > self.length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        self.next_offset = end
+        return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
+    }
+}
+
+data DmaBuffer {
+    owner: PciDevice
+    identity: ArenaIdentity
+    bytes: MutableBytes
+}

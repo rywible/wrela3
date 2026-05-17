@@ -97,6 +97,21 @@ func IsArenaType(t *Type) bool {
 	return kind == MemoryKindRootArena || kind == MemoryKindFrameArena
 }
 
+func IsPhysicalRegionAuthorityType(t *Type) bool {
+	return t != nil && t.Module == "platform.hardware.memory" && t.Name == "PhysicalRegionAuthority"
+}
+
+func IsArenaAuthorityType(t *Type) bool {
+	if t == nil || t.Module != "platform.hardware.memory" {
+		return false
+	}
+	return t.Name == "RootArena" || t.Name == "ChildArena"
+}
+
+func IsDMABufferAuthorityType(t *Type) bool {
+	return t != nil && t.Module == "platform.hardware.memory" && t.Name == "DmaBuffer"
+}
+
 func isCanonicalFrameIntrinsic(moduleName string, typ *Type, method ast.MethodDecl) bool {
 	if moduleName != "machine.x86_64.executor_memory" || method.Name != "frame" {
 		return false

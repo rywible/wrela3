@@ -98,11 +98,12 @@ image MultiVcpuTopics {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let root = PlatformDiscoveryRoot(panic = BootPanic())
         let discovery = root.from_uefi(hardware = hardware)
-        let memory_region = discovery.memory.require_usable_region(
+        let root_region = discovery.memory.require_usable_region(
             min_base = 0x200000,
             length = 0x800000,
             align = 4096
         )
+        let memory_region = root_region.bytes()
         let hardware_plan = HardwarePlan(
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(

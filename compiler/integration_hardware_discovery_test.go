@@ -20,6 +20,8 @@ func TestHardwareDiscoveryReportAPIBuilds(t *testing.T) {
 	}
 	hello := readRepoFile(t, "examples/hello/main.wrela")
 	for _, want := range []string{
+		"let root_region = discovery.memory.require_usable_region(",
+		"let memory_region = root_region.bytes()",
 		"discovery.report(memory = memory_region, hardware_plan = hardware_plan)",
 		"discovery_report.memory_length < 0x600000",
 		"discovery_report.pci_device_count == 0",

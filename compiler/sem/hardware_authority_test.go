@@ -1,8 +1,13 @@
 package sem
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
+
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/parse"
 	"github.com/ryanwible/wrela3/compiler/source"
@@ -82,4 +87,59 @@ image BadForgedMmio {
 	if !hasCode(ds, diag.SEM0049) {
 		t.Fatalf("expected SEM0049, got %#v", ds)
 	}
+}
+
+func TestPhysicalRegionAndArenaAuthorityForgeryRejected(t *testing.T) {
+	for _, fixture := range []string{
+		"forged_physical_region_authority.wrela",
+		"forged_root_arena.wrela",
+	} {
+		t.Run(fixture, func(t *testing.T) {
+			modules := parseAuthorityFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", fixture))
+			index, ds := BuildIndex(modules)
+			ds = filterMissingImageDiagnostic(ds)
+			if len(ds) != 0 {
+				t.Fatalf("index diagnostics: %#v", ds)
+			}
+			_, ds = Check(index, modules)
+			if !hasCode(ds, diag.SEM0056) {
+				t.Fatalf("expected SEM0056, got %#v", ds)
+			}
+		})
+	}
+}
+
+func parseAuthorityFixtureModulesForTest(t *testing.T, path string) []*ast.Module {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	abs := filepath.Join(wd, "..", "..", path)
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", abs, err)
+	}
+	src := string(raw)
+	if strings.HasPrefix(src, "// expect:") {
+		if _, rest, ok := strings.Cut(src, "\n"); ok {
+			src = rest
+		}
+	}
+	parts := strings.Split(src, "\nmodule ")
+	files := make([]*source.File, 0, len(parts))
+	for i, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		if i != 0 {
+			part = "module " + part
+		}
+		files = append(files, source.NewFile(source.FileID(9100+i), path, part))
+	}
+	modules, ds := parse.ParseGraph(source.Graph{Files: files})
+	if len(ds) != 0 {
+		t.Fatalf("parse fixture %s: %#v", path, ds)
+	}
+	return modules
 }

@@ -1427,6 +1427,10 @@ func isTrustedHardwareAuthorityModule(moduleName string) bool {
 	return false
 }
 
+func isTrustedPlatformModule(moduleName string) bool {
+	return strings.HasPrefix(moduleName, "platform.") || strings.HasPrefix(moduleName, "machine.x86_64.")
+}
+
 func isHardwareAuthorityType(typ *Type) bool {
 	if typ == nil {
 		return false
@@ -2302,7 +2306,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		fieldSpans[arg.Name] = arg.SpanV
 		c.checkTypeAssign(arg.SpanV, field.Type, argType)
 		argLifetime := c.lifetimeOfExpr(arg.Value, scope)
-		if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
+		if (constructed.Kind == KindData && !IsDMABufferAuthorityType(constructed)) || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
 			constructorLifetime = c.combineLifetime(arg.SpanV, constructorLifetime, argLifetime)
 		} else if !c.rejectCacheEscape(arg.SpanV, argLifetime, Lifetime{Kind: LifetimeExecutorRoot}) {
 			c.rejectIfLifetimeEscapes(arg.SpanV, argLifetime, Lifetime{Kind: LifetimeExecutorRoot})
@@ -2415,8 +2419,17 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		return
 	}
 	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "MutableBytes" {
+		if moduleName == "platform.hardware.memory" {
+			return
+		}
 		if ctx != ContextImagePhaseDirect || c.currentPhase != "delegated_hardware" || !constructorArgsAreIntegerLiterals(expr, "address", "length") {
 			c.error(expr.SpanV, diag.SEM0028, "raw physical byte authority can only be created directly in delegated_hardware phase")
+			return
+		}
+	}
+	if IsPhysicalRegionAuthorityType(typ) || IsArenaAuthorityType(typ) {
+		if !isTrustedPlatformModule(moduleName) {
+			c.error(expr.SpanV, diag.SEM0056, "physical region and arena authorities cannot be forged")
 			return
 		}
 	}

@@ -2,6 +2,7 @@ module platform.uefi.types
 
 use { MutableBytes } from machine.x86_64.executor_memory
 use { BootPanic } from platform.hardware.panic
+use { PhysicalRegionAuthority } from platform.hardware.memory
 
 data UefiHandle {
     address: U64
@@ -183,7 +184,7 @@ data UefiMemoryMap {
         ret
     }
 
-    fn require_usable_region(self, min_base: PhysicalAddress, length: U64, align: U64) -> MutableBytes {
+    fn require_usable_region(self, min_base: PhysicalAddress, length: U64, align: U64) -> PhysicalRegionAuthority {
         let index = 0
         let descriptor_offset = 0
         while descriptor_offset < self.descriptors.length {
@@ -196,7 +197,13 @@ data UefiMemoryMap {
             let end = aligned + length
             if descriptor.kind == 7 {
                 if end <= descriptor.physical_start + bytes {
-                    return MutableBytes(address = aligned, length = length)
+                    return PhysicalRegionAuthority(
+                        base = aligned,
+                        length = length,
+                        align = align,
+                        provenance = 1,
+                        panic = BootPanic()
+                    )
                 }
             }
             index = index + 1

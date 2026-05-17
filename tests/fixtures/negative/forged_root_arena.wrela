@@ -1,0 +1,52 @@
+// expect: SEM0056: physical region and arena authorities cannot be forged
+module platform.hardware.panic
+class BootPanic { asm fn fail(self, code: U64) -> never { hlt } }
+
+module platform.hardware.memory
+use { BootPanic } from platform.hardware.panic
+
+data ArenaIdentity {
+    label: StringLiteral
+}
+
+data ArenaPolicy {
+    evict_cache_by_default: Bool
+}
+
+data PhysicalRegionAuthority {
+    base: PhysicalAddress
+    length: U64
+    align: U64
+    provenance: U64
+    panic: BootPanic
+}
+
+class RootArena {
+    region: PhysicalRegionAuthority
+    identity: ArenaIdentity
+    policy: ArenaPolicy
+    next_offset: U64
+}
+
+module tests.fixtures.negative.forged_root_arena
+
+use { BootPanic } from platform.hardware.panic
+use { ArenaIdentity, ArenaPolicy, PhysicalRegionAuthority, RootArena } from platform.hardware.memory
+
+class Bad {
+    fn mint(self) -> RootArena {
+        let region = PhysicalRegionAuthority(
+            base = 0x200000,
+            length = 4096,
+            align = 4096,
+            provenance = 1,
+            panic = BootPanic()
+        )
+        return RootArena(
+            region = region,
+            identity = ArenaIdentity(label = "bad"),
+            policy = ArenaPolicy(evict_cache_by_default = true),
+            next_offset = 0
+        )
+    }
+}

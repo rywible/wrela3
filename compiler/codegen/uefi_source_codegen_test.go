@@ -771,6 +771,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/panic.wrela"),
+		filepath.Join(repoRoot, "wrela/platform/hardware/memory.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/bytes.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/acpi/tables.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/acpi/root.wrela"),
