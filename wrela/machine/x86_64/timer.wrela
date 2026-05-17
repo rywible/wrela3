@@ -1,0 +1,33 @@
+module machine.x86_64.timer
+
+use { BootPanic } from platform.hardware.panic
+
+data TimerSource {
+    kind: U32
+}
+
+data TimerAuthority {
+    source: TimerSource
+    period_us: U64
+    panic: BootPanic
+}
+
+data TimerDiscovery {
+    local_apic_timer_available: Bool
+    pit_available: Bool
+    hpet_available: Bool
+    hpet_base: PhysicalAddress
+    panic: BootPanic
+
+    fn require_periodic(self, period_us: U64) -> TimerAuthority {
+        if self.local_apic_timer_available {
+            if self.pit_available {
+                return TimerAuthority(source = TimerSource(kind = 1), period_us = period_us, panic = self.panic)
+            }
+        }
+        if self.hpet_available {
+            return TimerAuthority(source = TimerSource(kind = 2), period_us = period_us, panic = self.panic)
+        }
+        self.panic.fail(code = 0xAC080001)
+    }
+}

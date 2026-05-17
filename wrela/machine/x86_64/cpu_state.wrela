@@ -92,6 +92,28 @@ data EnabledCpu {
     apic_id: U32
 }
 
+data CpuLocalityFacts {
+    logical_id: U32
+    apic_id: U32
+    x2apic_id: U32
+    smt_group: U32
+    core_group: U32
+    package_group: U32
+    llc_group: U32
+    numa_node: U32
+    known_mask: U64
+}
+
+data CpuDiscovery {
+    enabled: EnabledCpuSet
+    locality0: CpuLocalityFacts
+    locality1: CpuLocalityFacts
+
+    fn require_min_count(self, count: U64) -> CpuTopology {
+        return self.enabled.require_count(count = count)
+    }
+}
+
 data EnabledCpuSet {
     count: U64
     cpu0: EnabledCpu

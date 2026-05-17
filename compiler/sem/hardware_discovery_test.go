@@ -27,6 +27,25 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	if fieldTypeName(t, discovered, "pci") != "PciDeviceSet" {
 		t.Fatalf("DiscoveredHardware.pci must be PciDeviceSet")
 	}
+	if fieldTypeName(t, discovered, "cpus") != "CpuDiscovery" {
+		t.Fatalf("DiscoveredHardware.cpus must be CpuDiscovery")
+	}
+	if fieldTypeName(t, discovered, "timers") != "TimerDiscovery" {
+		t.Fatalf("DiscoveredHardware.timers must be TimerDiscovery")
+	}
+	if fieldTypeName(t, discovered, "framebuffer") != "FramebufferInfo" {
+		t.Fatalf("DiscoveredHardware.framebuffer must be FramebufferInfo")
+	}
+	for _, typ := range []struct{ module, name string }{
+		{"machine.x86_64.cpu_state", "CpuLocalityFacts"},
+		{"machine.x86_64.cpu_state", "CpuDiscovery"},
+		{"machine.x86_64.interrupts", "ApicModeFacts"},
+		{"machine.x86_64.timer", "TimerDiscovery"},
+		{"machine.x86_64.timer", "TimerAuthority"},
+		{"platform.hardware.discovery", "FramebufferInfo"},
+	} {
+		_ = moduleType(t, index, typ.module, typ.name)
+	}
 	report := moduleType(t, index, "platform.hardware.discovery", "DiscoveryReport")
 	for _, field := range []string{
 		"memory_base",

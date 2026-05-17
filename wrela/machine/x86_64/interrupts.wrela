@@ -14,6 +14,17 @@ data InterruptOverride {
     flags: U16
 }
 
+data ApicModeFacts {
+    xapic_available: Bool
+    x2apic_available: Bool
+    local_apic_base: PhysicalAddress
+}
+
+data ApicModeSelection {
+    mode: U32
+    required: Bool
+}
+
 data InterruptOverrideSet {
     count: U64
     override0: InterruptOverride
