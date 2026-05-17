@@ -3,7 +3,7 @@ module platform.acpi.madt
 use { PhysicalBytes } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { CpuTopology, EnabledCpu, EnabledCpuSet } from machine.x86_64.cpu_state
-use { InterruptAuthority, InterruptOverride, InterruptOverrideSet, IoApicDiscovered, IoApicSet, LocalApic } from machine.x86_64.interrupts
+use { ApicModeFacts, InterruptAuthority, InterruptOverride, InterruptOverrideSet, IoApicDiscovered, IoApicSet, LocalApic } from machine.x86_64.interrupts
 
 data MadtTable {
     address: PhysicalAddress
@@ -98,6 +98,32 @@ data MadtTable {
         return out
     }
 
+    fn x2apic_available(self) -> Bool {
+        let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
+        let offset = 44
+        while offset < self.length {
+            let entry_type = bytes.read_u8(offset = offset)
+            let entry_length = bytes.read_u8(offset = offset + 1)
+            if entry_length < 2 {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if offset + entry_length > self.length {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if entry_type == 9 {
+                if entry_length < 16 {
+                    self.panic.fail(code = 0xAC040002)
+                }
+                let flags = bytes.read_u32(offset = offset + 8)
+                if (flags & 1) != 0 {
+                    return true
+                }
+            }
+            offset = offset + entry_length
+        }
+        return false
+    }
+
     fn io_apics(self) -> IoApicSet {
         let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
         let out = IoApicSet(count = 0, io_apic0 = IoApicDiscovered(id = 0, address = 0, gsi_base = 0, panic = self.panic))
@@ -169,6 +195,7 @@ data MadtTable {
             local_apic = LocalApic(base = self.local_apic_base(), apic_id = cpus.bootstrap.apic_id, panic = self.panic),
             io_apics = io_apics,
             overrides = self.interrupt_source_overrides(),
+            apic_facts = ApicModeFacts(xapic_available = true, x2apic_available = self.x2apic_available(), local_apic_base = self.local_apic_base()),
             panic = self.panic
         )
     }

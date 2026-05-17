@@ -23,6 +23,13 @@ data ApicModeFacts {
 data ApicModeSelection {
     mode: U32
     required: Bool
+
+    fn with_xapic_fallback(self) -> ApicModeSelection {
+        if self.mode == 2 {
+            return self
+        }
+        return ApicModeSelection(mode = 1, required = false)
+    }
 }
 
 data InterruptOverrideSet {
@@ -180,7 +187,25 @@ data InterruptAuthority {
     local_apic: LocalApic
     io_apics: IoApicSet
     overrides: InterruptOverrideSet
+    apic_facts: ApicModeFacts
     panic: BootPanic
+
+    fn select_apic_mode(self) -> ApicModeSelection {
+        if self.apic_facts.x2apic_available {
+            return ApicModeSelection(mode = 2, required = false)
+        }
+        if self.apic_facts.xapic_available {
+            return ApicModeSelection(mode = 1, required = false)
+        }
+        self.panic.fail(code = 0xAC050010)
+    }
+
+    fn require_x2apic(self) -> ApicModeSelection {
+        if self.apic_facts.x2apic_available == false {
+            self.panic.fail(code = 0xAC050011)
+        }
+        return ApicModeSelection(mode = 2, required = true)
+    }
 
     fn route_isa_irq(self, irq: U8, vector: InterruptVector) -> IoApicRoute {
         let gsi = self.overrides.gsi_for_isa_irq(irq = irq)

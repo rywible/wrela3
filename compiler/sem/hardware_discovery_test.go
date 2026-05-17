@@ -109,6 +109,9 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 
 	interrupts := moduleType(t, index, "machine.x86_64.interrupts", "InterruptAuthority")
 	assertMethodExists(t, interrupts, "route_isa_irq")
+	assertMethodExists(t, interrupts, "select_apic_mode")
+	assertMethodExists(t, interrupts, "require_x2apic")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.interrupts", "ApicModeSelection"), "with_xapic_fallback")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute"), "program")
 	route := moduleType(t, index, "machine.x86_64.interrupts", "IoApicRoute")
 	if fieldTypeName(t, route, "destination_apic_id") != "U32" || fieldTypeName(t, route, "flags") != "U16" {
@@ -140,7 +143,19 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		}
 	}
 	source := readRepoFile(t, "wrela/machine/x86_64/interrupts.wrela")
-	for _, want := range []string{"self.destination_apic_id << 24", "flags & 0x0003", "flags & 0x000C", "flags_for_isa_irq", "self.io_apics.count == 0", "(self.apic_id & 0xFF) << 12"} {
+	for _, want := range []string{
+		"self.destination_apic_id << 24",
+		"flags & 0x0003",
+		"flags & 0x000C",
+		"flags_for_isa_irq",
+		"self.io_apics.count == 0",
+		"(self.apic_id & 0xFF) << 12",
+		"select_apic_mode",
+		"require_x2apic",
+		"with_xapic_fallback",
+		"0xAC050010",
+		"0xAC050011",
+	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("interrupt route source missing %q", want)
 		}
