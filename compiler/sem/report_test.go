@@ -50,6 +50,39 @@ func TestBuildImageReport(t *testing.T) {
 	}
 }
 
+func TestImageReportResolvesSeedSlotOwnersToClaimedLabels(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		ExecutorSlots: []ExecutorSlotNode{
+			{Label: "console"},
+			{Label: "worker"},
+		},
+		Arenas: []ArenaNode{
+			{Label: "console.memory", Owner: "executor_slot.0", Bytes: 4096, Kind: "executor_memory"},
+			{Label: "worker.memory", Owner: "executor_slot.1", Bytes: 8192, Kind: "executor_memory"},
+			{Label: "orphan.memory", Owner: "executor_slot.2", Bytes: 1024, Kind: "executor_memory"},
+		},
+		InterruptQueues: []InterruptQueueNode{
+			{Label: "irq.serial.rx", Owner: "executor_slot.0", Capacity: 64},
+		},
+		PlacementConstraints: []PlacementConstraintNode{
+			{Kind: "separate_physical_cores", A: "executor_slot.0", B: "executor_slot.1", Required: true},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if r.Memory.Arenas[0].Owner != "console" || r.Memory.Arenas[1].Owner != "worker" || r.Memory.Arenas[2].Owner != "executor_slot.2" {
+		t.Fatalf("arena owners = %#v", r.Memory.Arenas)
+	}
+	if r.Memory.ExecutorBudgets[0].SlotLabel != "console" || r.Memory.ExecutorBudgets[1].SlotLabel != "worker" {
+		t.Fatalf("executor budgets = %#v", r.Memory.ExecutorBudgets)
+	}
+	if r.Runtime.InterruptQueues[0].Owner != "console" {
+		t.Fatalf("interrupt queue owner = %#v", r.Runtime.InterruptQueues[0])
+	}
+	if r.Runtime.Placement[0].SubjectA != "console" || r.Runtime.Placement[0].SubjectB != "worker" {
+		t.Fatalf("placement report = %#v", r.Runtime.Placement)
+	}
+}
+
 func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 	checked := &CheckedProgram{ImageGraph: ImageGraph{
 		HardwareClaims: []HardwareClaimNode{
@@ -110,6 +143,18 @@ func TestImageReportIncludesWakePaths(t *testing.T) {
 	}
 }
 
+func TestImageReportPreservesMonitorMwaitWakeStrategy(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		WakeTargets: []WakeTargetNode{
+			{SlotLabel: "worker", Owner: "timer.periodic", Strategy: "monitor_mwait", Fallback: "sti_hlt"},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if len(r.Runtime.WakePaths) != 1 || r.Runtime.WakePaths[0].Strategy != "monitor_mwait" || r.Runtime.WakePaths[0].Fallback != "sti_hlt" {
+		t.Fatalf("wake paths missing monitor/mwait strategy: %#v", r.Runtime.WakePaths)
+	}
+}
+
 func TestAuthorityAuditReportCompleteness(t *testing.T) {
 	if !hasCode(ValidateAuthorityAudit(report.ImageReport{}), diag.SEM0075) {
 		t.Fatalf("expected SEM0075 for nil authority audit sections")
@@ -133,6 +178,57 @@ func TestAuthorityAuditRequiresTimerRecordWhenTimerIsUsed(t *testing.T) {
 	r.AuthorityAudit.Timers = []report.AuthorityRecord{{Kind: "timer", Label: "periodic.1000us"}}
 	if ds := ValidateAuthorityAuditContent(r); len(ds) != 0 {
 		t.Fatalf("unexpected content diagnostics: %#v", ds)
+	}
+}
+
+func TestAuthorityAuditContentRequiresHardwareClaimsInterruptsAndDMABuffers(t *testing.T) {
+	tests := []struct {
+		name string
+		r    report.ImageReport
+		fill func(*report.ImageReport)
+	}{
+		{
+			name: "hardware_claims",
+			r: report.ImageReport{
+				Hardware:       report.HardwareReport{Claims: []report.AuthorityRecord{{Kind: "isa_irq", Label: "4"}}},
+				AuthorityAudit: completeEmptyAuthorityAudit(),
+			},
+			fill: func(r *report.ImageReport) {
+				r.AuthorityAudit.HardwareClaims = []report.AuthorityRecord{{Kind: "pci_bar", Label: "edu.bar0"}}
+			},
+		},
+		{
+			name: "interrupts",
+			r: report.ImageReport{
+				Runtime:        report.RuntimeReport{Interrupts: []report.AuthorityRecord{{Kind: "shared_interrupt_source", Label: "serial.rx"}}},
+				AuthorityAudit: completeEmptyAuthorityAudit(),
+			},
+			fill: func(r *report.ImageReport) {
+				r.AuthorityAudit.Interrupts = []report.AuthorityRecord{{Kind: "interrupt_route", Label: "serial.rx"}}
+			},
+		},
+		{
+			name: "dma_buffers",
+			r: report.ImageReport{
+				Memory:         report.MemoryReport{Arenas: []report.ArenaReport{{Kind: "dma_buffer", Label: "edu.dma"}}},
+				AuthorityAudit: completeEmptyAuthorityAudit(),
+			},
+			fill: func(r *report.ImageReport) {
+				r.AuthorityAudit.Arenas = []report.AuthorityRecord{{Kind: "dma_buffer", Label: "edu.dma"}}
+				r.AuthorityAudit.DMABuffers = []report.AuthorityRecord{{Kind: "dma_buffer", Label: "edu.dma"}}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !hasCode(ValidateAuthorityAuditContent(test.r), diag.SEM0075) {
+				t.Fatalf("expected SEM0075 for missing %s audit records", test.name)
+			}
+			test.fill(&test.r)
+			if ds := ValidateAuthorityAuditContent(test.r); len(ds) != 0 {
+				t.Fatalf("unexpected content diagnostics after filling %s: %#v", test.name, ds)
+			}
+		})
 	}
 }
 

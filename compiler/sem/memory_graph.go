@@ -9,7 +9,7 @@ import (
 )
 
 func arenaRangesOverlap(a, b ArenaNode) bool {
-	if a.Kind != "child_arena" || b.Kind != "child_arena" {
+	if !arenaHasStaticRange(a) || !arenaHasStaticRange(b) {
 		return false
 	}
 	if a.Parent == "" || b.Parent == "" || a.Parent != b.Parent {
@@ -18,6 +18,14 @@ func arenaRangesOverlap(a, b ArenaNode) bool {
 	aEnd := a.Offset + a.Bytes
 	bEnd := b.Offset + b.Bytes
 	return a.Offset < bEnd && b.Offset < aEnd
+}
+
+func arenaHasStaticRange(arena ArenaNode) bool {
+	return arena.Kind == "child_arena" ||
+		arena.Kind == "executor_memory" ||
+		arena.Kind == "cache_memory" ||
+		arena.Kind == "dma_buffer" ||
+		arena.Kind == "interrupt_queue"
 }
 
 func (c *checker) validateArenaGraph() {
@@ -49,7 +57,9 @@ func (c *checker) recordArenaGraphCall(moduleName string, expr *ast.CallExpr, re
 	receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, recvType, scope)
 	switch receiverType {
 	case "platform.hardware.memory.PhysicalRegionAuthority":
-		c.recordCreateArenaFromRegion(expr, receiverOrigin)
+		if expr.Method == "create_arena" {
+			c.recordCreateArenaFromRegion(expr, receiverOrigin)
+		}
 	case "platform.hardware.memory.RootArena":
 		switch expr.Method {
 		case "child_at":
@@ -138,15 +148,35 @@ func (c *checker) recordRootArenaExecutorMemory(moduleName string, expr *ast.Cal
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	length, _ := arenaUnsignedIntArg(expr, "length")
 	align, _ := arenaUnsignedIntArg(expr, "align")
-	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
-		Label:  "",
+	c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, "", owner, "executor_memory", length, align, expr.SpanV))
+}
+
+func (c *checker) implicitArenaAllocation(receiverOrigin localOrigin, label string, owner string, kind string, length uint64, align uint64, span source.Span) ArenaNode {
+	offset := c.nextImplicitArenaOffset(receiverOrigin.ArenaLabel, align)
+	return ArenaNode{
+		Label:  label,
 		Parent: receiverOrigin.ArenaLabel,
+		Base:   receiverOrigin.ArenaBase + offset,
+		Offset: offset,
 		Bytes:  length,
 		Align:  align,
 		Owner:  owner,
-		Kind:   "executor_memory",
-		Span:   expr.SpanV,
-	})
+		Kind:   kind,
+		Span:   span,
+	}
+}
+
+func (c *checker) nextImplicitArenaOffset(parent string, align uint64) uint64 {
+	var next uint64
+	for _, arena := range c.graph.Arenas {
+		if arena.Parent != parent || !arenaHasStaticRange(arena) {
+			continue
+		}
+		if end := arena.Offset + arena.Bytes; end > next {
+			next = end
+		}
+	}
+	return alignArenaOffset(next, align)
 }
 
 func (c *checker) recordRootArenaExecutorMemoryNear(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
@@ -163,30 +193,22 @@ func (c *checker) recordRootArenaExecutorMemoryNear(moduleName string, expr *ast
 
 func (c *checker) recordRootArenaCacheArena(expr *ast.CallExpr, receiverOrigin localOrigin) {
 	label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
-	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
-		Label:  label,
-		Parent: receiverOrigin.ArenaLabel,
-		Owner:  receiverOrigin.ArenaLabel,
-		Kind:   "cache_memory",
-		Span:   expr.SpanV,
-	})
+	length, _ := arenaUnsignedIntArg(expr, "length")
+	align, _ := arenaUnsignedIntArg(expr, "align")
+	c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, receiverOrigin.ArenaLabel, "cache_memory", length, align, expr.SpanV))
 }
 
 func (c *checker) recordRootArenaDMA(expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
 	label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
 	owner := dmaOwnerIdentity(namedArgExpr(expr.Args, "owner"), scope)
+	length, _ := arenaUnsignedIntArg(expr, "length")
+	align, _ := arenaUnsignedIntArg(expr, "align")
 	c.graph.DMABuffers = append(c.graph.DMABuffers, DMABufferNode{
 		Label:       label,
 		OwnerDevice: owner,
 		Span:        expr.SpanV,
 	})
-	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
-		Label:  label,
-		Parent: receiverOrigin.ArenaLabel,
-		Owner:  owner,
-		Kind:   "dma_buffer",
-		Span:   expr.SpanV,
-	})
+	c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, owner, "dma_buffer", length, align, expr.SpanV))
 }
 
 func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
@@ -208,13 +230,7 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 		Overflow:     overflow,
 		Span:         expr.SpanV,
 	})
-	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
-		Label:  label,
-		Parent: receiverOrigin.ArenaLabel,
-		Owner:  owner,
-		Kind:   "interrupt_queue",
-		Span:   expr.SpanV,
-	})
+	c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, owner, "interrupt_queue", capacity*payloadSize, payloadAlign, expr.SpanV))
 }
 
 func dmaOwnerIdentity(expr ast.Expr, scope *Scope) string {
@@ -230,7 +246,7 @@ func (c *checker) interruptQueueOwnerLabel(moduleName string, expr ast.Expr, sco
 		return label
 	}
 	cons, ok := expr.(*ast.ConstructorExpr)
-	if !ok || cons == nil || qualifiedTypeName(c.exprStaticType(moduleName, expr, scope)) != "machine.x86_64.cpu_state.ExecutorSlot" {
+	if !ok || cons == nil || !IsExecutorSlotType(c.exprStaticType(moduleName, expr, scope)) {
 		return ""
 	}
 	id, ok := unsignedIntegerLiteral(constructorArg(cons, "id"))

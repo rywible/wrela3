@@ -30,38 +30,42 @@ type Scope struct {
 }
 
 type localOrigin struct {
-	Type                *Type
-	Constructor         *ast.ConstructorExpr
-	FieldBindings       map[string]string
-	SlotLabel           string
-	LoopPolicy          string
-	MemoryOwnerLabel    string
-	ArenaLabel          string
-	ArenaBase           uint64
-	ArenaBytes          uint64
-	ArenaAlign          uint64
-	TopicLabel          string
-	TopicKind           string
-	TopicDepth          uint64
-	TopicPayloadType    string
-	TopicPayloadSize    uint64
-	TopicPayloadAlign   uint64
-	TimerLabel          string
-	TimerSource         string
-	TimerPeriodUS       uint64
-	IsTimerRoute        bool
-	PathLabel           string
-	PublishesInterrupts bool
-	EventType           string
-	EventFunctionSymbol string
-	VcpuID              int
-	HasVcpuID           bool
-	ExecutorBinding     string
-	TerminalVcpu        bool
-	PciDeviceKey        string
-	SharedIRQRouteKey   string
-	SharedIRQVector     int
-	SharedSourceLabel   string
+	Type                      *Type
+	Constructor               *ast.ConstructorExpr
+	FieldBindings             map[string]string
+	SlotLabel                 string
+	RecordsExecutorSlot       bool
+	ExecutorRegistryAuthority bool
+	LoopPolicy                string
+	LoopStrategy              string
+	LoopFallback              string
+	MemoryOwnerLabel          string
+	ArenaLabel                string
+	ArenaBase                 uint64
+	ArenaBytes                uint64
+	ArenaAlign                uint64
+	TopicLabel                string
+	TopicKind                 string
+	TopicDepth                uint64
+	TopicPayloadType          string
+	TopicPayloadSize          uint64
+	TopicPayloadAlign         uint64
+	TimerLabel                string
+	TimerSource               string
+	TimerPeriodUS             uint64
+	IsTimerRoute              bool
+	PathLabel                 string
+	PublishesInterrupts       bool
+	EventType                 string
+	EventFunctionSymbol       string
+	VcpuID                    int
+	HasVcpuID                 bool
+	ExecutorBinding           string
+	TerminalVcpu              bool
+	PciDeviceKey              string
+	SharedIRQRouteKey         string
+	SharedIRQVector           int
+	SharedSourceLabel         string
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -1107,6 +1111,12 @@ func (c *checker) checkCrossKindDuplicateLabels() {
 }
 
 func (c *checker) checkSlotBindingsAndPlacements() {
+	claimedSlots := map[string]source.Span{}
+	for _, slot := range c.graph.ExecutorSlots {
+		if slot.Label != "" {
+			claimedSlots[slot.Label] = slot.Span
+		}
+	}
 	execCounts := map[string]int{}
 	execSpans := map[string]source.Span{}
 	for _, exec := range c.graph.Executors {
@@ -1116,6 +1126,14 @@ func (c *checker) checkSlotBindingsAndPlacements() {
 			}
 		}
 		if exec.SlotLabel == "" {
+			continue
+		}
+		if _, ok := claimedSlots[exec.SlotLabel]; !ok {
+			name := "executor"
+			if exec.Type != nil && exec.Type.Name != "" {
+				name = exec.Type.Name
+			}
+			c.error(exec.Span, diag.SEM0035, "executor "+name+" uses an unclaimed executor slot")
 			continue
 		}
 		execCounts[exec.SlotLabel]++
@@ -1132,6 +1150,14 @@ func (c *checker) checkSlotBindingsAndPlacements() {
 		}
 		placementCounts[placement.SlotLabel]++
 		placementSpans[placement.SlotLabel] = placement.Span
+	}
+	for _, sub := range c.graph.TopicSubscriptions {
+		if sub.SubscriberLabel == "" {
+			continue
+		}
+		if _, ok := claimedSlots[sub.SubscriberLabel]; !ok {
+			c.error(sub.Span, diag.SEM0035, "subscription uses an unclaimed executor slot")
+		}
 	}
 	for _, slot := range c.graph.ExecutorSlots {
 		if slot.Label == "" {
@@ -1295,11 +1321,19 @@ func (c *checker) checkTopicPolicies() {
 			c.error(exec.Span, diag.SEM0044, "EventSleepPolicy executor "+exec.Type.Name+" has no wake source")
 		}
 		if exec.LoopPolicy == "EventSleepPolicy" && exec.SlotLabel != "" && c.graph.HasWakeSource(exec.SlotLabel) {
+			strategy := exec.LoopStrategy
+			if strategy == "" {
+				strategy = "sti_hlt"
+			}
+			fallback := exec.LoopFallback
+			if fallback == "" {
+				fallback = "sti_hlt"
+			}
 			c.graph.WakeTargets = append(c.graph.WakeTargets, WakeTargetNode{
 				SlotLabel: exec.SlotLabel,
 				Owner:     exec.Type.Name,
-				Strategy:  "sti_hlt",
-				Fallback:  "sti_hlt",
+				Strategy:  strategy,
+				Fallback:  fallback,
 				Span:      exec.Span,
 			})
 		}
@@ -1447,6 +1481,12 @@ func isTrustedHardwareAuthorityModule(moduleName string) bool {
 		return true
 	case moduleName == "machine.x86_64.cpu_state":
 		return true
+	case moduleName == "machine.x86_64.executor_memory":
+		return true
+	case moduleName == "machine.x86_64.interrupt_queue":
+		return true
+	case moduleName == "machine.x86_64.timer":
+		return true
 	case strings.HasPrefix(moduleName, "sem."):
 		return true
 	}
@@ -1471,11 +1511,20 @@ func isHardwareAuthorityType(typ *Type) bool {
 		"platform.acpi.madt.MadtTable",
 		"platform.acpi.mcfg.McfgTable",
 		"machine.x86_64.interrupts.LocalApic",
+		"machine.x86_64.interrupts.ApicModeFacts",
+		"machine.x86_64.interrupts.ApicModeSelection",
 		"machine.x86_64.interrupts.IoApicDiscovered",
 		"machine.x86_64.interrupts.IoApicSet",
 		"machine.x86_64.interrupts.InterruptOverrideSet",
 		"machine.x86_64.interrupts.InterruptAuthority",
 		"machine.x86_64.interrupts.IoApicRoute",
+		"machine.x86_64.interrupts.SharedIrqRoute",
+		"machine.x86_64.interrupts.SharedInterruptSource",
+		"machine.x86_64.executor_memory.ExecutorMemory",
+		"machine.x86_64.interrupt_queue.InterruptQueue",
+		"machine.x86_64.timer.TimerSource",
+		"machine.x86_64.timer.TimerAuthority",
+		"machine.x86_64.cpu_state.ExecutorRegistry",
 		"machine.x86_64.pci.PciDevice",
 		"machine.x86_64.pci.PciDeviceIdentity",
 		"machine.x86_64.pci.PcieEcamWindow",
@@ -1628,13 +1677,6 @@ func (c *checker) recordDiscoveryFactFromField(sel *ast.FieldExpr, recvType *Typ
 		return
 	}
 	switch {
-	case recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "InterruptAuthority" && sel.Field == "local_apic":
-		c.graph.APICFacts = append(c.graph.APICFacts, APICFactNode{
-			Mode:            "xapic_fallback",
-			XAPICAvailable:  true,
-			X2APICAvailable: false,
-			Span:            sel.SpanV,
-		})
 	case recvType.Module == "machine.x86_64.cpu_state" && recvType.Name == "CpuLocalityFacts" && sel.Field == "numa_node":
 		subject := "unknown_cpu"
 		if parent, ok := sel.Base.(*ast.FieldExpr); ok {
@@ -1666,6 +1708,7 @@ func (c *checker) recordDiscoveryFactFromField(sel *ast.FieldExpr, recvType *Typ
 type constValue struct {
 	Uint   uint64
 	String string
+	Bool   bool
 	Known  bool
 	Fields map[string]constValue
 }
@@ -1676,6 +1719,10 @@ func (v constValue) asUint() (uint64, bool) {
 
 func (v constValue) asString() (string, bool) {
 	return v.String, v.Known
+}
+
+func (v constValue) asBool() (bool, bool) {
+	return v.Bool, v.Known
 }
 
 func (v constValue) fieldUint(name string) (uint64, bool) {
@@ -1690,6 +1737,13 @@ func (v constValue) fieldString(name string) (string, bool) {
 		return "", false
 	}
 	return v.Fields[name].asString()
+}
+
+func (v constValue) fieldBool(name string) (bool, bool) {
+	if v.Fields == nil {
+		return false, false
+	}
+	return v.Fields[name].asBool()
 }
 
 func callConstArgs(call *ast.CallExpr) map[string]constValue {
@@ -1713,6 +1767,8 @@ func constValueFromExpr(expr ast.Expr) constValue {
 		return constValue{Uint: value, Known: ok}
 	case *ast.StringLiteral:
 		return constValue{String: e.Value, Known: true}
+	case *ast.BoolLiteral:
+		return constValue{Bool: e.Value, Known: true}
 	case *ast.ConstructorExpr:
 		fields := map[string]constValue{}
 		for _, field := range e.Args {
@@ -1823,6 +1879,11 @@ func (c *checker) originForExprValue(moduleName string, expr ast.Expr, valueType
 			valueType = c.exprStaticType(moduleName, expr, scope)
 		}
 		return c.originForCall(moduleName, e, valueType, scope)
+	case *ast.FieldExpr:
+		if valueType == nil {
+			valueType = c.exprStaticType(moduleName, expr, scope)
+		}
+		return c.originForField(moduleName, e, valueType, scope)
 	case *ast.NameExpr:
 		if origin, ok := scope.LookupOrigin(e.Name); ok {
 			return origin
@@ -1836,7 +1897,6 @@ func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType 
 }
 
 func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) localOrigin {
-	_ = moduleName
 	origin := localOrigin{
 		Type:          typ,
 		Constructor:   expr,
@@ -1849,6 +1909,38 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	}
 	if typ == nil {
 		return origin
+	}
+	if IsExecutorSlotType(typ) {
+		if id, ok := unsignedIntegerLiteral(constructorArg(expr, "id")); ok {
+			origin.SlotLabel = fmt.Sprintf("executor_slot.%d", id)
+		}
+	}
+	if qualifiedTypeName(typ) == "machine.x86_64.cpu_state.CpuFeatureFacts" {
+		args := constValueFromExpr(expr)
+		if monitor, ok := args.fieldBool("monitor_mwait_available"); ok && monitor {
+			origin.LoopStrategy = "monitor_mwait"
+		} else {
+			origin.LoopStrategy = "sti_hlt"
+		}
+		origin.LoopFallback = "sti_hlt"
+	}
+	if qualifiedTypeName(typ) == "machine.x86_64.executor_loop.WakeStrategy" {
+		args := constValueFromExpr(expr)
+		if monitor, ok := args.fieldBool("monitor_mwait"); ok && monitor {
+			origin.LoopStrategy = "monitor_mwait"
+		} else {
+			origin.LoopStrategy = "sti_hlt"
+		}
+		if fallback, ok := args.fieldBool("fallback_hlt"); !ok || fallback {
+			origin.LoopFallback = "sti_hlt"
+		}
+	}
+	if qualifiedTypeName(typ) == "machine.x86_64.executor_loop.EventSleepPolicy" {
+		strategyExpr := constructorArg(expr, "strategy")
+		strategyType := c.exprStaticType(moduleName, strategyExpr, scope)
+		strategyOrigin := c.originForExprValue(moduleName, strategyExpr, strategyType, scope)
+		origin.LoopStrategy = strategyOrigin.LoopStrategy
+		origin.LoopFallback = strategyOrigin.LoopFallback
 	}
 	if qualifiedTypeName(typ) == "platform.hardware.memory.PhysicalRegionAuthority" {
 		origin.ArenaBase, _ = unsignedIntegerLiteral(constructorArg(expr, "base"))
@@ -1918,9 +2010,12 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	}
 	if typ.Kind == KindExecutor {
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, constructorArg(expr, "slot"), scope)
-		origin.MemoryOwnerLabel = c.slotLabelForExpr(moduleName, constructorArg(expr, "memory"), scope)
+		origin.MemoryOwnerLabel = c.memoryOwnerLabelForExpr(moduleName, constructorArg(expr, "memory"), scope)
 		if loopType := c.exprStaticType(moduleName, constructorArg(expr, "loop"), scope); loopType != nil {
 			origin.LoopPolicy = loopType.Name
+			loopOrigin := c.originForExprValue(moduleName, constructorArg(expr, "loop"), loopType, scope)
+			origin.LoopStrategy = loopOrigin.LoopStrategy
+			origin.LoopFallback = loopOrigin.LoopFallback
 		}
 	}
 	return origin
@@ -1933,6 +2028,17 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		return origin
 	}
 	switch {
+	case qualifiedTypeName(receiverType) == "platform.uefi.types.UefiMemoryMap" && expr.Method == "require_usable_region":
+		args := callConstArgs(expr)
+		base, _ := args["min_base"].asUint()
+		length, _ := args["length"].asUint()
+		align, _ := args["align"].asUint()
+		return localOrigin{
+			Type:       valueType,
+			ArenaBase:  base,
+			ArenaBytes: length,
+			ArenaAlign: align,
+		}
 	case qualifiedTypeName(receiverType) == "platform.hardware.memory.PhysicalRegionAuthority" && expr.Method == "create_arena":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
@@ -1982,8 +2088,33 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		if cons, ok := identity.(*ast.ConstructorExpr); ok {
 			origin.SlotLabel, _ = stringLiteralArg(cons, "label")
 		}
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		origin.RecordsExecutorSlot = receiverOrigin.ExecutorRegistryAuthority
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+		origin.MemoryOwnerLabel = c.resolveExecutorSeedLabel(origin.SlotLabel)
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.RootArena" &&
+		(expr.Method == "executor_memory" || expr.Method == "executor_memory_near"):
+		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+		origin.MemoryOwnerLabel = c.resolveExecutorSeedLabel(origin.SlotLabel)
+	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "HardwarePlan" && expr.Method == "executor_memory":
+		ownerLabel := c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+		origin.SlotLabel = c.resolveExecutorSeedLabel(ownerLabel)
+		origin.MemoryOwnerLabel = c.memoryOwnerLabelForExpr(moduleName, namedArgExpr(expr.Args, "memory"), scope)
+		if origin.MemoryOwnerLabel == "" {
+			origin.MemoryOwnerLabel = origin.SlotLabel
+		}
+	case receiverType.Module == "machine.x86_64.cpu_state" && (receiverType.Name == "CpuDiscovery" || receiverType.Name == "CpuTopology") && expr.Method == "wake_strategy":
+		featureOrigin := c.originForExprValue(moduleName, namedArgExpr(expr.Args, "features"), nil, scope)
+		features := callConstArgs(expr)["features"]
+		if featureOrigin.LoopStrategy != "" {
+			origin.LoopStrategy = featureOrigin.LoopStrategy
+		} else if monitor, ok := features.fieldBool("monitor_mwait_available"); ok && monitor {
+			origin.LoopStrategy = "monitor_mwait"
+		} else {
+			origin.LoopStrategy = "sti_hlt"
+		}
+		origin.LoopFallback = "sti_hlt"
 	case receiverType.Module == "machine.x86_64.timer" && receiverType.Name == "TimerDiscovery" && expr.Method == "require_periodic":
 		if period, ok := callConstArgs(expr)["period_us"].asUint(); ok {
 			origin.TimerLabel = fmt.Sprintf("periodic.%dus", period)
@@ -1996,6 +2127,18 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		origin.TimerLabel = receiverOrigin.TimerLabel
 		origin.TimerSource = receiverOrigin.TimerSource
 		origin.TimerPeriodUS = receiverOrigin.TimerPeriodUS
+		if origin.TimerLabel == "" || origin.TimerSource == "" || origin.TimerPeriodUS == 0 {
+			fact := c.latestTimerFact()
+			if origin.TimerLabel == "" {
+				origin.TimerLabel = fact.Label
+			}
+			if origin.TimerSource == "" {
+				origin.TimerSource = fact.Source
+			}
+			if origin.TimerPeriodUS == 0 {
+				origin.TimerPeriodUS = fact.PeriodUS
+			}
+		}
 		origin.TopicLabel = "timer.periodic"
 		origin.TopicKind = "timer_tick"
 		origin.TopicPayloadType = "machine.x86_64.topic_payload.TimerTickPayload"
@@ -2054,6 +2197,57 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 	return origin
 }
 
+func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueType *Type, scope *Scope) localOrigin {
+	origin := localOrigin{Type: valueType}
+	baseType := c.exprStaticType(moduleName, expr.Base, scope)
+	switch {
+	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.CpuFeatureFacts" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.CpuDiscovery" &&
+		expr.Field == "features":
+		origin.LoopStrategy = "monitor_mwait"
+		origin.LoopFallback = "sti_hlt"
+	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.ExecutorRegistry" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.OwnedHardware" &&
+		expr.Field == "executors":
+		origin.ExecutorRegistryAuthority = true
+	case qualifiedTypeName(valueType) == "machine.x86_64.executor_memory.ExecutorMemory" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan":
+		switch expr.Field {
+		case "console_memory":
+			origin.SlotLabel = "executor_slot.0"
+			origin.MemoryOwnerLabel = c.resolveExecutorSeedLabel(origin.SlotLabel)
+		case "worker_memory":
+			origin.SlotLabel = "executor_slot.1"
+			origin.MemoryOwnerLabel = c.resolveExecutorSeedLabel(origin.SlotLabel)
+		}
+	case qualifiedTypeName(valueType) == "machine.x86_64.executor_loop.WakeStrategy" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
+		expr.Field == "wake_strategy":
+		origin.LoopStrategy = "monitor_mwait"
+		origin.LoopFallback = "sti_hlt"
+	case qualifiedTypeName(valueType) == "machine.x86_64.timer.TimerAuthority" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
+		expr.Field == "timer":
+		fact := c.latestTimerFact()
+		origin.TimerLabel = fact.Label
+		origin.TimerSource = fact.Source
+		origin.TimerPeriodUS = fact.PeriodUS
+	}
+	return origin
+}
+
+func (c *checker) latestTimerFact() TimerFactNode {
+	if c == nil {
+		return TimerFactNode{}
+	}
+	for i := len(c.graph.TimerFacts) - 1; i >= 0; i-- {
+		if c.graph.TimerFacts[i].Label != "" || c.graph.TimerFacts[i].Source != "" || c.graph.TimerFacts[i].PeriodUS != 0 {
+			return c.graph.TimerFacts[i]
+		}
+	}
+	return TimerFactNode{}
+}
+
 func (c *checker) pathPublisherOrigin(moduleName string, expr *ast.ConstructorExpr, scope *Scope) localOrigin {
 	if origin := c.publisherOriginForArg(moduleName, constructorArg(expr, "rx"), scope); origin.Type != nil {
 		return origin
@@ -2090,7 +2284,7 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 			Terminal:        origin.TerminalVcpu,
 			Span:            span,
 		})
-	case IsExecutorSlotType(origin.Type):
+	case IsExecutorSlotType(origin.Type) && origin.RecordsExecutorSlot:
 		c.graph.ExecutorSlots = append(c.graph.ExecutorSlots, ExecutorSlotNode{Label: origin.SlotLabel, Binding: name, Span: span})
 	case IsTopicType(origin.Type):
 		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Depth: origin.TopicDepth, PayloadType: origin.TopicPayloadType, PayloadSize: origin.TopicPayloadSize, PayloadAlign: origin.TopicPayloadAlign, Binding: name, Span: span})
@@ -2283,6 +2477,32 @@ func (c *checker) recordDiscoveryFactFromCall(call *ast.CallExpr, recvType *Type
 	if call == nil || recvType == nil {
 		return
 	}
+	switch {
+	case recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "InterruptAuthority" && call.Method == "select_apic_mode":
+		c.graph.APICFacts = append(c.graph.APICFacts, APICFactNode{
+			Mode:            "x2apic_preferred",
+			Fallback:        "xapic",
+			XAPICAvailable:  true,
+			X2APICAvailable: true,
+			Span:            call.SpanV,
+		})
+	case recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "InterruptAuthority" && call.Method == "require_x2apic":
+		c.graph.APICFacts = append(c.graph.APICFacts, APICFactNode{
+			Mode:            "x2apic_required",
+			Required:        true,
+			XAPICAvailable:  true,
+			X2APICAvailable: true,
+			Span:            call.SpanV,
+		})
+	case recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "ApicModeSelection" && call.Method == "with_xapic_fallback":
+		c.graph.APICFacts = append(c.graph.APICFacts, APICFactNode{
+			Mode:            "x2apic_with_xapic_fallback",
+			Fallback:        "xapic",
+			XAPICAvailable:  true,
+			X2APICAvailable: true,
+			Span:            call.SpanV,
+		})
+	}
 	if recvType.Module == "machine.x86_64.timer" && recvType.Name == "TimerDiscovery" && call.Method == "require_periodic" {
 		period, ok := args["period_us"].asUint()
 		if !ok {
@@ -2389,6 +2609,8 @@ func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) 
 		if c.graph.Executors[i].Span.Start == origin.Constructor.SpanV.Start && c.graph.Executors[i].Span.End == origin.Constructor.SpanV.End {
 			c.graph.Executors[i].SlotLabel = origin.SlotLabel
 			c.graph.Executors[i].LoopPolicy = origin.LoopPolicy
+			c.graph.Executors[i].LoopStrategy = origin.LoopStrategy
+			c.graph.Executors[i].LoopFallback = origin.LoopFallback
 			c.graph.Executors[i].MemoryOwnerLabel = origin.MemoryOwnerLabel
 			return
 		}
@@ -2399,6 +2621,8 @@ func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) 
 		FieldBindings:    origin.FieldBindings,
 		SlotLabel:        origin.SlotLabel,
 		LoopPolicy:       origin.LoopPolicy,
+		LoopStrategy:     origin.LoopStrategy,
+		LoopFallback:     origin.LoopFallback,
 		MemoryOwnerLabel: origin.MemoryOwnerLabel,
 	})
 }
@@ -2443,6 +2667,29 @@ func originForExpr(expr ast.Expr, scope *Scope) localOrigin {
 func (c *checker) slotLabelForExpr(moduleName string, expr ast.Expr, scope *Scope) string {
 	origin := c.originForExprValue(moduleName, expr, c.exprStaticType(moduleName, expr, scope), scope)
 	return origin.SlotLabel
+}
+
+func (c *checker) memoryOwnerLabelForExpr(moduleName string, expr ast.Expr, scope *Scope) string {
+	origin := c.originForExprValue(moduleName, expr, c.exprStaticType(moduleName, expr, scope), scope)
+	if origin.MemoryOwnerLabel != "" {
+		return c.resolveExecutorSeedLabel(origin.MemoryOwnerLabel)
+	}
+	return c.resolveExecutorSeedLabel(origin.SlotLabel)
+}
+
+func (c *checker) resolveExecutorSeedLabel(label string) string {
+	const prefix = "executor_slot."
+	if !strings.HasPrefix(label, prefix) {
+		return label
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(label, prefix))
+	if err != nil || id < 0 || id >= len(c.graph.ExecutorSlots) {
+		return label
+	}
+	if claimed := c.graph.ExecutorSlots[id].Label; claimed != "" {
+		return claimed
+	}
+	return label
 }
 
 func executorBindingForCall(call *ast.CallExpr) string {

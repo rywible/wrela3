@@ -95,6 +95,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	if ctx.program.Entry.OwnedHardwareType == "" {
 		ctx.program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
+	ctx.program.APICMode = ctx.apicMode()
 
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
@@ -929,9 +930,59 @@ func (ctx *lowerContext) lowerTimerRoutes() {
 	}
 }
 
+func (ctx *lowerContext) timerInitFactsForValue(value Value) (string, uint64, uint8) {
+	source := "local_apic_pit_calibrated"
+	periodUS := uint64(0)
+	vector := uint8(0x43)
+	if ctx != nil && ctx.program != nil {
+		for _, route := range ctx.program.Timers {
+			if route.Source != "" {
+				source = route.Source
+			}
+			if route.PeriodUS != 0 {
+				periodUS = route.PeriodUS
+			}
+			if route.Vector != 0 {
+				vector = route.Vector
+			}
+			break
+		}
+	}
+	if valuePeriod, ok := constUintFieldValue(value, "period_us"); ok {
+		periodUS = valuePeriod
+	}
+	if sourceKind, ok := constNestedUintFieldValue(value, "source", "kind"); ok {
+		switch sourceKind {
+		case 1:
+			source = "local_apic_pit_calibrated"
+		case 2:
+			source = "hpet"
+		}
+	}
+	return source, periodUS, vector
+}
+
+func (ctx *lowerContext) apicMode() string {
+	if ctx == nil || ctx.checked == nil {
+		return ""
+	}
+	for i := len(ctx.checked.ImageGraph.APICFacts) - 1; i >= 0; i-- {
+		if mode := ctx.checked.ImageGraph.APICFacts[i].Mode; mode != "" {
+			return mode
+		}
+	}
+	return ""
+}
+
 func (ctx *lowerContext) lowerInterruptQueueLayouts() {
 	if ctx == nil || ctx.checked == nil {
 		return
+	}
+	sources := map[string]sem.SharedInterruptSourceNode{}
+	for _, source := range ctx.checked.ImageGraph.SharedInterruptSources {
+		if source.SourceLabel != "" {
+			sources["irq."+source.SourceLabel] = source
+		}
 	}
 	for _, queue := range ctx.checked.ImageGraph.InterruptQueues {
 		if queue.Capacity == 0 {
@@ -942,15 +993,33 @@ func (ctx *lowerContext) lowerInterruptQueueLayouts() {
 			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue payload layout is invalid")
 			continue
 		}
+		source := sources[queue.Label]
 		ctx.program.InterruptQueues = append(ctx.program.InterruptQueues, InterruptQueueLayout{
 			Label:        queue.Label,
-			Owner:        queue.Owner,
+			SourceLabel:  source.SourceLabel,
+			Vector:       uint8(source.Vector),
+			Owner:        ctx.resolveExecutorSeedLabel(queue.Owner),
 			Capacity:     queue.Capacity,
 			PayloadSize:  queue.PayloadSize,
 			PayloadAlign: queue.PayloadAlign,
 			Overflow:     queue.Overflow,
 		})
 	}
+}
+
+func (ctx *lowerContext) resolveExecutorSeedLabel(label string) string {
+	const prefix = "executor_slot."
+	if ctx == nil || ctx.checked == nil || !strings.HasPrefix(label, prefix) {
+		return label
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(label, prefix))
+	if err != nil || id < 0 || id >= len(ctx.checked.ImageGraph.ExecutorSlots) {
+		return label
+	}
+	if claimed := ctx.checked.ImageGraph.ExecutorSlots[id].Label; claimed != "" {
+		return claimed
+	}
+	return label
 }
 
 func (ctx *lowerContext) lowerVcpuStartPlans() {
@@ -960,6 +1029,7 @@ func (ctx *lowerContext) lowerVcpuStartPlans() {
 	for _, placement := range ctx.checked.ImageGraph.VcpuPlacements {
 		plan := VcpuStartPlan{
 			VcpuID:    placement.VcpuID,
+			APICMode:  ctx.program.APICMode,
 			SlotLabel: placement.SlotLabel,
 			Terminal:  placement.Terminal,
 		}
@@ -1251,6 +1321,20 @@ func constUintFieldValue(value Value, fieldName string) (uint64, bool) {
 	return 0, false
 }
 
+func constNestedUintFieldValue(value Value, fieldName string, nestedFieldName string) (uint64, bool) {
+	construct, ok := value.(*Construct)
+	if !ok {
+		return 0, false
+	}
+	for _, field := range construct.Fields {
+		if field.Name != fieldName {
+			continue
+		}
+		return constUintFieldValue(field.Value, nestedFieldName)
+	}
+	return 0, false
+}
+
 func constUintValue(value Value) (uint64, bool) {
 	switch v := value.(type) {
 	case *ConstInt:
@@ -1375,6 +1459,21 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		return construct, ops, typ
 	case *ast.CallExpr:
 		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		if recvType != nil && recvType.Module == "machine.x86_64.timer" && recvType.Name == "TimerAuthority" && e.Method == "initialize" {
+			localApic, localApicOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "local_apic"))
+			source, periodUS, vector := ctx.timerInitFactsForValue(receiver)
+			init := TimerInit{
+				Source:    source,
+				PeriodUS:  periodUS,
+				Vector:    vector,
+				Timer:     receiver,
+				LocalApic: localApic,
+			}
+			ops := append([]Operation{}, receiverOps...)
+			ops = append(ops, localApicOps...)
+			ops = append(ops, init)
+			return receiver, ops, ctx.resolveType(moduleName, "void")
+		}
 		if construct, ops, typ, ok := ctx.lowerTopicFactoryCall(moduleName, receiverType, scope, e, receiver, receiverOps, recvType); ok {
 			return construct, ops, typ
 		}
@@ -1490,7 +1589,15 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			}
 		}
 		if sem.IsLoopPolicyType(recvType) && e.Method == "wait" {
-			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name, Fallback: "sti_hlt"}
+			useMonitorMwait := false
+			fallback := "sti_hlt"
+			if ctx.currentExecutor != nil {
+				useMonitorMwait = ctx.currentExecutor.LoopStrategy == "monitor_mwait"
+				if ctx.currentExecutor.LoopFallback != "" {
+					fallback = ctx.currentExecutor.LoopFallback
+				}
+			}
+			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name, UseMonitorMwait: useMonitorMwait, Fallback: fallback}
 			ops := append([]Operation{}, receiverOps...)
 			ops = append(ops, wait)
 			return receiver, ops, ctx.resolveType(moduleName, "void")
@@ -1503,11 +1610,11 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, executorOps...)
 			if e.Method == "start" {
 				ret := ctx.resolveType("machine.x86_64.cpu_state", "VcpuStartStatus")
-				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
+				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, APICMode: ctx.program.APICMode, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
 				ops = append(ops, start)
 				return start, ops, ret
 			}
-			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel}
+			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, APICMode: ctx.program.APICMode, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
 			return receiver, ops, ctx.resolveType(moduleName, "never")
 		}

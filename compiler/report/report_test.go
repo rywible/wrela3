@@ -44,6 +44,7 @@ func TestNewImageReportUsesEmptyArrays(t *testing.T) {
 			ExecutorBudgets []ExecutorBudgetReport `json:"executor_budgets"`
 		} `json:"memory"`
 		Hardware struct {
+			Claims      []AuthorityRecord `json:"claims"`
 			PCI         []PCIReport       `json:"pci"`
 			Timers      []TimerReport     `json:"timers"`
 			Locality    []LocalityReport  `json:"locality"`
@@ -52,6 +53,7 @@ func TestNewImageReportUsesEmptyArrays(t *testing.T) {
 		Runtime struct {
 			Executors       []ExecutorReport       `json:"executors"`
 			Placement       []PlacementReport      `json:"placement"`
+			Interrupts      []AuthorityRecord      `json:"interrupts"`
 			Topics          []TopicReport          `json:"topics"`
 			InterruptQueues []InterruptQueueReport `json:"interrupt_queues"`
 			WakePaths       []WakePathReport       `json:"wake_paths"`
@@ -75,11 +77,13 @@ func TestNewImageReportUsesEmptyArrays(t *testing.T) {
 		"memory.root_regions":          decoded.Memory.RootRegions != nil,
 		"memory.arenas":                decoded.Memory.Arenas != nil,
 		"memory.executor_budgets":      decoded.Memory.ExecutorBudgets != nil,
+		"hardware.claims":              decoded.Hardware.Claims != nil,
 		"hardware.pci":                 decoded.Hardware.PCI != nil,
 		"hardware.timers":              decoded.Hardware.Timers != nil,
 		"hardware.locality":            decoded.Hardware.Locality != nil,
 		"runtime.executors":            decoded.Runtime.Executors != nil,
 		"runtime.placement":            decoded.Runtime.Placement != nil,
+		"runtime.interrupts":           decoded.Runtime.Interrupts != nil,
 		"runtime.topics":               decoded.Runtime.Topics != nil,
 		"runtime.interrupt_queues":     decoded.Runtime.InterruptQueues != nil,
 		"runtime.wake_paths":           decoded.Runtime.WakePaths != nil,

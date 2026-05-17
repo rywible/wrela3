@@ -4,10 +4,13 @@ use { DelegatedHardware } from platform.uefi.transition
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { CacheArena } from machine.x86_64.cache_memory
-use { ClaimedPciPlanBuilder, CpuPlan, DriverMemory, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
+use { ClaimedPciPlanBuilder, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, OwnedHardware, OwnedMemory, MemoryPlan, SlotIdentity } from machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
-use { InterruptVector } from machine.x86_64.interrupts
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 executor CacheMemoryProbe {
     slot: ExecutorSlot
@@ -99,14 +102,37 @@ image CacheMemorySmoke {
             length = 0x400000,
             align = 4096
         )
+        let root_arena = root_region.create_arena(
+            identity = ArenaIdentity(label = "cache.memory.root"),
+            policy = ArenaPolicy(evict_cache_by_default = true)
+        )
         let memory_region = root_region.bytes()
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let console_slot_seed = ExecutorSlot(id = 0)
+        let worker_slot_seed = ExecutorSlot(id = 1)
+        let console_memory_seed = root_arena.executor_memory(owner = console_slot_seed, length = 0x200000, align = 4096)
+        let worker_memory_seed = root_arena.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
+        let interrupts = discovery.interrupts
+        let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
+        let shared_serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let serial_irq_source = shared_serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
+        let serial_irq_queue = root_arena.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let wake_strategy = discovery.cpus.wake_strategy(features = discovery.cpus.features)
         let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            cpus = cpus,
             interrupts = InterruptRoutingPlan(
-                local_apic = discovery.interrupts.local_apic,
-                serial_irq4 = discovery.interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                local_apic = interrupts.local_apic,
+                serial_irq4 = shared_serial_route.route,
+                serial_shared_irq4 = shared_serial_route,
+                serial_irq_source = serial_irq_source
             ),
-            pci = ClaimedPciPlanBuilder(panic = discovery.panic).empty()
+            pci = ClaimedPciPlanBuilder(panic = discovery.panic).empty(),
+            timer = timer,
+            serial_irq_queue = serial_irq_queue,
+            console_memory = console_memory_seed,
+            worker_memory = worker_memory_seed,
+            wake_strategy = wake_strategy
         )
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = memory_region),
@@ -135,7 +161,7 @@ image CacheMemorySmoke {
             ).initialize()
         let serial_path = SerialWritePath(registers = serial_driver.registers)
         let slot = hardware.executors.claim(identity = SlotIdentity(label = "cache"))
-        let executor_memory = hardware.memory.claim_executor_arena(owner = slot, length = 0x200000, align = 4096)
+        let executor_memory = hardware.hardware_plan.executor_memory(owner = slot, memory = hardware.hardware_plan.console_memory)
         serial_path.write(executor_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
         let storage = executor_memory.reserve(length = 40, align = 8)
         let zero_storage = executor_memory.reserve(length = 24, align = 8)

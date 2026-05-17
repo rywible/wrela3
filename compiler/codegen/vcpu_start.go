@@ -118,10 +118,11 @@ func vcpuStartupData(program *ir.Program) []ir.DataObject {
 }
 
 func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext) {
-	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame)
+	mode := vcpuAPICMode(op.APICMode, op.SlotLabel, ctx)
+	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame, mode)
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
 	emitStoreLocalApicBase(e, asm.MustLookup("r11"))
-	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicSVR, 0x1ff)
+	emitLocalApicSVREnable(e, asm.MustLookup("r11"), mode)
 	e.emit(0xFB)
 	emitAddressOfValue(e, frame, op.Executor, asm.MustLookup("rdi"))
 	emitCallReloc(e, executorStartSymbolForPlan(ctx.VcpuPlans[op.SlotLabel], valueType(op.Executor)))
@@ -129,22 +130,33 @@ func emitVcpuEnter(e *Emitter, op *ir.VcpuEnter, frame Frame, ctx compileContext
 }
 
 func emitVcpuStart(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {
+	mode := vcpuAPICMode(op.APICMode, op.SlotLabel, ctx)
 	emitPrepareVcpuStartup(e, op, frame, ctx)
-	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame)
+	emitStoreVcpuAPICIDCommand(e, op.VcpuID, op.Vcpu, op.APICID, frame, mode)
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
 	emitStoreLocalApicBase(e, asm.MustLookup("r11"))
-	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicSVR, 0x1ff)
-	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitLocalApicSVREnable(e, asm.MustLookup("r11"), mode)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"), mode)
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
-	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), apicICRInitAssert)
-	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitSendIcrForMode(e, asm.MustLookup("r11"), asm.MustLookup("rax"), apicICRInitAssert, mode)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"), mode)
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
-	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
-	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"))
+	emitSendIcrForMode(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12), mode)
+	emitLoadVcpuAPICIDCommand(e, op.Vcpu, op.APICID, frame, asm.MustLookup("rax"), mode)
 	emitLoadVcpuLocalApicBase(e, op.Vcpu, op.LocalApicBase, frame, asm.MustLookup("r11"))
-	emitSendIcr(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12))
+	emitSendIcrForMode(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004600|uint32(apTrampolineBase>>12), mode)
 	emitWaitForVcpuReady(e, op.VcpuID)
 	emitStoreVcpuStartStatus(e, op, frame)
+}
+
+func vcpuAPICMode(opMode string, slotLabel string, ctx compileContext) string {
+	if opMode != "" {
+		return opMode
+	}
+	if plan, ok := ctx.VcpuPlans[slotLabel]; ok && plan.APICMode != "" {
+		return plan.APICMode
+	}
+	return ctx.APICMode
 }
 
 func emitLoadVcpuLocalApicBase(e *Emitter, vcpu ir.Value, fallback uint64, frame Frame, dst asm.Reg) {
@@ -154,16 +166,22 @@ func emitLoadVcpuLocalApicBase(e *Emitter, vcpu ir.Value, fallback uint64, frame
 	emitMovImmToReg(e, dst, int64(fallback))
 }
 
-func emitLoadVcpuAPICIDCommand(e *Emitter, vcpu ir.Value, fallback uint32, frame Frame, dst asm.Reg) {
+func emitLoadVcpuAPICIDCommand(e *Emitter, vcpu ir.Value, fallback uint32, frame Frame, dst asm.Reg, mode string) {
 	if emitLoadVcpuField(e, vcpu, frame, "apic_id", dst, 32) {
-		emitShiftImm(e, 0x04, dst, 24)
+		if !apicModeUsesRawDestination(mode) {
+			emitShiftImm(e, 0x04, dst, 24)
+		}
+		return
+	}
+	if apicModeUsesRawDestination(mode) {
+		emitMovImmToReg(e, dst, int64(fallback))
 		return
 	}
 	emitMovImmToReg(e, dst, int64(fallback<<24))
 }
 
-func emitStoreVcpuAPICIDCommand(e *Emitter, vcpuID int, vcpu ir.Value, fallback uint32, frame Frame) {
-	emitLoadVcpuAPICIDCommand(e, vcpu, fallback, frame, asm.MustLookup("r10"))
+func emitStoreVcpuAPICIDCommand(e *Emitter, vcpuID int, vcpu ir.Value, fallback uint32, frame Frame, mode string) {
+	emitLoadVcpuAPICIDCommand(e, vcpu, fallback, frame, asm.MustLookup("r10"), mode)
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), vcpuAPICIDCommandSymbol(vcpuID))
 	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r10"), 64)
 }
@@ -197,6 +215,28 @@ func emitLapicWriteWithBaseReg(e *Emitter, base asm.Reg, offset uint32, value ui
 	emitLapicWriteRegWithBaseReg(e, base, offset, asm.MustLookup("rax"))
 }
 
+func emitLocalApicSVREnable(e *Emitter, base asm.Reg, mode string) {
+	if usesX2APIC(mode) {
+		emitEnableX2APIC(e)
+		emitMovImmToReg(e, asm.MustLookup("r10"), 0x1ff)
+		emitX2APICWriteMSR(e, x2apicSVRMSR, asm.MustLookup("r10"))
+		return
+	}
+	if usesRuntimeX2APICFallback(mode) {
+		xapic := e.newLabel("apic_svr_xapic")
+		done := e.newLabel("apic_svr_done")
+		emitJumpIfX2APICInactive(e, xapic)
+		emitMovImmToReg(e, asm.MustLookup("r10"), 0x1ff)
+		emitX2APICWriteMSR(e, x2apicSVRMSR, asm.MustLookup("r10"))
+		e.emitJmp(done)
+		e.bindLabel(xapic)
+		emitLapicWriteWithBaseReg(e, base, lapicSVR, 0x1ff)
+		e.bindLabel(done)
+		return
+	}
+	emitLapicWriteWithBaseReg(e, base, lapicSVR, 0x1ff)
+}
+
 func emitLapicWriteRegWithBaseReg(e *Emitter, base asm.Reg, offset uint32, value asm.Reg) {
 	emitStoreMemFromReg(e, base, int64(offset), value, 32)
 }
@@ -223,6 +263,34 @@ func emitSendIcr(e *Emitter, base asm.Reg, destShifted asm.Reg, low uint32) {
 	emitLapicWriteRegWithBaseReg(e, base, lapicICRHigh, asm.MustLookup("rax"))
 	emitLapicWriteWithBaseReg(e, base, lapicICRLow, low)
 	emitWaitForIcrDelivery(e, base)
+}
+
+func emitSendIcrForMode(e *Emitter, base asm.Reg, destCommand asm.Reg, low uint32, mode string) {
+	switch {
+	case usesX2APIC(mode):
+		emitSendX2APICIcr(e, destCommand, low)
+	case usesRuntimeX2APICFallback(mode):
+		xapic := e.newLabel("apic_icr_xapic")
+		done := e.newLabel("apic_icr_done")
+		emitRegRegMove(e, asm.MustLookup("r10"), destCommand)
+		emitJumpIfX2APICInactive(e, xapic)
+		emitSendX2APICIcr(e, asm.MustLookup("r10"), low)
+		e.emitJmp(done)
+		e.bindLabel(xapic)
+		emitShiftImm(e, 0x04, asm.MustLookup("r10"), 24)
+		emitSendIcr(e, base, asm.MustLookup("r10"), low)
+		e.bindLabel(done)
+	default:
+		emitSendIcr(e, base, destCommand, low)
+	}
+}
+
+func emitSendX2APICIcr(e *Emitter, destAPICID asm.Reg, low uint32) {
+	emitRegRegMove(e, asm.MustLookup("r10"), destAPICID)
+	emitShiftImm(e, 0x04, asm.MustLookup("r10"), 32)
+	emitMovImmToReg(e, asm.MustLookup("rax"), int64(low))
+	emitRegRegOp(e, 0x09, asm.MustLookup("rax"), asm.MustLookup("r10"))
+	emitX2APICWriteMSR(e, x2apicICRMSR, asm.MustLookup("rax"))
 }
 
 func emitPrepareVcpuStartup(e *Emitter, op *ir.VcpuStart, frame Frame, ctx compileContext) {

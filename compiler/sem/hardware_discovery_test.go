@@ -167,7 +167,7 @@ func TestDiscoveryFactsRecordedFromImageSource(t *testing.T) {
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics: %#v", ds)
 	}
-	if len(checked.ImageGraph.APICFacts) == 0 || checked.ImageGraph.APICFacts[0].Mode != "xapic_fallback" {
+	if len(checked.ImageGraph.APICFacts) == 0 || checked.ImageGraph.APICFacts[len(checked.ImageGraph.APICFacts)-1].Mode != "x2apic_with_xapic_fallback" {
 		t.Fatalf("APIC facts not recorded: %#v", checked.ImageGraph.APICFacts)
 	}
 	if len(checked.ImageGraph.TimerFacts) != 1 ||
@@ -197,9 +197,12 @@ module examples.discovery_facts
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
+use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
-use { InterruptVector } from machine.x86_64.interrupts
+use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 image DiscoveryFactsImage {
     transitions { delegated_hardware -> owned_hardware }
@@ -208,20 +211,37 @@ image DiscoveryFactsImage {
         let panic = BootPanic()
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let interrupts = discovery.interrupts
+        let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
         let local_apic = interrupts.local_apic
         let timer = discovery.timers.require_periodic(period_us = 1000)
         let cpu0_numa = discovery.cpus.locality0.numa_node
         let framebuffer_known = discovery.framebuffer.known
+        let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x400000, align = 4096)
+        let root = root_region.create_arena(identity = ArenaIdentity(label = "discovery.facts.root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let console_seed = ExecutorSlot(id = 0)
+        let worker_seed = ExecutorSlot(id = 1)
+        let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
+        let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
+        let shared = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
         let arena = MutableBytes(address = 0, length = 0)
         let hardware_plan = HardwarePlan(
             cpus = discovery.cpus.require_min_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = local_apic,
-                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                serial_irq4 = shared.route,
+                serial_shared_irq4 = shared,
+                serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
             ),
-            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+            pci = ClaimedPciPlanBuilder(panic = panic).empty(),
+            timer = timer,
+            serial_irq_queue = queue,
+            console_memory = console_memory,
+            worker_memory = worker_memory,
+            wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))
         )
         let _timer_source = timer.source.kind
+        let _apic_mode = apic_mode.mode
         let _cpu0_numa = cpu0_numa
         let _framebuffer_known = framebuffer_known
         return hardware.exit_to_owned_hardware(

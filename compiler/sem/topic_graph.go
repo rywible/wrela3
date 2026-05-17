@@ -1,7 +1,13 @@
 package sem
 
 func IsExecutorSlotType(t *Type) bool {
-	return qualifiedTypeName(t) == "machine.x86_64.cpu_state.ExecutorSlot"
+	switch qualifiedTypeName(t) {
+	case "machine.x86_64.executor_slot.ExecutorSlot",
+		"machine.x86_64.cpu_state.ExecutorSlot":
+		return true
+	default:
+		return false
+	}
 }
 
 func IsVcpuType(t *Type) bool {

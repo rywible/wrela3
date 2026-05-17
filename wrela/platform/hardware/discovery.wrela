@@ -4,7 +4,7 @@ use { AcpiLocator, AcpiRoot } from platform.acpi.root
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
 use { UefiMemoryMap } from platform.uefi.types
-use { CpuDiscovery, CpuLocalityFacts, HardwarePlan } from machine.x86_64.cpu_state
+use { CpuDiscovery, CpuFeatureFacts, CpuLocalityFacts, HardwarePlan } from machine.x86_64.cpu_state
 use { MutableBytes } from machine.x86_64.executor_memory
 use { InterruptAuthority } from machine.x86_64.interrupts
 use { PciDeviceSet } from machine.x86_64.pci
@@ -98,7 +98,8 @@ class PlatformDiscoveryRoot {
             cpus = CpuDiscovery(
                 enabled = enabled_cpus,
                 locality0 = locality0,
-                locality1 = locality1
+                locality1 = locality1,
+                features = CpuFeatureFacts(monitor_mwait_available = true)
             ),
             timers = TimerDiscovery(
                 local_apic_timer_available = true,

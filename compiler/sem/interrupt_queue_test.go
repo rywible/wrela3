@@ -51,7 +51,7 @@ func TestSharedInterruptAllowsMultipleSourceClaims(t *testing.T) {
 	if len(ds) != 0 {
 		t.Fatalf("shared IRQ diagnostics: %#v", ds)
 	}
-	if len(checked.ImageGraph.SharedInterruptSources) != 2 {
+	if len(checked.ImageGraph.SharedInterruptSources) != 3 {
 		t.Fatalf("shared interrupt sources = %#v", checked.ImageGraph.SharedInterruptSources)
 	}
 }
@@ -94,12 +94,12 @@ use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { PhysicalRegionAuthority, ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
 use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
-use { ExecutorSlot } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy } from machine.x86_64.interrupt_queue
-use { InterruptVector } from machine.x86_64.interrupts
+use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 
 image InterruptQueueTest {
     transitions { delegated_hardware -> owned_hardware }
@@ -109,6 +109,14 @@ image InterruptQueueTest {
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let region = PhysicalRegionAuthority(base = 0x100000, length = 0x200000, align = 4096, provenance = 1, panic = panic)
         let root = region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = false))
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let console_slot_seed = ExecutorSlot(id = 0)
+        let worker_slot_seed = ExecutorSlot(id = 1)
+        let console_memory = root.executor_memory(owner = console_slot_seed, length = 0x80000, align = 4096)
+        let worker_memory = root.executor_memory(owner = worker_slot_seed, length = 0x80000, align = 4096)
+        let interrupts = discovery.interrupts
+        let serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
 ` + queueSetup + `
         let arena = MutableBytes(address = 0, length = 0)
         let memory_plan = MemoryPlan(
@@ -122,14 +130,20 @@ image InterruptQueueTest {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        let interrupts = discovery.interrupts
         let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
-                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                serial_irq4 = serial_route.route,
+                serial_shared_irq4 = serial_route,
+                serial_irq_source = serial_source
             ),
-            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+            pci = ClaimedPciPlanBuilder(panic = panic).empty(),
+            timer = discovery.timers.require_periodic(period_us = 1000),
+            serial_irq_queue = queue,
+            console_memory = console_memory,
+            worker_memory = worker_memory,
+            wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))
         )
         return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }
@@ -147,9 +161,12 @@ module examples.shared_irq_test
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
+use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan } from machine.x86_64.cpu_state
 use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy } from machine.x86_64.interrupt_queue
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 
 image SharedIrqTest {
@@ -159,6 +176,16 @@ image SharedIrqTest {
         let panic = BootPanic()
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let interrupts = discovery.interrupts
+        let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x400000, align = 4096)
+        let root = root_region.create_arena(identity = ArenaIdentity(label = "shared.irq.root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let console_slot_seed = ExecutorSlot(id = 0)
+        let worker_slot_seed = ExecutorSlot(id = 1)
+        let console_memory = root.executor_memory(owner = console_slot_seed, length = 0x100000, align = 4096)
+        let worker_memory = root.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
+        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let plan_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
+        let plan_source = plan_route.claim_source(identity = InterruptSourceIdentity(label = "serial.plan"))
 ` + claims + `
         let arena = MutableBytes(address = 0, length = 0)
         let memory_plan = MemoryPlan(
@@ -173,12 +200,19 @@ image SharedIrqTest {
             cr3 = 0
         )
         let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
-                serial_irq4 = ` + serialRoute + `
+                serial_irq4 = ` + serialRoute + `,
+                serial_shared_irq4 = plan_route,
+                serial_irq_source = plan_source
             ),
-            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+            pci = ClaimedPciPlanBuilder(panic = panic).empty(),
+            timer = discovery.timers.require_periodic(period_us = 1000),
+            serial_irq_queue = serial_queue,
+            console_memory = console_memory,
+            worker_memory = worker_memory,
+            wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))
         )
         return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
     }

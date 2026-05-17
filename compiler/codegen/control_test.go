@@ -266,10 +266,13 @@ func TestCompileDataRelocationOffsetIsRelativeToOwningSymbol(t *testing.T) {
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
 	}
-	if len(image.Relocs) != 1 {
-		t.Fatalf("relocs = %#v, want one relocation", image.Relocs)
+	var reloc Reloc
+	for _, candidate := range image.Relocs {
+		if candidate.Symbol == "uses_data" {
+			reloc = candidate
+			break
+		}
 	}
-	reloc := image.Relocs[0]
 	if reloc.Symbol != "uses_data" {
 		t.Fatalf("reloc symbol = %q, want uses_data", reloc.Symbol)
 	}

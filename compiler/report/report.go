@@ -19,6 +19,7 @@ func NewImageReport(image string) ImageReport {
 			ExecutorBudgets: []ExecutorBudgetReport{},
 		},
 		Hardware: HardwareReport{
+			Claims:      []AuthorityRecord{},
 			PCI:         []PCIReport{},
 			Timers:      []TimerReport{},
 			Locality:    []LocalityReport{},
@@ -27,6 +28,7 @@ func NewImageReport(image string) ImageReport {
 		Runtime: RuntimeReport{
 			Executors:       []ExecutorReport{},
 			Placement:       []PlacementReport{},
+			Interrupts:      []AuthorityRecord{},
 			Topics:          []TopicReport{},
 			InterruptQueues: []InterruptQueueReport{},
 			WakePaths:       []WakePathReport{},
@@ -64,6 +66,7 @@ type ArenaReport struct {
 	Base   uint64 `json:"base"`
 	Bytes  uint64 `json:"bytes"`
 	Owner  string `json:"owner"`
+	Kind   string `json:"kind"`
 }
 
 type ExecutorBudgetReport struct {
@@ -72,6 +75,7 @@ type ExecutorBudgetReport struct {
 }
 
 type HardwareReport struct {
+	Claims      []AuthorityRecord `json:"claims"`
 	PCI         []PCIReport       `json:"pci"`
 	APIC        APICReport        `json:"apic"`
 	Timers      []TimerReport     `json:"timers"`
@@ -92,7 +96,9 @@ type BARReport struct {
 }
 
 type APICReport struct {
-	Mode string `json:"mode"`
+	Mode     string `json:"mode"`
+	Required bool   `json:"required"`
+	Fallback string `json:"fallback,omitempty"`
 }
 
 type TimerReport struct {
@@ -121,6 +127,7 @@ type FramebufferReport struct {
 type RuntimeReport struct {
 	Executors       []ExecutorReport       `json:"executors"`
 	Placement       []PlacementReport      `json:"placement"`
+	Interrupts      []AuthorityRecord      `json:"interrupts"`
 	Topics          []TopicReport          `json:"topics"`
 	InterruptQueues []InterruptQueueReport `json:"interrupt_queues"`
 	WakePaths       []WakePathReport       `json:"wake_paths"`

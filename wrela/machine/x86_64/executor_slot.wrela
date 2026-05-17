@@ -1,0 +1,5 @@
+module machine.x86_64.executor_slot
+
+data ExecutorSlot {
+    id: U64
+}

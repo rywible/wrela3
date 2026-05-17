@@ -1,7 +1,7 @@
 module platform.hardware.memory
 
 use { BootPanic } from platform.hardware.panic
-use { ExecutorSlot } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { PlacementTarget } from machine.x86_64.placement
 use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { CacheArena } from machine.x86_64.cache_memory

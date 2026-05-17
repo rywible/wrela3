@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -12,6 +13,7 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 	if checked == nil {
 		return r
 	}
+	resolveOwner := reportOwnerResolver(checked.ImageGraph)
 
 	for _, root := range checked.ImageGraph.MemoryRoots {
 		r.Memory.RootRegions = append(r.Memory.RootRegions, report.MemoryRootReport{
@@ -33,18 +35,19 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 			Parent: arena.Parent,
 			Base:   arena.Base,
 			Bytes:  arena.Bytes,
-			Owner:  arena.Owner,
+			Owner:  resolveOwner(arena.Owner),
+			Kind:   arena.Kind,
 		})
 		r.AuthorityAudit.Arenas = append(r.AuthorityAudit.Arenas, report.AuthorityRecord{
 			Kind:  "arena",
 			Label: arena.Label,
-			Owner: arena.Owner,
+			Owner: resolveOwner(arena.Owner),
 		})
 	}
 	appendDiscoveryFacts(&r, checked.ImageGraph)
-	appendExecutorMemoryAndLocality(&r, checked.ImageGraph)
+	appendExecutorMemoryAndLocality(&r, checked.ImageGraph, resolveOwner)
 	appendWakePaths(&r, checked.ImageGraph)
-	appendRuntimeFacts(&r, checked.ImageGraph)
+	appendRuntimeFacts(&r, checked.ImageGraph, resolveOwner)
 	appendInterruptsToAudit(&r, checked.ImageGraph)
 	appendTimersToAudit(&r, checked.ImageGraph)
 	appendTopicsToReportAndAudit(&r, checked.ImageGraph)
@@ -55,14 +58,19 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 
 func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
 	for _, claim := range g.HardwareClaims {
-		r.AuthorityAudit.HardwareClaims = append(r.AuthorityAudit.HardwareClaims, report.AuthorityRecord{
+		record := report.AuthorityRecord{
 			Kind:  claim.Kind,
 			Label: claim.Key,
 			Owner: "delegated_hardware",
-		})
+		}
+		r.Hardware.Claims = append(r.Hardware.Claims, record)
+		r.AuthorityAudit.HardwareClaims = append(r.AuthorityAudit.HardwareClaims, record)
+		appendPCIClaimReport(r, claim)
 	}
 	for _, fact := range g.APICFacts {
 		r.Hardware.APIC.Mode = fact.Mode
+		r.Hardware.APIC.Required = fact.Required
+		r.Hardware.APIC.Fallback = fact.Fallback
 	}
 	for _, timer := range g.TimerFacts {
 		r.Hardware.Timers = append(r.Hardware.Timers, report.TimerReport{
@@ -92,37 +100,72 @@ func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
 	}
 }
 
-func appendRuntimeFacts(r *report.ImageReport, g ImageGraph) {
+func appendPCIClaimReport(r *report.ImageReport, claim HardwareClaimNode) {
+	if !strings.HasPrefix(claim.Kind, "pci_") {
+		return
+	}
+	identity := claim.Key
+	barIndex := uint64(0)
+	hasBAR := false
+	if claim.Kind == "pci_bar" {
+		if before, after, ok := strings.Cut(claim.Key, "."); ok {
+			identity = before
+			if parsed, err := strconv.ParseUint(after, 0, 8); err == nil {
+				barIndex = parsed
+				hasBAR = true
+			}
+		}
+	}
+	idx := -1
+	for i := range r.Hardware.PCI {
+		if r.Hardware.PCI[i].Identity == identity {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		r.Hardware.PCI = append(r.Hardware.PCI, report.PCIReport{Identity: identity, BARs: []report.BARReport{}})
+		idx = len(r.Hardware.PCI) - 1
+	}
+	if hasBAR {
+		r.Hardware.PCI[idx].BARs = append(r.Hardware.PCI[idx].BARs, report.BARReport{
+			Index: uint8(barIndex),
+			Kind:  claim.Kind,
+		})
+	}
+}
+
+func appendRuntimeFacts(r *report.ImageReport, g ImageGraph, resolveOwner func(string) string) {
 	for _, queue := range g.InterruptQueues {
 		r.Runtime.InterruptQueues = append(r.Runtime.InterruptQueues, report.InterruptQueueReport{
 			Label:    queue.Label,
-			Owner:    queue.Owner,
+			Owner:    resolveOwner(queue.Owner),
 			Capacity: queue.Capacity,
 			Overflow: queue.Overflow,
 		})
 		r.AuthorityAudit.Queues = append(r.AuthorityAudit.Queues, report.AuthorityRecord{
 			Kind:  "interrupt_queue",
 			Label: queue.Label,
-			Owner: queue.Owner,
+			Owner: resolveOwner(queue.Owner),
 		})
 	}
 }
 
-func appendExecutorMemoryAndLocality(r *report.ImageReport, g ImageGraph) {
+func appendExecutorMemoryAndLocality(r *report.ImageReport, g ImageGraph, resolveOwner func(string) string) {
 	for _, arena := range g.Arenas {
 		if arena.Kind != "executor_memory" {
 			continue
 		}
 		r.Memory.ExecutorBudgets = append(r.Memory.ExecutorBudgets, report.ExecutorBudgetReport{
-			SlotLabel: arena.Owner,
+			SlotLabel: resolveOwner(arena.Owner),
 			Bytes:     arena.Bytes,
 		})
 	}
 	for _, constraint := range g.PlacementConstraints {
 		r.Runtime.Placement = append(r.Runtime.Placement, report.PlacementReport{
 			Kind:      constraint.Kind,
-			SubjectA:  constraint.A,
-			SubjectB:  constraint.B,
+			SubjectA:  resolveOwner(constraint.A),
+			SubjectB:  resolveOwner(constraint.B),
 			Required:  constraint.Required,
 			Satisfied: constraint.Satisfied,
 			Fallback:  constraint.Fallback,
@@ -131,7 +174,7 @@ func appendExecutorMemoryAndLocality(r *report.ImageReport, g ImageGraph) {
 	for _, placement := range g.PlacementDecisions {
 		r.Runtime.Placement = append(r.Runtime.Placement, report.PlacementReport{
 			Kind:      "cpu_for_slot",
-			SubjectA:  placement.SlotLabel,
+			SubjectA:  resolveOwner(placement.SlotLabel),
 			SubjectB:  placement.Target,
 			Required:  false,
 			Satisfied: placement.Satisfied,
@@ -157,18 +200,22 @@ func appendWakePaths(r *report.ImageReport, g ImageGraph) {
 
 func appendInterruptsToAudit(r *report.ImageReport, g ImageGraph) {
 	for _, route := range g.InterruptTopicRoutes {
-		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, report.AuthorityRecord{
+		record := report.AuthorityRecord{
 			Kind:  "interrupt_route",
 			Label: route.PathLabel,
 			Owner: route.TopicLabel,
-		})
+		}
+		r.Runtime.Interrupts = append(r.Runtime.Interrupts, record)
+		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, record)
 	}
 	for _, source := range g.SharedInterruptSources {
-		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, report.AuthorityRecord{
+		record := report.AuthorityRecord{
 			Kind:  "shared_interrupt_source",
 			Label: source.SourceLabel,
 			Owner: source.RouteKey,
-		})
+		}
+		r.Runtime.Interrupts = append(r.Runtime.Interrupts, record)
+		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, record)
 	}
 }
 
@@ -255,11 +302,38 @@ func ValidateAuthorityAuditContent(r report.ImageReport) []diag.Diagnostic {
 	}
 	requireRecord(r.AuthorityAudit.MemoryRoots, "memory_roots", len(r.Memory.RootRegions) != 0)
 	requireRecord(r.AuthorityAudit.Arenas, "arenas", len(r.Memory.Arenas) != 0)
+	requireRecord(r.AuthorityAudit.HardwareClaims, "hardware_claims", len(r.Hardware.Claims) != 0 || len(r.Hardware.PCI) != 0)
+	requireRecord(r.AuthorityAudit.Interrupts, "interrupts", len(r.Runtime.Interrupts) != 0)
 	requireRecord(r.AuthorityAudit.Timers, "timers", len(r.Hardware.Timers) != 0)
 	requireRecord(r.AuthorityAudit.Queues, "queues", len(r.Runtime.InterruptQueues) != 0)
 	requireRecord(r.AuthorityAudit.Topics, "topics", len(r.Runtime.Topics) != 0)
 	requireRecord(r.AuthorityAudit.WakeTargets, "wake_targets", len(r.Runtime.WakePaths) != 0)
+	requireRecord(r.AuthorityAudit.DMABuffers, "dma_buffers", reportHasArenaKind(r.Memory.Arenas, "dma_buffer"))
 	return ds
+}
+
+func reportOwnerResolver(g ImageGraph) func(string) string {
+	seedLabels := map[string]string{}
+	for i, slot := range g.ExecutorSlots {
+		if slot.Label != "" {
+			seedLabels["executor_slot."+strconv.Itoa(i)] = slot.Label
+		}
+	}
+	return func(owner string) string {
+		if label := seedLabels[owner]; label != "" {
+			return label
+		}
+		return owner
+	}
+}
+
+func reportHasArenaKind(arenas []report.ArenaReport, kind string) bool {
+	for _, arena := range arenas {
+		if arena.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func imageNameForReport(checked *CheckedProgram) string {

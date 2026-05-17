@@ -1,6 +1,6 @@
 module machine.x86_64.interrupt_queue
 
-use { ExecutorSlot } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes } from machine.x86_64.executor_memory
 
 data QueueIdentity {

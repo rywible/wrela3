@@ -288,8 +288,36 @@ func TestCompileGeneratesTrapForUnboundKnownInterruptVector(t *testing.T) {
 	if !containsBytes(wake, []byte{0x48, 0xCF}) || containsBytes(wake, []byte{0xFA, 0xF4, 0xEB, 0xFD}) {
 		t.Fatalf("wake vector must EOI and return instead of trapping: %#x", wake)
 	}
+	for _, pattern := range [][]byte{
+		{0x51},       // push rcx
+		{0x52},       // push rdx
+		{0x41, 0x52}, // push r10
+		{0x41, 0x5A}, // pop r10
+		{0x5A},       // pop rdx
+		{0x59},       // pop rcx
+	} {
+		if !containsBytes(wake, pattern) {
+			t.Fatalf("wake vector must preserve APIC fallback clobber registers, missing %#x in %#x", pattern, wake)
+		}
+	}
 	if got := len(img.InterruptBindings); got != 1 {
 		t.Fatalf("image interrupt bindings = %d, want 1", got)
+	}
+}
+
+func TestFallbackWakeVectorUsesXAPICEOI(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.APICMode = "x2apic_with_xapic_fallback"
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	wake := symbolBytes(t, img, "_wrela_interrupt_vectorf0_wake")
+	if containsBytes(wake, []byte{0x0F, 0x32}) || containsBytes(wake, []byte{0x0F, 0x30}) {
+		t.Fatalf("fallback wake EOI must not probe/write x2APIC MSRs: %#x", wake)
+	}
+	if !containsBytes(wake, []byte{0x41, 0x89, 0x83, 0xB0, 0x00, 0x00, 0x00}) {
+		t.Fatalf("fallback wake EOI must use xAPIC MMIO EOI: %#x", wake)
 	}
 }
 
@@ -369,6 +397,34 @@ func TestInterruptTopicDispatchPublishesWithoutHandlerCall(t *testing.T) {
 	binary.LittleEndian.PutUint64(topicAddress, runtimeImageBase+img.Symbols["_wrela_topic_console_com1_rx"])
 	if !containsBytes(code, topicAddress) {
 		t.Fatalf("interrupt topic dispatch missing topic data address: %#x", code)
+	}
+}
+
+func TestInterruptTopicDispatchPushesSharedInterruptQueue(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.InterruptQueues = []ir.InterruptQueueLayout{{
+		Label:        "irq.serial.rx",
+		SourceLabel:  "serial.rx",
+		Vector:       0x40,
+		Owner:        "console",
+		Capacity:     64,
+		PayloadSize:  8,
+		PayloadAlign: 8,
+		Overflow:     "drop_newest_and_set_flag",
+	}}
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if !codeReferencesSymbol(t, img, "_wrela_interrupt_vector40_serial", "_wrela_interrupt_queue_irq_serial_rx") {
+		t.Fatalf("interrupt vector 0x40 must push the serial shared IRQ queue")
+	}
+	if !codeReferencesSymbol(t, img, "_wrela_interrupt_vector40_serial", "_wrela_interrupt_event_40") {
+		t.Fatalf("interrupt vector 0x40 must copy event payload bytes into the serial shared IRQ queue")
+	}
+	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
+	if !containsBytes(code, []byte{0x48, 0xF7, 0xF6}) {
+		t.Fatalf("interrupt vector 0x40 must modulo the queue tail by capacity before storing: %#x", code)
 	}
 }
 

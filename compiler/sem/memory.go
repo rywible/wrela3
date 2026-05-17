@@ -261,7 +261,8 @@ func typeCanCarryHiddenLifetime(typ *Type) bool {
 
 func isValueOnlyAuthorityRecord(typ *Type) bool {
 	switch qualifiedTypeName(typ) {
-	case "machine.x86_64.cpu_state.ExecutorSlot",
+	case "machine.x86_64.executor_slot.ExecutorSlot",
+		"machine.x86_64.cpu_state.ExecutorSlot",
 		"machine.x86_64.interrupt_queue.QueueIdentity",
 		"machine.x86_64.interrupt_queue.InterruptPayloadKind",
 		"machine.x86_64.interrupt_queue.InterruptOverflowPolicy",

@@ -267,6 +267,111 @@ func TestVcpuStartEmitsLapicIcrWrites(t *testing.T) {
 	}
 }
 
+func TestVcpuStartUsesX2APICMSRPathWhenRequired(t *testing.T) {
+	execType := ir.Type{Name: "Worker", Module: "test", Kind: ir.TypeKindExecutor}
+	worker := &ir.Local{Symbol: "worker", Type: execType}
+	statusType := ir.Type{Name: "VcpuStartStatus", Module: "machine.x86_64.cpu_state", Kind: ir.TypeKindData}
+	program := &ir.Program{
+		APICMode: "x2apic_required",
+		VcpuStarts: []ir.VcpuStartPlan{{
+			VcpuID:    1,
+			APICID:    7,
+			APICMode:  "x2apic_required",
+			SlotLabel: "worker",
+		}},
+		Functions: []ir.Function{{
+			Symbol: "start_worker_x2",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				worker,
+				&ir.VcpuStart{
+					VcpuID:    1,
+					APICID:    7,
+					APICMode:  "x2apic_required",
+					SlotLabel: "worker",
+					Type:      statusType,
+					Executor:  worker,
+				},
+			}}},
+		}, {
+			Symbol: "_wrela_method_test_Worker_run",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.Return{},
+			}}},
+		}},
+	}
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "start_worker_x2")
+	for _, want := range [][]byte{
+		{0xB9, 0x0F, 0x08, 0x00, 0x00}, // x2APIC SVR MSR
+		{0xB9, 0x30, 0x08, 0x00, 0x00}, // x2APIC ICR MSR
+		{0x0F, 0x30},                   // wrmsr
+	} {
+		if !bytes.Contains(code, want) {
+			t.Fatalf("x2APIC start missing %x in %x", want, code)
+		}
+	}
+	if bytes.Contains(code, []byte{0x41, 0x89, 0x83, 0x10, 0x03, 0x00, 0x00}) {
+		t.Fatalf("x2APIC start must not write xAPIC ICR high MMIO: %x", code)
+	}
+	if bytes.Contains(code, u32le(7<<24)) {
+		t.Fatalf("x2APIC start must not shift destination APIC ID into xAPIC command form: %x", code)
+	}
+}
+
+func TestVcpuStartFallbackModeBranchesBetweenX2APICAndXAPIC(t *testing.T) {
+	execType := ir.Type{Name: "Worker", Module: "test", Kind: ir.TypeKindExecutor}
+	worker := &ir.Local{Symbol: "worker", Type: execType}
+	statusType := ir.Type{Name: "VcpuStartStatus", Module: "machine.x86_64.cpu_state", Kind: ir.TypeKindData}
+	program := &ir.Program{
+		APICMode: "x2apic_with_xapic_fallback",
+		VcpuStarts: []ir.VcpuStartPlan{{
+			VcpuID:    1,
+			APICID:    7,
+			APICMode:  "x2apic_with_xapic_fallback",
+			SlotLabel: "worker",
+		}},
+		Functions: []ir.Function{{
+			Symbol: "start_worker_fallback",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				worker,
+				&ir.VcpuStart{
+					VcpuID:    1,
+					APICID:    7,
+					APICMode:  "x2apic_with_xapic_fallback",
+					SlotLabel: "worker",
+					Type:      statusType,
+					Executor:  worker,
+				},
+			}}},
+		}, {
+			Symbol: "_wrela_method_test_Worker_run",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				&ir.Return{},
+			}}},
+		}},
+	}
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "start_worker_fallback")
+	for _, want := range [][]byte{
+		{0xB9, 0x1B, 0x00, 0x00, 0x00},             // IA32_APIC_BASE MSR
+		{0x0F, 0x32},                               // rdmsr x2APIC-active state
+		{0xA9, 0x00, 0x04, 0x00, 0x00},             // x2APIC enable bit
+		{0x0F, 0x30},                               // wrmsr x2APIC path
+		{0x41, 0x89, 0x83, 0x10, 0x03, 0x00, 0x00}, // xAPIC ICR high fallback
+		{0x49, 0xC1, 0xE2, 0x18},                   // raw APIC ID shifted only in fallback branch
+	} {
+		if !bytes.Contains(code, want) {
+			t.Fatalf("fallback APIC start missing %x in %x", want, code)
+		}
+	}
+}
+
 func TestVcpuStartLoadsRuntimeReceiverApicFields(t *testing.T) {
 	execType := ir.Type{Name: "Worker", Module: "test", Kind: ir.TypeKindExecutor}
 	worker := &ir.Local{Symbol: "worker", Type: execType}

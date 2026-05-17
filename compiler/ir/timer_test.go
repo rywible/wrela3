@@ -7,33 +7,46 @@ module examples.production_timer
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
-use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder, SlotIdentity, ExecutorSlot } from machine.x86_64.cpu_state
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder, SlotIdentity } from machine.x86_64.cpu_state
+use { CpuFeatureFacts } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
-use { InterruptVector } from machine.x86_64.interrupts
-use { TimerAuthority, TimerSource } from machine.x86_64.timer
+use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { TimerTickSubscription } from machine.x86_64.topic_payload
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     memory: ExecutorMemory
     ticks: TimerTickSubscription
-    start fn run(self) -> never { while true {} }
+    start fn run(self) -> never {
+        self.loop.wait()
+        while true {}
+    }
 }
 image TimerImage {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let panic = BootPanic()
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
-        let arena = MutableBytes(address = 0, length = 0)
-        return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = arena), executor_arena = arena, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = discovery.interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))), pci = ClaimedPciPlanBuilder(panic = panic).empty()))
+        let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x1000000, align = 4096)
+        let root = root_region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let arena = root_region.bytes()
+        let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let console_memory = root.executor_memory(owner = ExecutorSlot(id = 0), length = 0x100000, align = 4096)
+        let worker_memory = root.executor_memory(owner = ExecutorSlot(id = 1), length = 0x200000, align = 4096)
+        return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = arena), executor_arena = arena, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = shared.route, serial_shared_irq4 = shared, serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))), pci = ClaimedPciPlanBuilder(panic = panic).empty(), timer = discovery.timers.require_periodic(period_us = 1000), serial_irq_queue = queue, console_memory = console_memory, worker_memory = worker_memory, wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))))
     }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let worker_memory = hardware.memory.claim_executor_arena(owner = worker_slot, length = 0x200000, align = 4096)
-        let timer = TimerAuthority(source = TimerSource(kind = 1), period_us = 1000, panic = BootPanic())
+        let worker_memory = hardware.hardware_plan.executor_memory(owner = worker_slot, memory = hardware.hardware_plan.console_memory)
+        let timer = hardware.hardware_plan.timer
+        timer.initialize(local_apic = hardware.hardware_plan.interrupts.local_apic)
         let ticks = timer.subscribe(subscriber = worker_slot)
-        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)), memory = worker_memory, ticks = ticks)
+        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = true, fallback_hlt = true)), memory = worker_memory, ticks = ticks)
         hardware.vcpu0.enter(executor = worker)
     }
 }
@@ -47,5 +60,21 @@ func TestTimerSubscribeLowersToTimerTopic(t *testing.T) {
 	}
 	if len(program.Timers) != 1 || program.Timers[0].Vector != 0x43 {
 		t.Fatalf("timers = %#v, want vector 0x43", program.Timers)
+	}
+	owned := findFunction(program, program.Entry.OwnedPhaseSymbol)
+	if owned == nil {
+		t.Fatalf("missing owned phase %s", program.Entry.OwnedPhaseSymbol)
+	}
+	init, ok := functionOp[TimerInit](*owned)
+	if !ok || init.Source != "local_apic_pit_calibrated" || init.PeriodUS != 1000 || init.Vector != 0x43 {
+		t.Fatalf("timer init = %#v, want local APIC/PIT vector 0x43", init)
+	}
+	worker := findFunction(program, "_wrela_method_examples_production_timer_Worker_run")
+	if worker == nil {
+		t.Fatal("missing lowered worker")
+	}
+	wait, ok := functionOp[TopicWait](*worker)
+	if !ok || wait.Fallback != "sti_hlt" {
+		t.Fatalf("worker wait = %#v, want topic wait with hlt fallback", wait)
 	}
 }

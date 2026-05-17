@@ -39,6 +39,8 @@ type ExecutorNode struct {
 	PathUses         map[string]DriverPathUse
 	SlotLabel        string
 	LoopPolicy       string
+	LoopStrategy     string
+	LoopFallback     string
 	MemoryOwnerLabel string
 }
 
@@ -116,6 +118,8 @@ type InterruptConfiguratorNode struct {
 
 type APICFactNode struct {
 	Mode            string
+	Required        bool
+	Fallback        string
 	XAPICAvailable  bool
 	X2APICAvailable bool
 	Span            source.Span

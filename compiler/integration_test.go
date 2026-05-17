@@ -324,8 +324,12 @@ func TestHelloOwnedPhaseEntersExecutor(t *testing.T) {
 		t.Fatalf("missing IR function %s", program.Entry.OwnedPhaseSymbol)
 	}
 	enter, ok := functionOp[ir.VcpuEnter](*fn)
-	if !ok || enter.VcpuID != 0 || enter.SlotLabel != "hello" {
-		t.Fatalf("%s missing VcpuEnter for hello on vCPU0: %#v", program.Entry.OwnedPhaseSymbol, fn.Blocks)
+	if !ok || enter.VcpuID != 0 || enter.SlotLabel != "console" {
+		t.Fatalf("%s missing VcpuEnter for console on vCPU0: %#v", program.Entry.OwnedPhaseSymbol, fn.Blocks)
+	}
+	start, ok := functionOp[ir.VcpuStart](*fn)
+	if !ok || start.VcpuID != 1 || start.SlotLabel != "worker" {
+		t.Fatalf("%s missing VcpuStart for worker on vCPU1: %#v", program.Entry.OwnedPhaseSymbol, fn.Blocks)
 	}
 }
 

@@ -943,7 +943,7 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "SlotIdentity"), map[string]string{
 		"label": "StringLiteral",
 	})
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "ExecutorSlot"), map[string]string{
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.executor_slot", "ExecutorSlot"), map[string]string{
 		"id": "U64",
 	})
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "Vcpu"), map[string]string{

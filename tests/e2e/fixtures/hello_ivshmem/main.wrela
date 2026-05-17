@@ -5,13 +5,16 @@ use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
 use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
-use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
+use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { Bytes } from machine.x86_64.executor_memory
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
-use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
+use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellTopic } from machine.x86_64.ivshmem
 use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity } from machine.x86_64.topic_u64
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 image HelloSerial {
     transitions {
@@ -26,9 +29,23 @@ image HelloSerial {
             length = 0x600000,
             align = 4096
         )
+        let root_arena = root_region.create_arena(
+            identity = ArenaIdentity(label = "hello.ivshmem.root"),
+            policy = ArenaPolicy(evict_cache_by_default = true)
+        )
         let memory_region = root_region.bytes()
         let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let hello_slot_seed = ExecutorSlot(id = 0)
+        let worker_slot_seed = ExecutorSlot(id = 1)
+        let hello_memory_seed = root_arena.executor_memory(owner = hello_slot_seed, length = 0x200000, align = 4096)
+        let worker_memory_seed = root_arena.executor_memory_near(owner = worker_slot_seed, near = cpus.placement(panic = BootPanic()).cpu_for(slot = worker_slot_seed), length = 0x200000, align = 4096)
         let interrupts = discovery.interrupts
+        let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
+        let shared_serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let serial_irq_source = shared_serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
+        let serial_irq_queue = root_arena.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = hello_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let wake_strategy = discovery.cpus.wake_strategy(features = discovery.cpus.features)
         let pci = discovery.pci
         let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
         let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
@@ -37,7 +54,9 @@ image HelloSerial {
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
-                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                serial_irq4 = shared_serial_route.route,
+                serial_shared_irq4 = shared_serial_route,
+                serial_irq_source = serial_irq_source
             ),
             pci = ClaimedPciPlan(
                 edu_bar0 = edu.claim_mmio_bar(index = 0),
@@ -45,7 +64,12 @@ image HelloSerial {
                 ivshmem_rx_bar0 = ivshmem_rx.claim_mmio_bar(index = 0),
                 ivshmem_rx_msix = ivshmem_rx.claim_msix(table_bar_index = 1),
                 ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0)
-            )
+            ),
+            timer = timer,
+            serial_irq_queue = serial_irq_queue,
+            console_memory = hello_memory_seed,
+            worker_memory = worker_memory_seed,
+            wake_strategy = wake_strategy
         )
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = memory_region),
@@ -71,10 +95,9 @@ image HelloSerial {
         let hello_slot = hardware.executors.claim(
             identity = SlotIdentity(label = "hello.ivshmem")
         )
-        let hello_memory = hardware.memory.claim_executor_arena(
+        let hello_memory = hardware.hardware_plan.executor_memory(
             owner = hello_slot,
-            length = 0x200000,
-            align = 4096
+            memory = hardware.hardware_plan.console_memory
         )
         let serial_rx_topic = SerialRxTopic(
             identity = TopicIdentity(label = "hello.ivshmem.console.rx"),
@@ -109,7 +132,7 @@ image HelloSerial {
         )
         let hello = HelloWorld(
             slot = hello_slot,
-            loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)),
+            loop = EventSleepPolicy(strategy = hardware.hardware_plan.wake_strategy),
             memory = hello_memory,
             interrupts = ApicInterruptController(local_apic = hardware.hardware_plan.interrupts.local_apic),
             edu_msi = hardware.hardware_plan.pci.edu_msi,

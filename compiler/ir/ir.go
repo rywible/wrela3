@@ -430,6 +430,7 @@ type VcpuStart struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
@@ -443,12 +444,23 @@ type VcpuEnter struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
 }
 
 func (VcpuEnter) isOperation() {}
+
+type TimerInit struct {
+	Source    string
+	PeriodUS  uint64
+	Vector    uint8
+	Timer     Value
+	LocalApic Value
+}
+
+func (TimerInit) isOperation() {}
 
 type DataObject struct {
 	Symbol string
@@ -537,6 +549,7 @@ type VcpuStartPlan struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	SlotLabel     string
 	ExecutorType  Type
 	EntrySymbol   string
@@ -553,6 +566,8 @@ type TimerRoute struct {
 
 type InterruptQueueLayout struct {
 	Label        string
+	SourceLabel string
+	Vector      uint8
 	Owner        string
 	Capacity     uint64
 	PayloadSize  uint64
@@ -588,4 +603,5 @@ type Program struct {
 	InterruptQueues   []InterruptQueueLayout
 	VcpuStarts        []VcpuStartPlan
 	Timers            []TimerRoute
+	APICMode          string
 }
