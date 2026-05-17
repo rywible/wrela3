@@ -778,6 +778,8 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/acpi/madt.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/acpi/mcfg.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/discovery.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/placement.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_loop.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),

@@ -234,6 +234,14 @@ type PlacementDecisionNode struct {
 	Span      source.Span
 }
 
+type WakeTargetNode struct {
+	SlotLabel string
+	Owner     string
+	Strategy  string
+	Fallback  string
+	Span      source.Span
+}
+
 type ImageGraph struct {
 	Constructed             []ConstructedNode
 	DriverPaths             []DriverPathNode
@@ -256,6 +264,7 @@ type ImageGraph struct {
 	VcpuPlacements          []VcpuPlacementNode
 	PlacementConstraints    []PlacementConstraintNode
 	PlacementDecisions      []PlacementDecisionNode
+	WakeTargets             []WakeTargetNode
 	MemoryRoots             []MemoryRootNode
 	Arenas                  []ArenaNode
 	DMABuffers              []DMABufferNode

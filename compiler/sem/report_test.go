@@ -93,6 +93,21 @@ func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 	}
 }
 
+func TestImageReportIncludesWakePaths(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		WakeTargets: []WakeTargetNode{
+			{SlotLabel: "worker", Owner: "timer.periodic", Strategy: "sti_hlt", Fallback: "sti_hlt"},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if len(r.Runtime.WakePaths) != 1 || r.Runtime.WakePaths[0].SlotLabel != "worker" || r.Runtime.WakePaths[0].Fallback != "sti_hlt" {
+		t.Fatalf("wake paths missing from report: %#v", r.Runtime.WakePaths)
+	}
+	if len(r.AuthorityAudit.WakeTargets) != 1 || r.AuthorityAudit.WakeTargets[0].Owner != "timer.periodic" {
+		t.Fatalf("wake target audit missing from report: %#v", r.AuthorityAudit.WakeTargets)
+	}
+}
+
 func TestImageNameForReportDefaultsToImage(t *testing.T) {
 	reportImage := BuildImageReport(nil)
 	if reportImage.Image != "image" {

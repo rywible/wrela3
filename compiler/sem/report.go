@@ -38,6 +38,7 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 	}
 	appendDiscoveryFacts(&r, checked.ImageGraph)
 	appendExecutorMemoryAndLocality(&r, checked.ImageGraph)
+	appendWakePaths(&r, checked.ImageGraph)
 	appendRuntimeFacts(&r, checked.ImageGraph)
 
 	return r
@@ -126,6 +127,21 @@ func appendExecutorMemoryAndLocality(r *report.ImageReport, g ImageGraph) {
 			Required:  false,
 			Satisfied: placement.Satisfied,
 			Fallback:  placement.Fallback,
+		})
+	}
+}
+
+func appendWakePaths(r *report.ImageReport, g ImageGraph) {
+	for _, wake := range g.WakeTargets {
+		r.Runtime.WakePaths = append(r.Runtime.WakePaths, report.WakePathReport{
+			SlotLabel: wake.SlotLabel,
+			Strategy:  wake.Strategy,
+			Fallback:  wake.Fallback,
+		})
+		r.AuthorityAudit.WakeTargets = append(r.AuthorityAudit.WakeTargets, report.AuthorityRecord{
+			Kind:  "wake_target",
+			Label: wake.SlotLabel,
+			Owner: wake.Owner,
 		})
 	}
 }

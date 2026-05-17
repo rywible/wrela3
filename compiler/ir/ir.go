@@ -414,11 +414,17 @@ type TopicWaitGuard struct {
 }
 
 type TopicWait struct {
-	SlotLabel string
-	Policy    string
+	SlotLabel       string
+	Policy          string
+	UseMonitorMwait bool
+	Fallback        string
 }
 
 func (TopicWait) isOperation() {}
+
+type CpuFeatureFacts struct {
+	MonitorMwaitAvailable bool
+}
 
 type VcpuStart struct {
 	VcpuID        int

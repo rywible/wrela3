@@ -1490,7 +1490,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			}
 		}
 		if sem.IsLoopPolicyType(recvType) && e.Method == "wait" {
-			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name}
+			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name, Fallback: "sti_hlt"}
 			ops := append([]Operation{}, receiverOps...)
 			ops = append(ops, wait)
 			return receiver, ops, ctx.resolveType(moduleName, "void")

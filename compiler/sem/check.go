@@ -1294,6 +1294,15 @@ func (c *checker) checkTopicPolicies() {
 		if exec.LoopPolicy == "EventSleepPolicy" && exec.SlotLabel != "" && !c.graph.HasWakeSource(exec.SlotLabel) {
 			c.error(exec.Span, diag.SEM0044, "EventSleepPolicy executor "+exec.Type.Name+" has no wake source")
 		}
+		if exec.LoopPolicy == "EventSleepPolicy" && exec.SlotLabel != "" && c.graph.HasWakeSource(exec.SlotLabel) {
+			c.graph.WakeTargets = append(c.graph.WakeTargets, WakeTargetNode{
+				SlotLabel: exec.SlotLabel,
+				Owner:     exec.Type.Name,
+				Strategy:  "sti_hlt",
+				Fallback:  "sti_hlt",
+				Span:      exec.Span,
+			})
+		}
 		if exec.LoopPolicy != "NoGapRequiredPolicy" {
 			continue
 		}

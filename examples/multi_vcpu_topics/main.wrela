@@ -4,7 +4,7 @@ use { DelegatedHardware } from platform.uefi.transition
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { ClaimedPciPlanBuilder, CpuPlan, DriverMemory, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
-use { EventSleepPolicy } from machine.x86_64.executor_loop
+use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
 use { SerialConsolePath, SerialDriver, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
@@ -173,7 +173,7 @@ image MultiVcpuTopics {
 
         let producer = Producer(
             slot = producer_slot,
-            loop = EventSleepPolicy(),
+            loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)),
             memory = producer_memory,
             interrupts = ApicInterruptController(
                 local_apic = hardware.hardware_plan.interrupts.local_apic
@@ -185,7 +185,7 @@ image MultiVcpuTopics {
         )
         let consumer = Consumer(
             slot = consumer_slot,
-            loop = EventSleepPolicy(),
+            loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)),
             memory = consumer_memory,
             input = consumer_input,
             result_out = result_topic.publisher()

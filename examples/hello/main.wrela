@@ -5,7 +5,7 @@ use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
 use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
-use { EventSleepPolicy } from machine.x86_64.executor_loop
+use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
 use { Bytes } from machine.x86_64.executor_memory
 use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
@@ -105,7 +105,7 @@ image HelloSerial {
         )
         let hello = HelloWorld(
             slot = hello_slot,
-            loop = EventSleepPolicy(),
+            loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)),
             memory = hello_memory,
             interrupts = ApicInterruptController(local_apic = hardware.hardware_plan.interrupts.local_apic),
             edu_msi = hardware.hardware_plan.pci.edu_msi,

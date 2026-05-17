@@ -1,6 +1,7 @@
 module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { WakeStrategy } from machine.x86_64.executor_loop
 use { IoApicRoute, LocalApic } from machine.x86_64.interrupts
 use { PlacementPreferenceResult, PlacementTarget } from machine.x86_64.placement
 use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
@@ -105,6 +106,10 @@ data CpuLocalityFacts {
     known_mask: U64
 }
 
+data CpuFeatureFacts {
+    monitor_mwait_available: Bool
+}
+
 data CpuDiscovery {
     enabled: EnabledCpuSet
     locality0: CpuLocalityFacts
@@ -112,6 +117,13 @@ data CpuDiscovery {
 
     fn require_min_count(self, count: U64) -> CpuTopology {
         return self.enabled.require_count(count = count)
+    }
+
+    fn wake_strategy(self, features: CpuFeatureFacts) -> WakeStrategy {
+        if features.monitor_mwait_available {
+            return WakeStrategy(monitor_mwait = true, fallback_hlt = true)
+        }
+        return WakeStrategy(monitor_mwait = false, fallback_hlt = true)
     }
 }
 

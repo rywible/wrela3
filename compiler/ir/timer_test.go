@@ -8,7 +8,7 @@ use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { DelegatedHardware } from platform.uefi.transition
 use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder, SlotIdentity, ExecutorSlot } from machine.x86_64.cpu_state
-use { EventSleepPolicy } from machine.x86_64.executor_loop
+use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptVector } from machine.x86_64.interrupts
 use { TimerAuthority, TimerSource } from machine.x86_64.timer
@@ -33,7 +33,7 @@ image TimerImage {
         let worker_memory = hardware.memory.claim_executor_arena(owner = worker_slot, length = 0x200000, align = 4096)
         let timer = TimerAuthority(source = TimerSource(kind = 1), period_us = 1000, panic = BootPanic())
         let ticks = timer.subscribe(subscriber = worker_slot)
-        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), memory = worker_memory, ticks = ticks)
+        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)), memory = worker_memory, ticks = ticks)
         hardware.vcpu0.enter(executor = worker)
     }
 }

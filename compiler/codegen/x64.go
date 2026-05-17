@@ -653,9 +653,9 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				vv := v
 				emitTopicWaitIfArmed(e, frame, &vv)
 			case *ir.TopicWait:
-				emitHltWait(e)
+				emitTopicWait(e, *v)
 			case ir.TopicWait:
-				emitHltWait(e)
+				emitTopicWait(e, v)
 			case *ir.VcpuStart:
 				emitVcpuStart(e, v, frame, ctx)
 			case ir.VcpuStart:
@@ -1159,6 +1159,14 @@ func emitHltWait(e *Emitter) {
 	e.emit(0xF4)
 }
 
+func emitTopicWait(e *Emitter, wait ir.TopicWait) {
+	if wait.UseMonitorMwait {
+		emitMonitorMwait(e, asm.MustLookup("rax"))
+		return
+	}
+	emitHltWait(e)
+}
+
 func emitMonitorMwait(e *Emitter, addressReg asm.Reg) {
 	if addressReg.Name != "rax" {
 		e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
@@ -1196,6 +1204,12 @@ func compileMonitorMwaitUnitForTest() compiledUnit {
 	e := &Emitter{Labels: map[string]int{}}
 	emitMonitorMwait(e, asm.MustLookup("rax"))
 	return compiledUnit{Symbol: "monitor_mwait_test", Bytes: e.Code}
+}
+
+func compileTopicWaitUnitForTest(wait ir.TopicWait) compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	emitTopicWait(e, wait)
+	return compiledUnit{Symbol: "topic_wait_test", Bytes: e.Code}
 }
 
 func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
@@ -1547,9 +1561,9 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			vv := v
 			emitTopicWaitIfArmed(e, frame, &vv)
 		case *ir.TopicWait:
-			emitHltWait(e)
+			emitTopicWait(e, *v)
 		case ir.TopicWait:
-			emitHltWait(e)
+			emitTopicWait(e, v)
 		case *ir.VcpuStart:
 			emitVcpuStart(e, v, frame, e.ctx)
 		case ir.VcpuStart:
