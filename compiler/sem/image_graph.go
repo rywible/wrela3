@@ -45,11 +45,14 @@ type ExecutorSlotNode struct {
 }
 
 type TopicNode struct {
-	Label   string
-	Kind    string
-	Depth   uint64
-	Binding string
-	Span    source.Span
+	Label        string
+	Kind         string
+	Depth        uint64
+	PayloadType  string
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Binding      string
+	Span         source.Span
 }
 
 type TopicPublisherNode struct {

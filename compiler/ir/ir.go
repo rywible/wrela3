@@ -516,11 +516,15 @@ type InterruptBinding struct {
 }
 
 type TopicLayout struct {
-	Label       string
-	Kind        string
-	Depth       uint64
-	Producers   []string
-	Subscribers []string
+	Label        string
+	Kind         string
+	Depth        uint64
+	PayloadType  Type
+	PayloadSize  uint64
+	PayloadAlign uint64
+	SlotSize     uint64
+	Producers    []string
+	Subscribers  []string
 }
 
 type VcpuStartPlan struct {

@@ -503,6 +503,21 @@ func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 	}
 }
 
+func TestTypedTopicDataUsesPayloadSlotSize(t *testing.T) {
+	layout := planTopicData(ir.TopicLayout{
+		Label:        "timer.periodic",
+		Kind:         "timer_tick",
+		Depth:        64,
+		PayloadSize:  24,
+		PayloadAlign: 8,
+		Subscribers:  []string{"worker"},
+	})
+	wantSlot := uint64(64)
+	if got := layout.SlotSize; got != wantSlot {
+		t.Fatalf("slot size = %d, want %d", got, wantSlot)
+	}
+}
+
 func TestReliableTopicRequiresSubscriber(t *testing.T) {
 	_, diags := planTopicDataChecked(ir.TopicLayout{
 		Label: "commands",
@@ -517,9 +532,9 @@ func TestReliableTopicRequiresSubscriber(t *testing.T) {
 func TestTopicDataLayoutOrderIsDeterministic(t *testing.T) {
 	program := &ir.Program{
 		Topics: []ir.TopicLayout{
-			{Label: "zeta", Depth: 2},
-			{Label: "alpha", Depth: 2},
-			{Label: "middle", Depth: 2},
+			{Label: "zeta", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
+			{Label: "alpha", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
+			{Label: "middle", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
 		},
 	}
 
@@ -542,7 +557,7 @@ func TestTopicDataLayoutOrderIsDeterministic(t *testing.T) {
 func TestTopicDataObjectStartsAligned(t *testing.T) {
 	program := &ir.Program{
 		WritableData: []ir.DataObject{{Symbol: "prefix", Bytes: []byte{0xAA}}},
-		Topics:       []ir.TopicLayout{{Label: "sensor/value", Depth: 4}},
+		Topics:       []ir.TopicLayout{{Label: "sensor/value", Depth: 4, PayloadSize: 8, PayloadAlign: 8}},
 	}
 
 	img, ds := Compile(program)
@@ -565,7 +580,7 @@ func TestTopicDataObjectStartsAligned(t *testing.T) {
 }
 
 func TestTopicDataRejectsNonPowerOfTwoDepth(t *testing.T) {
-	_, ds := planTopicDataChecked(ir.TopicLayout{Label: "bad", Depth: 3})
+	_, ds := planTopicDataChecked(ir.TopicLayout{Label: "bad", Depth: 3, PayloadSize: 8, PayloadAlign: 8})
 
 	if !hasCode(ds, diag.SEM0046) {
 		t.Fatalf("planTopicDataChecked diagnostics = %#v, want SEM0046", ds)

@@ -367,6 +367,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_loop.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_payload.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),

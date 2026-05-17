@@ -43,6 +43,9 @@ type localOrigin struct {
 	TopicLabel          string
 	TopicKind           string
 	TopicDepth          uint64
+	TopicPayloadType    string
+	TopicPayloadSize    uint64
+	TopicPayloadAlign   uint64
 	PathLabel           string
 	PublishesInterrupts bool
 	EventType           string
@@ -1835,7 +1838,18 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		origin.ArenaBytes, _ = unsignedIntegerLiteral(constructorArg(expr, "length"))
 	}
 	if IsTopicType(typ) {
-		origin.TopicKind = topicKindForType(typ)
+		if payloadType, kind, ok := TopicPayloadTypeForTopic(typ); ok {
+			origin.TopicKind = kind
+			origin.TopicPayloadType = qualifiedTypeName(payloadType)
+			origin.TopicPayloadSize, origin.TopicPayloadAlign, _ = payloadLayoutFromType(payloadType)
+		} else {
+			origin.TopicKind = topicKindForType(typ)
+			if origin.TopicKind != "" {
+				origin.TopicPayloadType = "U64"
+				origin.TopicPayloadSize = 8
+				origin.TopicPayloadAlign = 8
+			}
+		}
 		origin.TopicDepth = 64
 		if identity := constructorArg(expr, "identity"); identity != nil {
 			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
@@ -1939,11 +1953,17 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
 		origin.TopicKind = receiverOrigin.TopicKind
+		origin.TopicPayloadType = receiverOrigin.TopicPayloadType
+		origin.TopicPayloadSize = receiverOrigin.TopicPayloadSize
+		origin.TopicPayloadAlign = receiverOrigin.TopicPayloadAlign
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case IsTopicType(receiverType) && expr.Method == "publisher":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
 		origin.TopicKind = receiverOrigin.TopicKind
+		origin.TopicPayloadType = receiverOrigin.TopicPayloadType
+		origin.TopicPayloadSize = receiverOrigin.TopicPayloadSize
+		origin.TopicPayloadAlign = receiverOrigin.TopicPayloadAlign
 	case receiverType.Module == "machine.x86_64.serial" && receiverType.Name == "SerialDriver" && expr.Method == "create_console_path" && valueType != nil && valueType.Kind == KindDriverPath:
 		origin.FieldBindings = map[string]string{}
 		if identity := namedArgExpr(expr.Args, "identity"); identity != nil {
@@ -2003,7 +2023,7 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case IsExecutorSlotType(origin.Type):
 		c.graph.ExecutorSlots = append(c.graph.ExecutorSlots, ExecutorSlotNode{Label: origin.SlotLabel, Binding: name, Span: span})
 	case IsTopicType(origin.Type):
-		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Depth: origin.TopicDepth, Binding: name, Span: span})
+		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Depth: origin.TopicDepth, PayloadType: origin.TopicPayloadType, PayloadSize: origin.TopicPayloadSize, PayloadAlign: origin.TopicPayloadAlign, Binding: name, Span: span})
 	case IsTopicPublisherType(origin.Type):
 		c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{TopicLabel: origin.TopicLabel, Binding: name, Span: span})
 	case IsTopicSubscriptionType(origin.Type):
@@ -2356,6 +2376,8 @@ func topicKindForType(typ *Type) string {
 		return "gap_u64"
 	case "machine.x86_64.topic_u64.U64ReliableTopic":
 		return "reliable_u64"
+	case "machine.x86_64.topic_payload.TimerTickTopic":
+		return "timer_tick"
 	case "machine.x86_64.serial.SerialRxTopic":
 		return "serial_rx"
 	case "machine.x86_64.edu.EduInterruptTopic":

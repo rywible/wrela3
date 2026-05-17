@@ -894,7 +894,14 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		return
 	}
 	for _, topic := range ctx.checked.ImageGraph.Topics {
-		layout := TopicLayout{Label: topic.Label, Kind: topic.Kind, Depth: topic.Depth}
+		layout := TopicLayout{
+			Label:        topic.Label,
+			Kind:         topic.Kind,
+			Depth:        topic.Depth,
+			PayloadType:  irTypeFromQualifiedName(topic.PayloadType),
+			PayloadSize:  topic.PayloadSize,
+			PayloadAlign: topic.PayloadAlign,
+		}
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
 			if sub.TopicLabel == topic.Label {
 				layout.Subscribers = append(layout.Subscribers, sub.SubscriberLabel)
@@ -2067,6 +2074,21 @@ func pathModule(pathType string) string {
 		return ""
 	}
 	return strings.Join(parts[:len(parts)-1], ".")
+}
+
+func irTypeFromQualifiedName(qualified string) Type {
+	parts := strings.Split(qualified, ".")
+	if len(parts) == 1 {
+		return Type{Name: qualified, Kind: TypeKindData}
+	}
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return Type{}
+	}
+	return Type{
+		Module: strings.Join(parts[:len(parts)-1], "."),
+		Name:   parts[len(parts)-1],
+		Kind:   TypeKindData,
+	}
 }
 
 func pathName(pathType string) string {

@@ -26,6 +26,7 @@ type topicDataLayout struct {
 	HeadOffset             uint64
 	ProducerWaitlineOffset uint64
 	SlotsOffset            uint64
+	SlotSize               uint64
 	Producers              []string
 	Subscribers            []topicDataSubscriberLayout
 	TotalSize              uint64
@@ -36,6 +37,22 @@ func alignUp64(value uint64) uint64 {
 		return value
 	}
 	return value + cacheLineSize - value%cacheLineSize
+}
+
+func topicSlotSize(payloadSize uint64) uint64 {
+	return alignUp64(8 + payloadSize)
+}
+
+func defaultTopicPayloadSize(kind string) (size uint64, align uint64, ok bool) {
+	switch kind {
+	case "gap_u64", "reliable_u64", "serial_rx", "edu_interrupt", "ivshmem_doorbell":
+		return 8, 8, true
+	case "timer_tick":
+		// Timer topics are expected to carry a typed payload, which must be declared.
+		return 0, 0, false
+	default:
+		return 0, 0, false
+	}
 }
 
 func planTopicData(topic ir.TopicLayout) topicDataLayout {
@@ -58,12 +75,30 @@ func planTopicData(topic ir.TopicLayout) topicDataLayout {
 		})
 		next += 2 * cacheLineSize
 	}
+	layout.SlotSize = topicSlotSize(topic.PayloadSize)
 	layout.SlotsOffset = alignUp64(next)
-	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*cacheLineSize)
+	layout.TotalSize = alignUp64(layout.SlotsOffset + topic.Depth*layout.SlotSize)
 	return layout
 }
 
 func planTopicDataChecked(topic ir.TopicLayout) (topicDataLayout, []diag.Diagnostic) {
+	payloadSize := topic.PayloadSize
+	payloadAlign := topic.PayloadAlign
+	if payloadSize == 0 || payloadAlign == 0 {
+		if defaultSize, defaultAlign, ok := defaultTopicPayloadSize(topic.Kind); ok {
+			payloadSize = defaultSize
+			payloadAlign = defaultAlign
+		}
+	}
+	if payloadSize == 0 || payloadAlign == 0 {
+		return topicDataLayout{}, []diag.Diagnostic{{
+			Phase:   diagnosticPhase,
+			Code:    diag.SEM0066,
+			Message: "topic payload layout is not statically known: " + topic.Label,
+		}}
+	}
+	topic.PayloadSize = payloadSize
+	topic.PayloadAlign = payloadAlign
 	if topic.Depth == 0 || topic.Depth&(topic.Depth-1) != 0 {
 		return topicDataLayout{}, []diag.Diagnostic{{
 			Phase:   diagnosticPhase,
@@ -78,7 +113,9 @@ func planTopicDataChecked(topic ir.TopicLayout) (topicDataLayout, []diag.Diagnos
 			Message: "reliable topic requires at least one subscriber: " + topic.Label,
 		}}
 	}
-	return planTopicData(topic), nil
+	layout := planTopicData(topic)
+	layout.SlotSize = topicSlotSize(topic.PayloadSize)
+	return layout, nil
 }
 
 func orderedTopicDataLayouts(program *ir.Program) ([]topicDataLayout, []diag.Diagnostic) {
