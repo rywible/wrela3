@@ -9,6 +9,9 @@ import (
 )
 
 func arenaRangesOverlap(a, b ArenaNode) bool {
+	if a.Kind != "child_arena" || b.Kind != "child_arena" {
+		return false
+	}
 	if a.Parent == "" || b.Parent == "" || a.Parent != b.Parent {
 		return false
 	}

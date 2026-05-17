@@ -7,6 +7,7 @@ use { EduInterruptSubscription, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
 use { MsiCapability } from machine.x86_64.pci
 use { SerialConsolePath, SerialRxSubscription } from machine.x86_64.serial
+use { TimerTickSubscription } from machine.x86_64.topic_payload
 
 data RunScratch {
     hello: Bytes
@@ -22,11 +23,16 @@ executor HelloWorld {
     serial_rx: SerialRxSubscription
     edu_path: EduMsiPath
     edu_interrupts: EduInterruptSubscription
+    worker_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick {
             let scratch = tick.place(RunScratch(hello = self.memory.bytes(value = "hello from wrela\n")))
             self.serial_path.write(scratch.hello)
+            let first_tick = self.worker_ticks.try_next()
+            if first_tick.has_message {
+                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            }
         }
         self.interrupts.initialize_for_com1_receive()
         self.edu_msi.route(vector = InterruptVector(value = 0x41), target = self.interrupts.local_apic)
@@ -46,9 +52,14 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
                 self.edu_path.ack_completed(event = edu_event.message)
             }
+            let tick_event = self.worker_ticks.try_next()
+            if tick_event.has_message {
+                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            }
 
             self.serial_rx.arm_wait()
             self.edu_interrupts.arm_wait()
+            self.worker_ticks.arm_wait()
 
             let serial_retry = self.serial_rx.try_next()
             if serial_retry.has_message {
@@ -62,11 +73,19 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
                 self.edu_path.ack_completed(event = edu_retry.message)
             }
+            let tick_retry = self.worker_ticks.try_next()
+            if tick_retry.has_message {
+                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            }
             if serial_retry.has_message == false {
                 if edu_retry.has_message == false {
-                    if self.serial_rx.is_wait_armed() {
-                        if self.edu_interrupts.is_wait_armed() {
-                            self.loop.wait()
+                    if tick_retry.has_message == false {
+                        if self.serial_rx.is_wait_armed() {
+                            if self.edu_interrupts.is_wait_armed() {
+                                if self.worker_ticks.is_wait_armed() {
+                                    self.loop.wait()
+                                }
+                            }
                         }
                     }
                 }

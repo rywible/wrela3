@@ -99,7 +99,7 @@ func TestHelloQEMU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
 	}
-	for _, want := range []string{"hello from wrela", "serial interrupt: !", "msi interrupt"} {
+	for _, want := range []string{"hello from wrela", "timer tick", "serial interrupt: !", "msi interrupt"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("serial output missing %q:\n%s", want, out)
 		}

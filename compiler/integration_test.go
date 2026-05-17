@@ -131,6 +131,33 @@ func TestHelloUsesHardwareDiscoverySource(t *testing.T) {
 	}
 }
 
+func TestHelloUsesProductionSubstrate(t *testing.T) {
+	main := readRepoFile(t, "examples/hello/main.wrela")
+	for _, want := range []string{
+		"require_usable_region(",
+		"create_arena(",
+		"executor_memory(",
+		"executor_memory_near(",
+		"require_separate_physical_cores(",
+		"require_periodic(period_us = 1000)",
+		"route_shared_irq(",
+	} {
+		if !strings.Contains(main, want) {
+			t.Fatalf("hello main missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"MutableBytes(address = 0x",
+		"arena_base = 0x",
+		"two-vCPU",
+		"q35",
+	} {
+		if strings.Contains(main, forbidden) {
+			t.Fatalf("hello main contains forbidden shortcut %q", forbidden)
+		}
+	}
+}
+
 func TestNoLegacyQ35DiscoveryAssumptions(t *testing.T) {
 	forbidden := []string{
 		"Q35" + "PciInterruptConfigurator",

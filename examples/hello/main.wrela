@@ -4,13 +4,16 @@ use { HelloWorld } from examples.hello.program
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
-use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { ClaimedPciPlan, CpuPlan, DriverMemory, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
-use { Bytes } from machine.x86_64.executor_memory
+use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
-use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
+use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { TimerAuthority, TimerSource } from machine.x86_64.timer
 use { TopicIdentity } from machine.x86_64.topic_u64
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 image HelloSerial {
     transitions {
@@ -25,9 +28,41 @@ image HelloSerial {
             length = 0x600000,
             align = 4096
         )
+        let root_arena = root_region.create_arena(
+            identity = ArenaIdentity(label = "hello.root"),
+            policy = ArenaPolicy(evict_cache_by_default = true)
+        )
         let memory_region = root_region.bytes()
         let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let placement = cpus.placement(panic = BootPanic())
+        placement.require_separate_physical_cores(a = ExecutorSlot(id = 0), b = ExecutorSlot(id = 1))
+        let console_memory_seed = root_arena.executor_memory(
+            owner = ExecutorSlot(id = 0),
+            length = 0x200000,
+            align = 4096
+        )
+        let worker_memory_seed = root_arena.executor_memory_near(
+            owner = ExecutorSlot(id = 1),
+            near = placement.cpu_for(slot = ExecutorSlot(id = 1)),
+            length = 0x200000,
+            align = 4096
+        )
+        let serial_irq_queue = root_arena.interrupt_queue(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            capacity = 64,
+            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
+            overflow = InterruptOverflowPolicy(mode = 0)
+        )
         let interrupts = discovery.interrupts
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let shared_serial_route = interrupts.route_shared_irq(
+            irq = 4,
+            vector = InterruptVector(value = 0x40)
+        )
+        let serial_irq_source = shared_serial_route.claim_source(
+            identity = InterruptSourceIdentity(label = "serial.rx")
+        )
         let pci = discovery.pci
         let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
         let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
@@ -36,7 +71,7 @@ image HelloSerial {
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
-                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                serial_irq4 = shared_serial_route.route
             ),
             pci = ClaimedPciPlan(
                 edu_bar0 = edu.claim_mmio_bar(index = 0),
@@ -98,6 +133,8 @@ image HelloSerial {
         )
         let serial_rx = serial_rx_topic.subscribe(subscriber = hello_slot)
         let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = hello_slot)
+        let timer = TimerAuthority(source = TimerSource(kind = 1), period_us = 1000, panic = BootPanic())
+        let worker_ticks = timer.subscribe(subscriber = hello_slot)
         let edu_path = EduMsiPath(
             identity = PathIdentity(label = "hello.edu"),
             mmio = hardware.hardware_plan.pci.edu_bar0,
@@ -112,7 +149,8 @@ image HelloSerial {
             serial_path = serial_path,
             serial_rx = serial_rx,
             edu_path = edu_path,
-            edu_interrupts = edu_interrupts
+            edu_interrupts = edu_interrupts,
+            worker_ticks = worker_ticks
         )
         hardware.vcpu0.enter(executor = hello)
     }
