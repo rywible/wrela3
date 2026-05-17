@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ir"
@@ -33,6 +34,24 @@ func TestInterruptQueueDropNewestAndSetFlagWakesOwnerOnOverflow(t *testing.T) {
 	unit := compileInterruptQueuePushWithContextForTest(q, compileContext{SlotVcpu: map[string]int{"console": 1}})
 	if got := countDataRelocs(unit, "_wrela_vcpu1_apic_id_command"); got < 2 {
 		t.Fatalf("drop-newest-and-set-flag must wake on overflow and after successful enqueue, got %d data relocs: %#v", got, unit.DataReloc)
+	}
+}
+
+func TestInterruptQueuePublishesPayloadBeforeTail(t *testing.T) {
+	q := ir.InterruptQueueLayout{Label: "irq.serial.rx", Capacity: 4, PayloadSize: 8, PayloadAlign: 8, Vector: 0x41, Overflow: "drop_newest"}
+	unit := compileInterruptQueuePushForTest(q)
+
+	payloadStore := []byte{0x45, 0x88, 0x11}
+	tailStore := []byte{0x49, 0x89, 0x50, 0x08}
+	fence := []byte{0x0F, 0xAE, 0xF0}
+	payloadAt := bytes.Index(unit.Bytes, payloadStore)
+	fenceAt := bytes.Index(unit.Bytes, fence)
+	tailAt := bytes.Index(unit.Bytes, tailStore)
+	if payloadAt < 0 || fenceAt < 0 || tailAt < 0 {
+		t.Fatalf("queue push missing payload store/fence/tail store: payload=%d fence=%d tail=%d code=%#x", payloadAt, fenceAt, tailAt, unit.Bytes)
+	}
+	if !(payloadAt < fenceAt && fenceAt < tailAt) {
+		t.Fatalf("queue push must publish payload before fenced tail store: payload=%d fence=%d tail=%d code=%#x", payloadAt, fenceAt, tailAt, unit.Bytes)
 	}
 }
 

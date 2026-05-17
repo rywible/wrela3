@@ -58,6 +58,9 @@ data RootArena {
         if aligned_offset > self.region.length - length {
             self.region.panic.fail(code = 0xAC070001)
         }
+        if aligned_offset < self.next_offset {
+            self.region.panic.fail(code = 0xAC070001)
+        }
         let end = aligned_offset + length
         if end > self.region.length {
             self.region.panic.fail(code = 0xAC070001)
@@ -139,6 +142,9 @@ data ChildArena {
             self.root.region.panic.fail(code = 0xAC070001)
         }
         if aligned_offset > self.length - length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset < self.next_offset {
             self.root.region.panic.fail(code = 0xAC070001)
         }
         let end = aligned_offset + length

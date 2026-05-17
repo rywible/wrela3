@@ -182,9 +182,13 @@ func (c *checker) nextImplicitArenaOffset(parentBase uint64, parent string, alig
 func (c *checker) recordRootArenaExecutorMemoryNear(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
 	c.recordRootArenaExecutorMemory(moduleName, expr, receiverOrigin, scope)
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	near := namedArgExpr(expr.Args, "near")
+	if call, ok := near.(*ast.CallExpr); ok && call.Method == "cpu_for" && qualifiedTypeName(c.exprStaticType(moduleName, call.Receiver, scope)) == "machine.x86_64.cpu_state.CpuPlacementPlan" {
+		return
+	}
 	satisfied := false
 	fallback := "unknown_locality"
-	if knownPlacementTarget(namedArgExpr(expr.Args, "near")) {
+	if knownPlacementTarget(near) {
 		satisfied = true
 		fallback = ""
 	}

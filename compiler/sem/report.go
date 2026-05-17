@@ -147,6 +147,12 @@ func appendPCIClaimReport(r *report.ImageReport, claim HardwareClaimNode) {
 }
 
 func appendRuntimeFacts(r *report.ImageReport, g ImageGraph, resolveOwner func(string) string) {
+	for _, placement := range g.VcpuPlacements {
+		r.Runtime.Executors = append(r.Runtime.Executors, report.ExecutorReport{
+			SlotLabel: resolveOwner(placement.SlotLabel),
+			VcpuID:    uint64(placement.VcpuID),
+		})
+	}
 	for _, queue := range g.InterruptQueues {
 		r.Runtime.InterruptQueues = append(r.Runtime.InterruptQueues, report.InterruptQueueReport{
 			Label:    queue.Label,

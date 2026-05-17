@@ -177,6 +177,24 @@ func TestHelloWakeStrategyDefaultsToStiHlt(t *testing.T) {
 	}
 }
 
+func TestHelloReportMarksRequiredPlacementSatisfied(t *testing.T) {
+	checked := checkProgramAt(t, "examples/hello/main.wrela")
+	reportImage := sem.BuildImageReport(checked)
+	for _, placement := range reportImage.Runtime.Placement {
+		if placement.Kind != "separate_physical_cores" {
+			continue
+		}
+		if !placement.Required || placement.SubjectA != "console" || placement.SubjectB != "worker" {
+			t.Fatalf("unexpected required placement row: %#v", placement)
+		}
+		if !placement.Satisfied || placement.Fallback != "" {
+			t.Fatalf("required placement row should be satisfied without fallback: %#v", placement)
+		}
+		return
+	}
+	t.Fatalf("missing separate_physical_cores placement row: %#v", reportImage.Runtime.Placement)
+}
+
 func TestNoLegacyQ35DiscoveryAssumptions(t *testing.T) {
 	forbidden := []string{
 		"Q35" + "PciInterruptConfigurator",
@@ -364,7 +382,7 @@ func TestHelloIRCallGraphReachesSerialWrite(t *testing.T) {
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_write",
 	)
 	assertFunctionCalls(t, program,
-		program.Entry.OwnedPhaseSymbol,
+		"_wrela_method_machine_x86_64_serial_SerialDriver_create_console_path",
 		"_wrela_method_machine_x86_64_serial_SerialConsolePath_enable_receive_interrupts",
 	)
 	assertFunctionCalls(t, program,
@@ -411,6 +429,53 @@ func TestHelloSourceUsesArenaFrames(t *testing.T) {
 	}
 }
 
+func TestSerialRXEnablementIsCentralized(t *testing.T) {
+	serialSource := readRepoFile(t, "wrela/machine/x86_64/serial.wrela")
+	if !strings.Contains(serialSource, "let console_path = SerialConsolePath(") {
+		t.Fatalf("serial source should construct SerialConsolePath in create_console_path")
+	}
+	if !strings.Contains(serialSource, "console_path.enable_receive_interrupts()") {
+		t.Fatalf("serial source should enable RX interrupts in create_console_path")
+	}
+
+	for _, sourcePath := range []string{
+		"examples/hello/main.wrela",
+		"tests/e2e/fixtures/production_substrate/main.wrela",
+	} {
+		source := readRepoFile(t, sourcePath)
+		if strings.Contains(source, ".enable_receive_interrupts()") {
+			t.Fatalf("%s must not call enable_receive_interrupts directly", sourcePath)
+		}
+		if !strings.Contains(source, "create_console_path(") {
+			t.Fatalf("%s should construct serial console via SerialDriver.create_console_path", sourcePath)
+		}
+	}
+
+	program := compileHelloProgram(t)
+	if fn := findIRFunction(program, "_wrela_method_machine_x86_64_serial_SerialDriver_create_console_path"); fn == nil {
+		t.Fatalf("missing IR function _wrela_method_machine_x86_64_serial_SerialDriver_create_console_path")
+	}
+	assertFunctionCalls(t, program,
+		"_wrela_method_machine_x86_64_serial_SerialDriver_create_console_path",
+		"_wrela_method_machine_x86_64_serial_SerialConsolePath_enable_receive_interrupts",
+	)
+
+	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
+	if fn == nil {
+		t.Fatalf("missing IR function %s", program.Entry.OwnedPhaseSymbol)
+	}
+	construct, ok := findConstructByType(*fn, "machine.x86_64.serial", "SerialConsolePath")
+	if !ok {
+		t.Fatalf("%s missing inlined SerialConsolePath construction", fn.Symbol)
+	}
+	fields := constructFieldNames(construct)
+	for _, field := range []string{"identity", "registers", "route", "rx"} {
+		if !fields[field] {
+			t.Fatalf("inlined SerialConsolePath construction missing %q field: %#v", field, construct.Fields)
+		}
+	}
+}
+
 func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 	forbidden := []string{
 		"ExecutorPlacement",
@@ -452,6 +517,68 @@ func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 			t.Fatalf("walk %s: %v", root, err)
 		}
 	}
+}
+
+func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
+	source := readRepoFile(t, "wrela/platform/hardware/memory.wrela")
+	if !strings.Contains(source, "data RootArena") || !strings.Contains(source, "data ChildArena") {
+		t.Fatalf("memory source should declare RootArena and ChildArena as data records")
+	}
+	if strings.Contains(source, "class RootArena") || strings.Contains(source, "class ChildArena") {
+		t.Fatalf("RootArena and ChildArena should not use class return handles")
+	}
+
+	for _, decl := range []struct {
+		typeName string
+		method   string
+	}{
+		{typeName: "RootArena", method: "child_at"},
+		{typeName: "ChildArena", method: "child_at"},
+	} {
+		methodSource := methodSourceForTypeFromDataDecl(source, decl.typeName, decl.method)
+		if methodSource == "" {
+			t.Fatalf("missing %s.%s method", decl.typeName, decl.method)
+		}
+		if !strings.Contains(methodSource, "if aligned_offset < self.next_offset") {
+			t.Fatalf("%s.%s must reject placements behind the monotonic cursor", decl.typeName, decl.method)
+		}
+		if !strings.Contains(methodSource, "self.next_offset = end") {
+			t.Fatalf("%s.%s must reserve explicit placements in the runtime cursor", decl.typeName, decl.method)
+		}
+	}
+}
+
+func methodSourceForTypeFromDataDecl(sourceText, typeName, methodName string) string {
+	typeHeader := "data " + typeName
+	typeStart := strings.Index(sourceText, typeHeader)
+	if typeStart < 0 {
+		return ""
+	}
+	methodNameMarker := "fn " + methodName + "("
+	methodStart := strings.Index(sourceText[typeStart:], methodNameMarker)
+	if methodStart < 0 {
+		return ""
+	}
+	methodStart += typeStart
+	bodyStart := strings.Index(sourceText[methodStart:], "{")
+	if bodyStart < 0 {
+		return ""
+	}
+	bodyStart += methodStart
+
+	depth := 0
+	for i := bodyStart; i < len(sourceText); i++ {
+		switch sourceText[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return sourceText[methodStart : i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func TestEduInterruptReceiverAcknowledgesBeforeTopicDelivery(t *testing.T) {
@@ -520,6 +647,58 @@ func functionCalls(fn ir.Function) map[string]bool {
 		collectCalls(block.Ops, out)
 	}
 	return out
+}
+
+func findConstructByType(fn ir.Function, moduleName string, typeName string) (*ir.Construct, bool) {
+	for _, block := range fn.Blocks {
+		if construct, ok := constructInList(block.Ops, moduleName, typeName); ok {
+			return construct, true
+		}
+	}
+	return nil, false
+}
+
+func constructInList(ops []ir.Operation, moduleName string, typeName string) (*ir.Construct, bool) {
+	for _, op := range ops {
+		if construct, ok := op.(*ir.Construct); ok && construct.Type.Module == moduleName && construct.Type.Name == typeName {
+			return construct, true
+		}
+		switch v := op.(type) {
+		case *ir.If:
+			if construct, ok := constructInList(v.ConditionOps, moduleName, typeName); ok {
+				return construct, true
+			}
+			if construct, ok := constructInList(v.Then, moduleName, typeName); ok {
+				return construct, true
+			}
+			if construct, ok := constructInList(v.Else, moduleName, typeName); ok {
+				return construct, true
+			}
+		case *ir.While:
+			if construct, ok := constructInList(v.ConditionOps, moduleName, typeName); ok {
+				return construct, true
+			}
+			if construct, ok := constructInList(v.Body, moduleName, typeName); ok {
+				return construct, true
+			}
+		case *ir.ForBytes:
+			if construct, ok := constructInList(v.IterableOps, moduleName, typeName); ok {
+				return construct, true
+			}
+			if construct, ok := constructInList(v.Body, moduleName, typeName); ok {
+				return construct, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func constructFieldNames(construct *ir.Construct) map[string]bool {
+	fields := map[string]bool{}
+	for _, field := range construct.Fields {
+		fields[field.Name] = true
+	}
+	return fields
 }
 
 func collectCalls(ops []ir.Operation, out map[string]bool) {

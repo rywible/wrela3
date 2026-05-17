@@ -43,10 +43,33 @@ func TestTopicWaitUsesMonitorMwaitWhenSelected(t *testing.T) {
 	for _, want := range [][]byte{
 		{0x0F, 0x01, 0xC8},
 		{0x0F, 0x01, 0xC9},
+		{0xFB, 0xF4},
 	} {
 		if !bytes.Contains(unit.Bytes, want) {
 			t.Fatalf("monitor/mwait wait missing %x in %x", want, unit.Bytes)
 		}
+	}
+	if !hasDataReloc(unit, monitorMwaitWaitlineSymbol("worker")) {
+		t.Fatalf("monitor/mwait wait must monitor concrete waitline, data relocs = %#v", unit.DataReloc)
+	}
+}
+
+func TestCompileIncludesMonitorMwaitWaitlineDataForTopicWait(t *testing.T) {
+	program := &ir.Program{
+		Functions: []ir.Function{{
+			Symbol: "wait_worker",
+			Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+				ir.TopicWait{SlotLabel: "worker", UseMonitorMwait: true, Fallback: "sti_hlt"},
+				&ir.Return{},
+			}}},
+		}},
+	}
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if _, ok := image.Symbols[monitorMwaitWaitlineSymbol("worker")]; !ok {
+		t.Fatalf("Compile() missing monitor/mwait waitline symbol: %#v", image.Symbols)
 	}
 }
 

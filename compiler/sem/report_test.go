@@ -83,6 +83,29 @@ func TestImageReportResolvesSeedSlotOwnersToClaimedLabels(t *testing.T) {
 	}
 }
 
+func TestImageReportIncludesVcpuPlacementsAsExecutors(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		ExecutorSlots: []ExecutorSlotNode{
+			{Label: "console"},
+			{Label: "worker"},
+		},
+		VcpuPlacements: []VcpuPlacementNode{
+			{VcpuID: 0, SlotLabel: "executor_slot.0"},
+			{VcpuID: 1, SlotLabel: "executor_slot.1"},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if len(r.Runtime.Executors) != 2 {
+		t.Fatalf("executors = %#v", r.Runtime.Executors)
+	}
+	if r.Runtime.Executors[0].SlotLabel != "console" || r.Runtime.Executors[0].VcpuID != 0 {
+		t.Fatalf("executor[0] = %#v", r.Runtime.Executors[0])
+	}
+	if r.Runtime.Executors[1].SlotLabel != "worker" || r.Runtime.Executors[1].VcpuID != 1 {
+		t.Fatalf("executor[1] = %#v", r.Runtime.Executors[1])
+	}
+}
+
 func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 	checked := &CheckedProgram{ImageGraph: ImageGraph{
 		HardwareClaims: []HardwareClaimNode{

@@ -87,6 +87,7 @@ func emitInterruptQueuePushPayload(e *Emitter, q ir.InterruptQueueLayout, payloa
 	emitInterruptQueueFullPolicy(e, q, base, head, tail, enqueue, done)
 	e.bindLabel(enqueue)
 	emitInterruptQueueStoreEntry(e, q, base, tail, capacity, payloadSymbol, payloadSize)
+	emitMfence(e)
 	emitAddImm(e, tail, 1)
 	emitStoreMemFromReg(e, base, interruptQueueTailOffset, tail, 64)
 	emitMfence(e)

@@ -11,7 +11,7 @@ use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder, SlotIdentity } from machine.x86_64.cpu_state
 use { CpuFeatureFacts } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { EventSleepPolicy, WakeStrategy } from machine.x86_64.executor_loop
+use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
@@ -46,7 +46,7 @@ image TimerImage {
         let timer = hardware.hardware_plan.timer
         timer.initialize(local_apic = hardware.hardware_plan.interrupts.local_apic)
         let ticks = timer.subscribe(subscriber = worker_slot)
-        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = true, fallback_hlt = true)), memory = worker_memory, ticks = ticks)
+        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(strategy = hardware.hardware_plan.wake_strategy), memory = worker_memory, ticks = ticks)
         hardware.vcpu0.enter(executor = worker)
     }
 }
@@ -74,7 +74,7 @@ func TestTimerSubscribeLowersToTimerTopic(t *testing.T) {
 		t.Fatal("missing lowered worker")
 	}
 	wait, ok := functionOp[TopicWait](*worker)
-	if !ok || wait.Fallback != "sti_hlt" {
-		t.Fatalf("worker wait = %#v, want topic wait with hlt fallback", wait)
+	if !ok || !wait.UseMonitorMwait || wait.Fallback != "sti_hlt" {
+		t.Fatalf("worker wait = %#v, want monitor/mwait topic wait with hlt fallback", wait)
 	}
 }

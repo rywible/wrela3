@@ -190,6 +190,9 @@ class CpuPlacementPlan {
     panic: BootPanic
 
     fn require_separate_physical_cores(self, a: ExecutorSlot, b: ExecutorSlot) {
+        if a.id == b.id {
+            self.panic.fail(code = 0xAC040101)
+        }
         if self.topology.can_prove_separate_cores() == false {
             self.panic.fail(code = 0xAC040101)
         }

@@ -86,8 +86,39 @@ func (c *checker) recordPlacementConstraint(moduleName string, expr *ast.CallExp
 		A:         a,
 		B:         b,
 		Required:  required,
-		Satisfied: required,
+		Satisfied: false,
 		Fallback:  fallback,
 		Span:      expr.SpanV,
 	})
+}
+
+func (c *checker) finalizePlacementConstraints() {
+	slotVCPU := map[string]int{}
+	for _, placement := range c.graph.VcpuPlacements {
+		if placement.SlotLabel == "" {
+			continue
+		}
+		slotVCPU[placement.SlotLabel] = placement.VcpuID
+	}
+	for i := range c.graph.PlacementConstraints {
+		constraint := &c.graph.PlacementConstraints[i]
+		constraint.A = c.resolveExecutorSeedLabel(constraint.A)
+		constraint.B = c.resolveExecutorSeedLabel(constraint.B)
+		constraint.Satisfied = placementConstraintSatisfied(*constraint, slotVCPU)
+		if constraint.Required && !constraint.Satisfied && constraint.Fallback == "" {
+			constraint.Fallback = "boot_fatal"
+		}
+	}
+}
+
+func placementConstraintSatisfied(constraint PlacementConstraintNode, slotVCPU map[string]int) bool {
+	if constraint.Kind != "separate_physical_cores" || !constraint.Required {
+		return false
+	}
+	if constraint.A == "" || constraint.B == "" || constraint.A == constraint.B {
+		return false
+	}
+	aVCPU, aOK := slotVCPU[constraint.A]
+	bVCPU, bOK := slotVCPU[constraint.B]
+	return aOK && bOK && aVCPU != bVCPU
 }

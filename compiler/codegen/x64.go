@@ -3,6 +3,7 @@ package codegen
 import (
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -463,7 +464,7 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	emitRegRegMove(e, slot, seq)
 	emitMovImmToReg(e, mask, int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, mask)
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, mask, layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
@@ -566,10 +567,60 @@ func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnost
 	}
 	writable = append(writable, topicObjects...)
 	writable = append(writable, localApicBaseDataObject())
+	writable = append(writable, monitorMwaitWaitlineDataObjects(program)...)
 	writable = append(writable, vcpuStartupData(program)...)
 	writable = append(writable, interruptRuntimeData(program)...)
 	section, offsets := buildDataSection(".data", writable, 0xC0000040)
 	return section, offsets, nil
+}
+
+func monitorMwaitWaitlineSymbol(slot string) string {
+	return "_wrela_monitor_mwait_waitline_" + sanitizeSymbol(slot)
+}
+
+func monitorMwaitWaitlineDataObjects(program *ir.Program) []ir.DataObject {
+	if program == nil {
+		return nil
+	}
+	labels := map[string]bool{}
+	for _, start := range program.VcpuStarts {
+		if start.SlotLabel != "" {
+			labels[start.SlotLabel] = true
+		}
+	}
+	for _, fn := range program.Functions {
+		for _, block := range fn.Blocks {
+			for _, op := range block.Ops {
+				switch wait := op.(type) {
+				case ir.TopicWait:
+					if wait.UseMonitorMwait && wait.SlotLabel != "" {
+						labels[wait.SlotLabel] = true
+					}
+				case *ir.TopicWait:
+					if wait != nil && wait.UseMonitorMwait && wait.SlotLabel != "" {
+						labels[wait.SlotLabel] = true
+					}
+				}
+			}
+		}
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0, len(labels))
+	for label := range labels {
+		ordered = append(ordered, label)
+	}
+	sort.Strings(ordered)
+	out := make([]ir.DataObject, 0, len(ordered))
+	for _, label := range ordered {
+		out = append(out, ir.DataObject{
+			Symbol: monitorMwaitWaitlineSymbol(label),
+			Bytes:  make([]byte, 8),
+			Align:  8,
+		})
+	}
+	return out
 }
 
 func interruptRuntimeData(program *ir.Program) []ir.DataObject {
@@ -1230,10 +1281,14 @@ func emitStiHltWait(e *Emitter) {
 
 func emitTopicWait(e *Emitter, wait ir.TopicWait) {
 	if wait.UseMonitorMwait {
-		emitMonitorMwait(e, asm.MustLookup("rax"))
+		emitMonitorMwaitWait(e, wait)
 		return
 	}
-	if wait.Fallback == "sti_hlt" {
+	emitFallbackWait(e, wait.Fallback)
+}
+
+func emitFallbackWait(e *Emitter, fallback string) {
+	if fallback == "sti_hlt" {
 		emitStiHltWait(e)
 		return
 	}
@@ -1241,30 +1296,53 @@ func emitTopicWait(e *Emitter, wait ir.TopicWait) {
 }
 
 func emitMonitorMwait(e *Emitter, addressReg asm.Reg) {
+	emitMonitorInstruction(e, addressReg)
+	emitMwaitInstruction(e)
+}
+
+func emitMonitorInstruction(e *Emitter, addressReg asm.Reg) {
 	if addressReg.Name != "rax" {
 		e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 			asm.RegOperand{Reg: asm.MustLookup("rax")},
 			asm.RegOperand{Reg: addressReg},
 		}})
 	}
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-	}})
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("edx")},
-		asm.RegOperand{Reg: asm.MustLookup("edx")},
-	}})
+	e.emit(0x31, 0xC9)
+	e.emit(0x31, 0xD2)
 	e.emit(0x0F, 0x01, 0xC8)
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-	}})
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("eax")},
-		asm.RegOperand{Reg: asm.MustLookup("eax")},
-	}})
+}
+
+func emitMwaitInstruction(e *Emitter) {
+	e.emit(0x31, 0xC9)
+	e.emit(0x31, 0xC0)
 	e.emit(0x0F, 0x01, 0xC9)
+}
+
+func emitMonitorMwaitWait(e *Emitter, wait ir.TopicWait) {
+	fallback := e.newLabel("monitor_mwait_fallback")
+	done := e.newLabel("monitor_mwait_done")
+
+	e.emit(0x53)
+	emitMovImmToReg(e, asm.MustLookup("rax"), 1)
+	e.emit(0x0F, 0xA2)
+	emitMovImmToReg(e, asm.MustLookup("r10"), 8)
+	emitRegRegOp(e, 0x21, asm.MustLookup("rcx"), asm.MustLookup("r10"))
+	emitMovImmToReg(e, asm.MustLookup("r10"), 0)
+	emitCmpRegReg(e, asm.MustLookup("rcx"), asm.MustLookup("r10"))
+	e.emit(0x5B)
+	e.emitJcc(0x84, fallback)
+
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), monitorMwaitWaitlineSymbol(wait.SlotLabel))
+	emitLoadMemToReg(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
+	emitMonitorInstruction(e, asm.MustLookup("rax"))
+	emitCmpRegMem(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
+	e.emitJcc(0x85, done)
+	emitMwaitInstruction(e)
+	e.emitJmp(done)
+
+	e.bindLabel(fallback)
+	emitFallbackWait(e, wait.Fallback)
+	e.bindLabel(done)
 }
 
 func compileWaitFallbackUnitForTest() compiledUnit {
@@ -1282,7 +1360,8 @@ func compileMonitorMwaitUnitForTest() compiledUnit {
 func compileTopicWaitUnitForTest(wait ir.TopicWait) compiledUnit {
 	e := &Emitter{Labels: map[string]int{}}
 	emitTopicWait(e, wait)
-	return compiledUnit{Symbol: "topic_wait_test", Bytes: e.Code}
+	e.resolveJumps()
+	return compiledUnit{Symbol: "topic_wait_test", Bytes: e.Code, DataReloc: e.DataReloc}
 }
 
 func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
@@ -2094,7 +2173,7 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitRegRegMove(e, slot, seq)
 	emitMovImmToReg(e, asm.MustLookup("rdx"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdx"))
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, asm.MustLookup("rdx"), layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
@@ -2163,7 +2242,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitRegRegMove(e, slot, producer)
 	emitMovImmToReg(e, value, int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, value)
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, value, layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, producer, 1)
@@ -2285,10 +2364,22 @@ func emitWakeSlot(e *Emitter, slot string, ctx compileContext) {
 		}
 		return
 	}
+	emitTouchMonitorMwaitWaitline(e, slot)
 	emitLoadLocalApicBase(e, asm.MustLookup("r11"))
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), vcpuAPICIDCommandSymbol(vcpuID))
 	emitLoadMemToReg(e, asm.MustLookup("rax"), asm.MustLookup("rax"), 0, 64)
 	emitSendIcrForMode(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004000|0xF0, ctx.APICMode)
+}
+
+func emitTouchMonitorMwaitWaitline(e *Emitter, slot string) {
+	if slot == "" {
+		return
+	}
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), monitorMwaitWaitlineSymbol(slot))
+	emitLoadMemToReg(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0, 64)
+	emitAddImm(e, asm.MustLookup("r11"), 1)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r11"), 64)
+	emitMfence(e)
 }
 
 func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg, dst asm.Reg, tmp asm.Reg) {
@@ -2305,6 +2396,11 @@ func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg
 		emitRegRegMove(e, dst, tmp)
 		e.bindLabel(skip)
 	}
+}
+
+func emitScaleTopicSlot(e *Emitter, slot asm.Reg, scratch asm.Reg, layout topicDataLayout) {
+	emitMovImmToReg(e, scratch, int64(layout.SlotSize))
+	emitRegRegIMul(e, slot, scratch)
 }
 
 func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
@@ -2366,7 +2462,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitRegRegMove(e, slot, cursor)
 	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdi"))
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, asm.MustLookup("rdi"), layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, cursor, 1)

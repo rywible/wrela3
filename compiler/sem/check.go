@@ -203,24 +203,28 @@ func (s *Scope) LookupDriverPathFields(name string) (map[string]string, bool) {
 }
 
 type checker struct {
-	index                   *Index
-	modules                 []*ast.Module
-	currentType             *Type
-	currentPhase            string
-	diags                   []diag.Diagnostic
-	ownedRoot               *Type
-	graph                   ImageGraph
-	allowFrameCallExpr      bool
-	allowPlaceConstructor   *placeConstructorAllowance
-	exprLifetimes           map[ast.Expr]Lifetime
-	frameLifetimeStack      []int
-	frameLifetimeParents    map[int]int
-	nextFrameScope          int
-	methodLifetimeTargets   map[string]methodLifetimeTarget
-	methodLifetimeSummaries map[string]MethodLifetimeSummary
-	activeMethodSummaries   map[string]bool
-	currentMethodSummary    *MethodLifetimeSummary
-	seenSharedIRQSource     map[string]bool
+	index                    *Index
+	modules                  []*ast.Module
+	currentType              *Type
+	currentPhase             string
+	diags                    []diag.Diagnostic
+	ownedRoot                *Type
+	graph                    ImageGraph
+	allowFrameCallExpr       bool
+	allowPlaceConstructor    *placeConstructorAllowance
+	exprLifetimes            map[ast.Expr]Lifetime
+	frameLifetimeStack       []int
+	frameLifetimeParents     map[int]int
+	nextFrameScope           int
+	methodLifetimeTargets    map[string]methodLifetimeTarget
+	methodLifetimeSummaries  map[string]MethodLifetimeSummary
+	activeMethodSummaries    map[string]bool
+	currentMethodSummary     *MethodLifetimeSummary
+	seenSharedIRQSource      map[string]bool
+	cpuFeatureLoopStrategy   string
+	cpuFeatureLoopFallback   string
+	hardwarePlanWakeStrategy string
+	hardwarePlanWakeFallback string
 }
 
 type driverPathOwner struct {
@@ -977,6 +981,7 @@ func (c *checker) checkExecutorTopicGraph() {
 	c.checkSubscriptionSlotBindings()
 	c.checkSharedPathUses()
 	c.checkVcpuPlacements()
+	c.finalizePlacementConstraints()
 	c.checkPublisherBindings()
 	c.checkSubscriptionUses()
 	c.checkTopicPolicies()
@@ -1924,6 +1929,14 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		}
 		origin.LoopFallback = "sti_hlt"
 	}
+	if qualifiedTypeName(typ) == "machine.x86_64.cpu_state.CpuDiscovery" {
+		featureExpr := constructorArg(expr, "features")
+		featureType := c.exprStaticType(moduleName, featureExpr, scope)
+		featureOrigin := c.originForExprValue(moduleName, featureExpr, featureType, scope)
+		origin.LoopStrategy = featureOrigin.LoopStrategy
+		origin.LoopFallback = featureOrigin.LoopFallback
+		c.rememberCpuFeatureOrigin(origin.LoopStrategy, origin.LoopFallback)
+	}
 	if qualifiedTypeName(typ) == "machine.x86_64.executor_loop.WakeStrategy" {
 		args := constValueFromExpr(expr)
 		if monitor, ok := args.fieldBool("monitor_mwait"); ok && monitor {
@@ -1941,6 +1954,10 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		strategyOrigin := c.originForExprValue(moduleName, strategyExpr, strategyType, scope)
 		origin.LoopStrategy = strategyOrigin.LoopStrategy
 		origin.LoopFallback = strategyOrigin.LoopFallback
+	}
+	if qualifiedTypeName(typ) == "machine.x86_64.cpu_state.HardwarePlan" {
+		origin.LoopStrategy, origin.LoopFallback = c.hardwarePlanWakeOrigin(moduleName, expr, scope)
+		c.rememberHardwarePlanWakeOrigin(origin.LoopStrategy, origin.LoopFallback)
 	}
 	if qualifiedTypeName(typ) == "platform.hardware.memory.PhysicalRegionAuthority" {
 		origin.ArenaBase, _ = unsignedIntegerLiteral(constructorArg(expr, "base"))
@@ -2205,8 +2222,17 @@ func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueTy
 	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.CpuFeatureFacts" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.CpuDiscovery" &&
 		expr.Field == "features":
-		origin.LoopStrategy = "sti_hlt"
-		origin.LoopFallback = "sti_hlt"
+		baseOrigin := c.originForExprValue(moduleName, expr.Base, baseType, scope)
+		origin.LoopStrategy = baseOrigin.LoopStrategy
+		origin.LoopFallback = baseOrigin.LoopFallback
+		if origin.LoopStrategy == "" {
+			origin.LoopStrategy = c.cpuFeatureLoopStrategy
+			origin.LoopFallback = c.cpuFeatureLoopFallback
+		}
+		if origin.LoopStrategy == "" {
+			origin.LoopStrategy = "sti_hlt"
+			origin.LoopFallback = "sti_hlt"
+		}
 	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.ExecutorRegistry" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.OwnedHardware" &&
 		expr.Field == "executors":
@@ -2221,11 +2247,25 @@ func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueTy
 			origin.SlotLabel = "executor_slot.1"
 			origin.MemoryOwnerLabel = c.resolveExecutorSeedLabel(origin.SlotLabel)
 		}
+	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.HardwarePlan" &&
+		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.OwnedHardware" &&
+		expr.Field == "hardware_plan":
+		origin.LoopStrategy = c.hardwarePlanWakeStrategy
+		origin.LoopFallback = c.hardwarePlanWakeFallback
 	case qualifiedTypeName(valueType) == "machine.x86_64.executor_loop.WakeStrategy" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
 		expr.Field == "wake_strategy":
-		origin.LoopStrategy = "sti_hlt"
-		origin.LoopFallback = "sti_hlt"
+		baseOrigin := c.originForExprValue(moduleName, expr.Base, baseType, scope)
+		origin.LoopStrategy = baseOrigin.LoopStrategy
+		origin.LoopFallback = baseOrigin.LoopFallback
+		if origin.LoopStrategy == "" {
+			origin.LoopStrategy = c.hardwarePlanWakeStrategy
+			origin.LoopFallback = c.hardwarePlanWakeFallback
+		}
+		if origin.LoopStrategy == "" {
+			origin.LoopStrategy = "sti_hlt"
+			origin.LoopFallback = "sti_hlt"
+		}
 	case qualifiedTypeName(valueType) == "machine.x86_64.timer.TimerAuthority" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
 		expr.Field == "timer":
@@ -2988,6 +3028,16 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			c.error(expr.SpanV, diag.CG0001, "missing constructor field "+field.Name)
 		}
 	}
+	if qualifiedTypeName(constructed) == "machine.x86_64.cpu_state.HardwarePlan" {
+		strategy, fallback := c.hardwarePlanWakeOrigin(moduleName, expr, scope)
+		c.rememberHardwarePlanWakeOrigin(strategy, fallback)
+	}
+	if qualifiedTypeName(constructed) == "machine.x86_64.cpu_state.CpuDiscovery" {
+		featureExpr := constructorArg(expr, "features")
+		featureType := c.exprStaticType(moduleName, featureExpr, scope)
+		featureOrigin := c.originForExprValue(moduleName, featureExpr, featureType, scope)
+		c.rememberCpuFeatureOrigin(featureOrigin.LoopStrategy, featureOrigin.LoopFallback)
+	}
 
 	switch constructed.Kind {
 	case KindExecutor:
@@ -3023,6 +3073,29 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		c.rememberLifetime(expr, Lifetime{Kind: LifetimeExecutorRoot})
 	}
 	return constructed
+}
+
+func (c *checker) hardwarePlanWakeOrigin(moduleName string, expr *ast.ConstructorExpr, scope *Scope) (string, string) {
+	strategyExpr := constructorArg(expr, "wake_strategy")
+	strategyType := c.exprStaticType(moduleName, strategyExpr, scope)
+	strategyOrigin := c.originForExprValue(moduleName, strategyExpr, strategyType, scope)
+	return strategyOrigin.LoopStrategy, strategyOrigin.LoopFallback
+}
+
+func (c *checker) rememberHardwarePlanWakeOrigin(strategy string, fallback string) {
+	if strategy == "" {
+		return
+	}
+	c.hardwarePlanWakeStrategy = strategy
+	c.hardwarePlanWakeFallback = fallback
+}
+
+func (c *checker) rememberCpuFeatureOrigin(strategy string, fallback string) {
+	if strategy == "" {
+		return
+	}
+	c.cpuFeatureLoopStrategy = strategy
+	c.cpuFeatureLoopFallback = fallback
 }
 
 func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope, ctx ContextKind) {

@@ -43,6 +43,31 @@ func TestGapTopicPublishStoresSequenceAndValue(t *testing.T) {
 	}
 }
 
+func TestGapTopicPublishDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Topics[0].PayloadSize = 184
+	program.Topics[0].PayloadAlign = 8
+	layout := planTopicData(program.Topics[0])
+	if layout.SlotSize != 192 {
+		t.Fatalf("slot size = %d, want 192", layout.SlotSize)
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "publish_counter")
+	loadStride := mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdx")},
+		asm.ImmOperand{Value: int64(layout.SlotSize)},
+	}})
+	scaleSlot := []byte{0x4C, 0x0F, 0xAF, 0xDA}
+	if !bytes.Contains(code, loadStride) || !bytes.Contains(code, scaleSlot) {
+		t.Fatalf("publish_counter must scale ring slot by layout slot size %d: %#x", layout.SlotSize, code)
+	}
+}
+
 func TestGapTopicPublishCoalescesSubscriberWake(t *testing.T) {
 	program := topicProgramForCodegenTest()
 	program.VcpuStarts = []ir.VcpuStartPlan{{SlotLabel: "worker", VcpuID: 1}}
@@ -470,6 +495,41 @@ func TestGapTopicTryNextComparesSlotSequenceBeforePayload(t *testing.T) {
 	rewindCursor := []byte{0x49, 0x29, 0xFB}
 	if bytes.Contains(code, rewindCursor) {
 		t.Fatalf("gap overflow must advance cursor to producer, not rewind and return a payload: %#x", code)
+	}
+}
+
+func TestGapTopicTryNextDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
+	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
+	program := topicProgramForCodegenTest()
+	program.Topics[0].PayloadSize = 184
+	program.Topics[0].PayloadAlign = 8
+	program.Functions[0] = ir.Function{
+		Symbol: "try_counter",
+		Params: []ir.Value{sub},
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			next,
+			&ir.Return{},
+		}}},
+	}
+	layout := planTopicData(program.Topics[0])
+	if layout.SlotSize != 192 {
+		t.Fatalf("slot size = %d, want 192", layout.SlotSize)
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "try_counter")
+	loadStride := mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdi")},
+		asm.ImmOperand{Value: int64(layout.SlotSize)},
+	}})
+	scaleSlot := []byte{0x48, 0x0F, 0xAF, 0xCF}
+	if !bytes.Contains(code, loadStride) || !bytes.Contains(code, scaleSlot) {
+		t.Fatalf("try_counter must scale ring slot by layout slot size %d: %#x", layout.SlotSize, code)
 	}
 }
 

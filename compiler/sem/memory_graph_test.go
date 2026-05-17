@@ -136,6 +136,12 @@ func TestExecutorMemoryNearRecordsFallback(t *testing.T) {
 		t.Fatalf("diagnostics: %#v", ds)
 	}
 	r := BuildImageReport(checked)
+	if len(r.Runtime.Placement) != 1 {
+		t.Fatalf("expected one placement decision, got %#v", r.Runtime.Placement)
+	}
+	if r.Runtime.Placement[0].Kind != "cpu_for_slot" || r.Runtime.Placement[0].SubjectA != "executor_slot.0" || r.Runtime.Placement[0].Satisfied {
+		t.Fatalf("executor memory near decision = %#v", r.Runtime.Placement[0])
+	}
 	if len(r.Memory.ExecutorBudgets) == 0 {
 		t.Fatalf("executor memory budget missing: %#v", r.Memory)
 	}

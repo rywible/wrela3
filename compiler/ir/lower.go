@@ -797,6 +797,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 		return nil, nil, nil, false
 	}
 	identity, identityOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "identity"))
+	route, routeOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "route"))
 	rx, rxOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "rx"))
 	registersField := ctx.lookupField(recvType, "registers")
 	if registersField == nil {
@@ -816,6 +817,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 		Fields: []FieldValue{
 			{Name: "identity", Value: identity},
 			{Name: "registers", Value: registers},
+			{Name: "route", Value: route},
 			{Name: "rx", Value: rx},
 		},
 	}
@@ -826,6 +828,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 	}
 	ops := append([]Operation{}, receiverOps...)
 	ops = append(ops, identityOps...)
+	ops = append(ops, routeOps...)
 	ops = append(ops, rxOps...)
 	ops = append(ops, registers, construct, enable)
 	return construct, ops, ret, true
@@ -1591,10 +1594,16 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		if sem.IsLoopPolicyType(recvType) && e.Method == "wait" {
 			useMonitorMwait := false
 			fallback := "sti_hlt"
-			if ctx.currentExecutor != nil {
-				useMonitorMwait = ctx.currentExecutor.LoopStrategy == "monitor_mwait"
-				if ctx.currentExecutor.LoopFallback != "" {
-					fallback = ctx.currentExecutor.LoopFallback
+			currentExecutor := ctx.currentExecutor
+			if currentExecutor == nil {
+				if placements := ctx.executorPlacementsForType(receiverType); len(placements) == 1 {
+					currentExecutor = placements[0]
+				}
+			}
+			if currentExecutor != nil {
+				useMonitorMwait = currentExecutor.LoopStrategy == "monitor_mwait"
+				if currentExecutor.LoopFallback != "" {
+					fallback = currentExecutor.LoopFallback
 				}
 			}
 			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name, UseMonitorMwait: useMonitorMwait, Fallback: fallback}
