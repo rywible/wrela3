@@ -36,3 +36,42 @@ func TestPciBarClaimSourceContract(t *testing.T) {
 		t.Fatalf("MSI-X must claim the table BAR before enabling PCI MMIO decode")
 	}
 }
+
+func TestPciBridgeWalkingSourceShape(t *testing.T) {
+	sourceText := readRepoFile(t, "wrela/machine/x86_64/pci.wrela")
+	for _, want := range []string{
+		"data PciBridgeBusRange",
+		"data PciFunctionFacts",
+		"fn scan_function(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8, depth: U64)",
+		"self.panic.fail(code = 0xAC060016)",
+		"offset = 0x18",
+		"class_code == 0x06",
+		"subclass == 0x04",
+		"self.scan_bus_depth(window = window, bus = next, depth = depth + 1)",
+		"fn contains(self, window: PcieEcamWindow, bus: U8, device: U8, function: U8) -> Bool",
+		"if self.contains(window = window, bus = bus, device = device, function = function) == true",
+	} {
+		if !strings.Contains(sourceText, want) {
+			t.Fatalf("PCI bridge source missing %q", want)
+		}
+	}
+}
+
+func TestPciRuntimeFactSourceShape(t *testing.T) {
+	sourceText := readRepoFile(t, "wrela/machine/x86_64/pci.wrela")
+	for _, want := range []string{
+		"revision: U8",
+		"header_type: U8",
+		"interrupt_pin: U8",
+		"interrupt_line: U8",
+		"has_msi: Bool",
+		"has_msix: Bool",
+		"fn facts(self) -> PciFunctionFacts",
+		"self.find_capability_optional(capability_id = 0x05)",
+		"self.find_capability_optional(capability_id = 0x11)",
+	} {
+		if !strings.Contains(sourceText, want) {
+			t.Fatalf("PCI facts source missing %q", want)
+		}
+	}
+}

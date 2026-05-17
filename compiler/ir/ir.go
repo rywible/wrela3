@@ -414,16 +414,23 @@ type TopicWaitGuard struct {
 }
 
 type TopicWait struct {
-	SlotLabel string
-	Policy    string
+	SlotLabel       string
+	Policy          string
+	UseMonitorMwait bool
+	Fallback        string
 }
 
 func (TopicWait) isOperation() {}
+
+type CpuFeatureFacts struct {
+	MonitorMwaitAvailable bool
+}
 
 type VcpuStart struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
@@ -437,12 +444,23 @@ type VcpuEnter struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	Vcpu          Value
 	Executor      Value
 	SlotLabel     string
 }
 
 func (VcpuEnter) isOperation() {}
+
+type TimerInit struct {
+	Source    string
+	PeriodUS  uint64
+	Vector    uint8
+	Timer     Value
+	LocalApic Value
+}
+
+func (TimerInit) isOperation() {}
 
 type DataObject struct {
 	Symbol string
@@ -516,21 +534,45 @@ type InterruptBinding struct {
 }
 
 type TopicLayout struct {
-	Label       string
-	Kind        string
-	Depth       uint64
-	Producers   []string
-	Subscribers []string
+	Label        string
+	Kind         string
+	Depth        uint64
+	PayloadType  Type
+	PayloadSize  uint64
+	PayloadAlign uint64
+	SlotSize     uint64
+	Producers    []string
+	Subscribers  []string
 }
 
 type VcpuStartPlan struct {
 	VcpuID        int
 	APICID        uint32
 	LocalApicBase uint64
+	APICMode      string
 	SlotLabel     string
 	ExecutorType  Type
 	EntrySymbol   string
 	Terminal      bool
+}
+
+type TimerRoute struct {
+	Label           string
+	Source          string
+	PeriodUS        uint64
+	Vector          uint8
+	SubscriberSlots []string
+}
+
+type InterruptQueueLayout struct {
+	Label        string
+	SourceLabel string
+	Vector      uint8
+	Owner        string
+	Capacity     uint64
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Overflow     string
 }
 
 type AsmMethod struct {
@@ -558,5 +600,8 @@ type Program struct {
 	InterruptBindings []InterruptBinding
 	InterruptContexts []InterruptContext
 	Topics            []TopicLayout
+	InterruptQueues   []InterruptQueueLayout
 	VcpuStarts        []VcpuStartPlan
+	Timers            []TimerRoute
+	APICMode          string
 }

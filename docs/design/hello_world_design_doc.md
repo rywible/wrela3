@@ -65,7 +65,7 @@ known machine model:
 
 - x86_64
 - UEFI
-- QEMU q35
+- QEMU PCIe machine model
 - OVMF
 - PCIe ECAM
 - virtio devices
@@ -147,8 +147,6 @@ The MVP deliberately excludes several tempting pieces:
 - a hosted Linux production target
 - Wrela-authored unit or integration tests
 - user-defined traps
-- interrupt-capable driver paths
-- explicit vCPU placement policies
 - multi-architecture backends
 - a compiler daemon or incremental cache as a foundation
 
@@ -206,6 +204,8 @@ The language should avoid:
 This is the first rough example of what we need to compile and run on QEMU.
 
 Wrela memory is physical-region authority first. Executor memory is a durable root arena. Temporary work is expressed with bounded `with` frames that claim child slices and rewind at block exit. Typed values are placed into arena storage with `place`; raw spans are reserved with `reserve`; cache memory is bounded and evicts by default. The x86_64 backend may emit identity paging because long mode requires it, but source-level Wrela code does not model virtual address spaces in this stage.
+
+Production memory is now physical-region authority first. Firmware-derived `PhysicalRegionAuthority` values create named root arenas; executors, queues, caches, AP records, and DMA-intended buffers claim bounded children; frame lifetimes remain checked with `with` frames; the image report is the audit surface for ownership and wake paths. The hello image exercises x2APIC selection with xAPIC fallback, a typed `TimerTickPayload` route, shared IRQ source claims, bounded interrupt queues, and explicit executor wake reporting.
 
 ```wrela
 // below is illustrative of what an import should look like
@@ -371,10 +371,9 @@ The compiler should enforce:
 - local managed memory does not cross executor boundaries
 - degraded executor placement changes performance, not correctness
 
-Interrupts and traps are deliberately outside the MVP surface. Device
-interrupts will later belong to interrupt-capable driver paths. CPU traps remain
-platform panic machinery unless a future subsystem explicitly claims trap
-authority.
+Device interrupts now belong to path-owned interrupt topics and shared source
+claims. CPU traps remain platform panic machinery unless a future subsystem
+explicitly claims trap authority.
 
 Other random thoughts:
 

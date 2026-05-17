@@ -1,8 +1,8 @@
 module tests.e2e.fixtures.production_substrate.program
 
-use { ExecutorSlot } from machine.x86_64.cpu_state
-use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { ExecutorMemory } from machine.x86_64.executor_memory
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { EventSleepPolicy, HotPollPolicy } from machine.x86_64.executor_loop
+use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { EduInterruptSubscription, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, SharedInterruptSource } from machine.x86_64.interrupts
 use { InterruptQueue } from machine.x86_64.interrupt_queue
@@ -11,7 +11,24 @@ use { MsiCapability, MsixCapability } from machine.x86_64.pci
 use { SerialConsolePath, SerialRxSubscription } from machine.x86_64.serial
 use { TimerTickSubscription } from machine.x86_64.topic_payload
 
-executor HelloWorld {
+data RunScratch {
+    hello: Bytes
+}
+
+executor BackgroundWorker {
+    slot: ExecutorSlot
+    loop: HotPollPolicy
+    worker_ticks: TimerTickSubscription
+
+    start fn run(self) -> never {
+        while true {
+            let tick = self.worker_ticks.try_next()
+            self.loop.wait()
+        }
+    }
+}
+
+executor ProductionSubstrateProgram {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     memory: ExecutorMemory
@@ -27,12 +44,12 @@ executor HelloWorld {
     ivshmem_tx: IvshmemDoorbellPeerPath
     serial_irq_source: SharedInterruptSource
     serial_irq_queue: InterruptQueue
-    worker_ticks: TimerTickSubscription
+    console_ticks: TimerTickSubscription
 
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick_frame {
             self.serial_path.write(self.memory.bytes(value = "production substrate\n"))
-            let tick = self.worker_ticks.try_next()
+            let tick = self.console_ticks.try_next()
             if tick.has_message {
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
@@ -41,7 +58,6 @@ executor HelloWorld {
         self.interrupts.initialize_for_com1_receive()
         self.edu_msi.route(vector = InterruptVector(value = 0x41), target = self.interrupts.local_apic)
         self.ivshmem_msix.route_entry(entry = 0, vector = InterruptVector(value = 0x42), target = self.interrupts.local_apic)
-        self.serial_path.enable_receive_interrupts()
         self.interrupts.enable_cpu_interrupts()
         self.edu_path.raise_test_interrupt()
         self.ivshmem_tx.ring_peer(peer_id = self.ivshmem_rx.position(), vector = 0)
@@ -63,10 +79,15 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
                 self.ivshmem_rx.ack_doorbell(event = ivshmem_event.message)
             }
+            let tick_event = self.console_ticks.try_next()
+            if tick_event.has_message {
+                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            }
 
             self.serial_rx.arm_wait()
             self.edu_interrupts.arm_wait()
             self.ivshmem_events.arm_wait()
+            self.console_ticks.arm_wait()
 
             let serial_retry = self.serial_rx.try_next()
             if serial_retry.has_message {
@@ -85,13 +106,21 @@ executor HelloWorld {
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
                 self.ivshmem_rx.ack_doorbell(event = ivshmem_retry.message)
             }
+            let tick_retry = self.console_ticks.try_next()
+            if tick_retry.has_message {
+                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            }
             if serial_retry.has_message == false {
                 if edu_retry.has_message == false {
                     if ivshmem_retry.has_message == false {
-                        if self.serial_rx.is_wait_armed() {
-                            if self.edu_interrupts.is_wait_armed() {
-                                if self.ivshmem_events.is_wait_armed() {
-                                    self.loop.wait()
+                        if tick_retry.has_message == false {
+                            if self.serial_rx.is_wait_armed() {
+                                if self.edu_interrupts.is_wait_armed() {
+                                    if self.ivshmem_events.is_wait_armed() {
+                                        if self.console_ticks.is_wait_armed() {
+                                            self.loop.wait()
+                                        }
+                                    }
                                 }
                             }
                         }

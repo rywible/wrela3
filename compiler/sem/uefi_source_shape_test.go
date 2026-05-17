@@ -356,6 +356,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/panic.wrela"),
+		filepath.Join(repoRoot, "wrela/platform/hardware/memory.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/bytes.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/acpi/tables.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/acpi/root.wrela"),
@@ -363,12 +364,17 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/platform/acpi/mcfg.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/hardware/discovery.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/placement.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_loop.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_slot.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_payload.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupts.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupt_queue.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/timer.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/edu.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/ivshmem.wrela"),
@@ -386,10 +392,13 @@ module sem.uefi_test_harness
 use { DelegatedHardware } from platform.uefi.transition
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
-use { OwnedHardware, OwnedMemory, IoPortAuthority } from machine.x86_64.cpu_state
+use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority } from machine.x86_64.cpu_state
 use { MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
-use { InterruptVector } from machine.x86_64.interrupts
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 image UefiSourceHarness {
     transitions { delegated_hardware -> owned_hardware }
@@ -411,13 +420,30 @@ image UefiSourceHarness {
         let panic = BootPanic()
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let interrupts = discovery.interrupts
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x400000, align = 4096)
+        let root_arena = root_region.create_arena(identity = ArenaIdentity(label = "uefi.source.root"), policy = ArenaPolicy(evict_cache_by_default = true))
+        let console_slot_seed = ExecutorSlot(id = 0)
+        let worker_slot_seed = ExecutorSlot(id = 1)
+        let console_memory = root_arena.executor_memory(owner = console_slot_seed, length = 0x100000, align = 4096)
+        let worker_memory = root_arena.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
+        let serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
+        let serial_queue = root_arena.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
         let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+            cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
-                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+                serial_irq4 = serial_route.route,
+                serial_shared_irq4 = serial_route,
+                serial_irq_source = serial_source
             ),
-            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+            pci = ClaimedPciPlanBuilder(panic = panic).empty(),
+            timer = discovery.timers.require_periodic(period_us = 1000),
+            serial_irq_queue = serial_queue,
+            console_memory = console_memory,
+            worker_memory = worker_memory,
+            wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))
         )
         return hardware.exit_to_owned_hardware(
             memory_plan = memory_plan,

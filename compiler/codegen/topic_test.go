@@ -43,6 +43,31 @@ func TestGapTopicPublishStoresSequenceAndValue(t *testing.T) {
 	}
 }
 
+func TestGapTopicPublishDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Topics[0].PayloadSize = 184
+	program.Topics[0].PayloadAlign = 8
+	layout := planTopicData(program.Topics[0])
+	if layout.SlotSize != 192 {
+		t.Fatalf("slot size = %d, want 192", layout.SlotSize)
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "publish_counter")
+	loadStride := mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdx")},
+		asm.ImmOperand{Value: int64(layout.SlotSize)},
+	}})
+	scaleSlot := []byte{0x4C, 0x0F, 0xAF, 0xDA}
+	if !bytes.Contains(code, loadStride) || !bytes.Contains(code, scaleSlot) {
+		t.Fatalf("publish_counter must scale ring slot by layout slot size %d: %#x", layout.SlotSize, code)
+	}
+}
+
 func TestGapTopicPublishCoalescesSubscriberWake(t *testing.T) {
 	program := topicProgramForCodegenTest()
 	program.VcpuStarts = []ir.VcpuStartPlan{{SlotLabel: "worker", VcpuID: 1}}
@@ -473,6 +498,41 @@ func TestGapTopicTryNextComparesSlotSequenceBeforePayload(t *testing.T) {
 	}
 }
 
+func TestGapTopicTryNextDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
+	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
+	program := topicProgramForCodegenTest()
+	program.Topics[0].PayloadSize = 184
+	program.Topics[0].PayloadAlign = 8
+	program.Functions[0] = ir.Function{
+		Symbol: "try_counter",
+		Params: []ir.Value{sub},
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			next,
+			&ir.Return{},
+		}}},
+	}
+	layout := planTopicData(program.Topics[0])
+	if layout.SlotSize != 192 {
+		t.Fatalf("slot size = %d, want 192", layout.SlotSize)
+	}
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "try_counter")
+	loadStride := mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.RegOperand{Reg: asm.MustLookup("rdi")},
+		asm.ImmOperand{Value: int64(layout.SlotSize)},
+	}})
+	scaleSlot := []byte{0x48, 0x0F, 0xAF, 0xCF}
+	if !bytes.Contains(code, loadStride) || !bytes.Contains(code, scaleSlot) {
+		t.Fatalf("try_counter must scale ring slot by layout slot size %d: %#x", layout.SlotSize, code)
+	}
+}
+
 func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 	layout := planTopicData(ir.TopicLayout{
 		Label:       "telemetry",
@@ -503,6 +563,21 @@ func TestTopicDataLayoutIsCacheLineAligned(t *testing.T) {
 	}
 }
 
+func TestTypedTopicDataUsesPayloadSlotSize(t *testing.T) {
+	layout := planTopicData(ir.TopicLayout{
+		Label:        "timer.periodic",
+		Kind:         "timer_tick",
+		Depth:        64,
+		PayloadSize:  24,
+		PayloadAlign: 8,
+		Subscribers:  []string{"worker"},
+	})
+	wantSlot := uint64(64)
+	if got := layout.SlotSize; got != wantSlot {
+		t.Fatalf("slot size = %d, want %d", got, wantSlot)
+	}
+}
+
 func TestReliableTopicRequiresSubscriber(t *testing.T) {
 	_, diags := planTopicDataChecked(ir.TopicLayout{
 		Label: "commands",
@@ -517,9 +592,9 @@ func TestReliableTopicRequiresSubscriber(t *testing.T) {
 func TestTopicDataLayoutOrderIsDeterministic(t *testing.T) {
 	program := &ir.Program{
 		Topics: []ir.TopicLayout{
-			{Label: "zeta", Depth: 2},
-			{Label: "alpha", Depth: 2},
-			{Label: "middle", Depth: 2},
+			{Label: "zeta", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
+			{Label: "alpha", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
+			{Label: "middle", Depth: 2, PayloadSize: 8, PayloadAlign: 8},
 		},
 	}
 
@@ -542,7 +617,7 @@ func TestTopicDataLayoutOrderIsDeterministic(t *testing.T) {
 func TestTopicDataObjectStartsAligned(t *testing.T) {
 	program := &ir.Program{
 		WritableData: []ir.DataObject{{Symbol: "prefix", Bytes: []byte{0xAA}}},
-		Topics:       []ir.TopicLayout{{Label: "sensor/value", Depth: 4}},
+		Topics:       []ir.TopicLayout{{Label: "sensor/value", Depth: 4, PayloadSize: 8, PayloadAlign: 8}},
 	}
 
 	img, ds := Compile(program)
@@ -565,7 +640,7 @@ func TestTopicDataObjectStartsAligned(t *testing.T) {
 }
 
 func TestTopicDataRejectsNonPowerOfTwoDepth(t *testing.T) {
-	_, ds := planTopicDataChecked(ir.TopicLayout{Label: "bad", Depth: 3})
+	_, ds := planTopicDataChecked(ir.TopicLayout{Label: "bad", Depth: 3, PayloadSize: 8, PayloadAlign: 8})
 
 	if !hasCode(ds, diag.SEM0046) {
 		t.Fatalf("planTopicDataChecked diagnostics = %#v, want SEM0046", ds)

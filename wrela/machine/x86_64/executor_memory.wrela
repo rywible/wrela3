@@ -10,7 +10,7 @@ data MutableBytes {
     length: U64
 }
 
-class ExecutorMemory {
+data ExecutorMemory {
     arena_base: PhysicalAddress
     arena_length: U64
     next_offset: U64
@@ -31,7 +31,7 @@ class ExecutorMemory {
     }
 }
 
-class ArenaFrame {
+data ArenaFrame {
     arena_base: PhysicalAddress
     arena_length: U64
     next_offset: U64

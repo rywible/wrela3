@@ -1,7 +1,8 @@
 module machine.x86_64.serial
 
 use { Bytes } from machine.x86_64.executor_memory
-use { DriverMemory, ExecutorSlot, PathIdentity } from machine.x86_64.cpu_state
+use { DriverMemory, PathIdentity } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { IoApicRoute } from machine.x86_64.interrupts
 use { TopicIdentity } from machine.x86_64.topic_u64
 

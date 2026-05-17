@@ -1,6 +1,10 @@
 package sem
 
-import "github.com/ryanwible/wrela3/compiler/source"
+import (
+	"fmt"
+
+	"github.com/ryanwible/wrela3/compiler/source"
+)
 
 type ConstructedNode struct {
 	Type *Type
@@ -35,6 +39,8 @@ type ExecutorNode struct {
 	PathUses         map[string]DriverPathUse
 	SlotLabel        string
 	LoopPolicy       string
+	LoopStrategy     string
+	LoopFallback     string
 	MemoryOwnerLabel string
 }
 
@@ -45,11 +51,14 @@ type ExecutorSlotNode struct {
 }
 
 type TopicNode struct {
-	Label   string
-	Kind    string
-	Depth   uint64
-	Binding string
-	Span    source.Span
+	Label        string
+	Kind         string
+	Depth        uint64
+	PayloadType  string
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Binding      string
+	Span         source.Span
 }
 
 type TopicPublisherNode struct {
@@ -107,10 +116,100 @@ type InterruptConfiguratorNode struct {
 	Span      source.Span
 }
 
+type APICFactNode struct {
+	Mode            string
+	Required        bool
+	Fallback        string
+	XAPICAvailable  bool
+	X2APICAvailable bool
+	Span            source.Span
+}
+
+type TimerFactNode struct {
+	Label    string
+	Source   string
+	PeriodUS uint64
+	Span     source.Span
+}
+
+type TimerRouteNode struct {
+	Label           string
+	Source          string
+	PeriodUS        uint64
+	Vector          uint8
+	TopicLabel      string
+	SubscriberSlots []string
+	Span            source.Span
+}
+
+type LocalityFactNode struct {
+	Subject string
+	Kind    string
+	Value   string
+	Known   bool
+	Span    source.Span
+}
+
+type FramebufferFactNode struct {
+	Base   uint64
+	Bytes  uint64
+	Width  uint32
+	Height uint32
+	Stride uint32
+	Format uint32
+	Known  bool
+	Span   source.Span
+}
+
 type HardwareClaimNode struct {
 	Kind string
 	Key  string
 	Span source.Span
+}
+
+type MemoryRootNode struct {
+	Label string
+	Base  uint64
+	Bytes uint64
+	Span  source.Span
+}
+
+type ArenaNode struct {
+	Label  string
+	Parent string
+	Base   uint64
+	Offset uint64
+	Bytes  uint64
+	Align  uint64
+	Owner  string
+	Kind   string
+	Span   source.Span
+}
+
+type DMABufferNode struct {
+	Label       string
+	OwnerDevice string
+	Base        uint64
+	Bytes       uint64
+	Span        source.Span
+}
+
+type InterruptQueueNode struct {
+	Label        string
+	Owner        string
+	Capacity     uint64
+	PayloadKind  string
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Overflow     string
+	Span         source.Span
+}
+
+type SharedInterruptSourceNode struct {
+	RouteKey    string
+	SourceLabel string
+	Vector      int
+	Span        source.Span
 }
 
 type VcpuPlacementNode struct {
@@ -119,6 +218,32 @@ type VcpuPlacementNode struct {
 	SlotLabel       string
 	Terminal        bool
 	Span            source.Span
+}
+
+type PlacementConstraintNode struct {
+	Kind      string
+	A         string
+	B         string
+	Required  bool
+	Satisfied bool
+	Fallback  string
+	Span      source.Span
+}
+
+type PlacementDecisionNode struct {
+	SlotLabel string
+	Target    string
+	Satisfied bool
+	Fallback  string
+	Span      source.Span
+}
+
+type WakeTargetNode struct {
+	SlotLabel string
+	Owner     string
+	Strategy  string
+	Fallback  string
+	Span      source.Span
 }
 
 type ImageGraph struct {
@@ -134,8 +259,25 @@ type ImageGraph struct {
 	Paths                   []PathNode
 	InterruptTopicRoutes    []InterruptTopicRouteNode
 	InterruptConfigurators  []InterruptConfiguratorNode
+	APICFacts               []APICFactNode
+	TimerFacts              []TimerFactNode
+	TimerRoutes             []TimerRouteNode
+	LocalityFacts           []LocalityFactNode
+	FramebufferFacts        []FramebufferFactNode
 	HardwareClaims          []HardwareClaimNode
 	VcpuPlacements          []VcpuPlacementNode
+	PlacementConstraints    []PlacementConstraintNode
+	PlacementDecisions      []PlacementDecisionNode
+	WakeTargets             []WakeTargetNode
+	MemoryRoots             []MemoryRootNode
+	Arenas                  []ArenaNode
+	DMABuffers              []DMABufferNode
+	InterruptQueues         []InterruptQueueNode
+	SharedInterruptSources  []SharedInterruptSourceNode
+}
+
+func sharedIRQRouteKey(irq uint64, vector uint64) string {
+	return fmt.Sprintf("isa_irq:%d/vector:0x%02x", irq, vector)
 }
 
 func (g ImageGraph) TopicByLabel(label string) TopicNode {
@@ -163,6 +305,13 @@ func (g ImageGraph) HasWakeSource(slot string) bool {
 		}
 	}
 	for _, route := range g.InterruptTopicRoutes {
+		for _, subscriber := range route.SubscriberSlots {
+			if subscriber == slot {
+				return true
+			}
+		}
+	}
+	for _, route := range g.TimerRoutes {
 		for _, subscriber := range route.SubscriberSlots {
 			if subscriber == slot {
 				return true

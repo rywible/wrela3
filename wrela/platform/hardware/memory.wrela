@@ -1,0 +1,212 @@
+module platform.hardware.memory
+
+use { BootPanic } from platform.hardware.panic
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { PlacementTarget } from machine.x86_64.placement
+use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { CacheArena } from machine.x86_64.cache_memory
+use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
+use { PciDevice } from machine.x86_64.pci
+
+data ArenaIdentity {
+    label: StringLiteral
+}
+
+data ArenaPolicy {
+    evict_cache_by_default: Bool
+}
+
+data PhysicalRegionAuthority {
+    base: PhysicalAddress
+    length: U64
+    align: U64
+    provenance: U64
+    panic: BootPanic
+
+    fn create_arena(self, identity: ArenaIdentity, policy: ArenaPolicy) -> RootArena {
+        return RootArena(region = self, identity = identity, policy = policy, next_offset = 0)
+    }
+
+    fn bytes(self) -> MutableBytes {
+        return MutableBytes(address = self.base, length = self.length)
+    }
+}
+
+data RootArena {
+    region: PhysicalRegionAuthority
+    identity: ArenaIdentity
+    policy: ArenaPolicy
+    next_offset: U64
+
+    fn child(self, identity: ArenaIdentity, length: U64, align: U64) -> ChildArena {
+        return self.child_at(identity = identity, offset = self.next_offset, length = length, align = align)
+    }
+
+    fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
+        let requested_base = self.region.base + offset
+        if requested_base < self.region.base {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let base = (requested_base + align - 1) & (0 - align)
+        if base < requested_base {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let aligned_offset = base - self.region.base
+        if length > self.region.length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset > self.region.length - length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let end = aligned_offset + length
+        if end > self.region.length {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
+        return ChildArena(root = self, identity = identity, base = base, length = length, next_offset = 0)
+    }
+
+    fn executor_memory(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
+        let child = self.child(identity = ArenaIdentity(label = "executor.memory"), length = length, align = align)
+        return ExecutorMemory(arena_base = child.base, arena_length = child.length, next_offset = 0)
+    }
+
+    fn executor_memory_near(self, owner: ExecutorSlot, near: PlacementTarget, length: U64, align: U64) -> ExecutorMemory {
+        let child = self.child(identity = ArenaIdentity(label = "executor.memory"), length = length, align = align)
+        return ExecutorMemory(arena_base = child.base, arena_length = child.length, next_offset = 0)
+    }
+
+    fn cache_arena(self, identity: ArenaIdentity, length: U64, align: U64) -> CacheArena {
+        let child = self.child(identity = identity, length = length, align = align)
+        return CacheArena(
+            storage = MutableBytes(address = child.base, length = child.length),
+            slot_count = 0,
+            slot_size = 0,
+            next_victim = 0,
+            initialized = 0
+        )
+    }
+
+    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer {
+        let child = self.child(identity = identity, length = length, align = align)
+        return DmaBuffer(
+            owner = owner,
+            identity = identity,
+            bytes = MutableBytes(address = child.base, length = child.length)
+        )
+    }
+
+    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        if capacity == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.size == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.align == 0 {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        if capacity > (0 - 1) / payload.size {
+            self.region.panic.fail(code = 0xAC070001)
+        }
+        let bytes = capacity * payload.size
+        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
+        let storage = MutableBytes(address = child.base, length = child.length)
+        return InterruptQueue(
+            identity = QueueIdentity(label = identity.label),
+            owner = ExecutorSlot(id = owner.id),
+            storage = MutableBytes(address = storage.address, length = storage.length),
+            capacity = capacity,
+            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
+            overflow = InterruptOverflowPolicy(mode = overflow.mode),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+    }
+}
+
+data ChildArena {
+    root: RootArena
+    identity: ArenaIdentity
+    base: PhysicalAddress
+    length: U64
+    next_offset: U64
+
+    fn child(self, identity: ArenaIdentity, length: U64, align: U64) -> ChildArena {
+        return self.child_at(identity = identity, offset = self.next_offset, length = length, align = align)
+    }
+
+    fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
+        let requested_base = self.base + offset
+        if requested_base < self.base {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let base = (requested_base + align - 1) & (0 - align)
+        if base < requested_base {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let aligned_offset = base - self.base
+        if length > self.length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset > self.length - length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let end = aligned_offset + length
+        if end > self.length {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.root.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
+        return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
+    }
+
+    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        if capacity == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.size == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if payload.align == 0 {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        if capacity > (0 - 1) / payload.size {
+            self.root.region.panic.fail(code = 0xAC070001)
+        }
+        let bytes = capacity * payload.size
+        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
+        let storage = MutableBytes(address = child.base, length = child.length)
+        return InterruptQueue(
+            identity = QueueIdentity(label = identity.label),
+            owner = ExecutorSlot(id = owner.id),
+            storage = MutableBytes(address = storage.address, length = storage.length),
+            capacity = capacity,
+            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
+            overflow = InterruptOverflowPolicy(mode = overflow.mode),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+    }
+}
+
+data DmaBuffer {
+    owner: PciDevice
+    identity: ArenaIdentity
+    bytes: MutableBytes
+}

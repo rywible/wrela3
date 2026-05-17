@@ -1,0 +1,48 @@
+module machine.x86_64.timer
+
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { LocalApic } from machine.x86_64.interrupts
+use { TimerTickTopic, TimerTickSubscription } from machine.x86_64.topic_payload
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { BootPanic } from platform.hardware.panic
+
+data TimerSource {
+    kind: U32
+}
+
+data TimerAuthority {
+    source: TimerSource
+    period_us: U64
+    panic: BootPanic
+
+    fn initialize(self, local_apic: LocalApic) {
+        if self.source.kind != 1 {
+            self.panic.fail(code = 0xAC080002)
+        }
+    }
+
+    fn subscribe(self, subscriber: ExecutorSlot) -> TimerTickSubscription {
+        let topic = TimerTickTopic(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
+        return topic.subscribe(subscriber = subscriber)
+    }
+}
+
+data TimerDiscovery {
+    local_apic_timer_available: Bool
+    pit_available: Bool
+    hpet_available: Bool
+    hpet_base: PhysicalAddress
+    panic: BootPanic
+
+    fn require_periodic(self, period_us: U64) -> TimerAuthority {
+        if self.local_apic_timer_available {
+            if self.pit_available {
+                return TimerAuthority(source = TimerSource(kind = 1), period_us = period_us, panic = self.panic)
+            }
+        }
+        if self.hpet_available {
+            return TimerAuthority(source = TimerSource(kind = 2), period_us = period_us, panic = self.panic)
+        }
+        self.panic.fail(code = 0xAC080001)
+    }
+}

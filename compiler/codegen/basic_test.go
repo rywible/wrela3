@@ -61,9 +61,11 @@ func TestCompilePreservesInterruptBindings(t *testing.T) {
 	program := &ir.Program{
 		Functions: []ir.Function{eventFn},
 		Topics: []ir.TopicLayout{{
-			Label: "test.irq",
-			Kind:  "test_irq",
-			Depth: 2,
+			Label:        "test.irq",
+			Kind:         "test_irq",
+			Depth:        2,
+			PayloadSize:  1,
+			PayloadAlign: 1,
 		}},
 		InterruptContexts: []ir.InterruptContext{{
 			Symbol: "_wrela_test_interrupt_context",

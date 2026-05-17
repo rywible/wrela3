@@ -6,9 +6,14 @@ import (
 )
 
 const (
-	lapicSVR     = 0xF0
-	lapicICRLow  = 0x300
-	lapicICRHigh = 0x310
+	lapicEOI               = 0xB0
+	lapicSVR               = 0xF0
+	lapicICRLow            = 0x300
+	lapicICRHigh           = 0x310
+	lapicLVTTimer          = 0x320
+	lapicTimerInitialCount = 0x380
+	lapicTimerCurrentCount = 0x390
+	lapicTimerDivideConfig = 0x3E0
 )
 
 const localApicBaseSymbol = "_wrela_local_apic_base"

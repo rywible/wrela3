@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/ryanwible/wrela3/compiler/ir"
 	"github.com/ryanwible/wrela3/compiler/parse"
 	"github.com/ryanwible/wrela3/compiler/pecoff"
+	"github.com/ryanwible/wrela3/compiler/report"
 	"github.com/ryanwible/wrela3/compiler/sem"
 	"github.com/ryanwible/wrela3/compiler/source"
 )
@@ -17,12 +19,15 @@ type BuildOptions struct {
 	Mode       Mode
 	RootPath   string
 	OutputPath string
+	ReportPath string
 	RepoRoot   string
 }
 
 type BuildResult struct {
 	OutputPath string
+	ReportPath string
 	Image      *codegen.Image
+	Report     *report.ImageReport
 }
 
 type DiagnosticError struct {
@@ -97,7 +102,33 @@ func Build(opts BuildOptions) (BuildResult, error) {
 	if err := os.WriteFile(outputPath, bytes, 0o644); err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{OutputPath: outputPath, Image: image}, nil
+	result := BuildResult{
+		OutputPath: outputPath,
+		Image:      image,
+	}
+	if opts.ReportPath != "" {
+		reportPath := opts.ReportPath
+		if !filepath.IsAbs(reportPath) {
+			reportPath = filepath.Join(repoRoot, reportPath)
+		}
+		imgReport := sem.BuildImageReport(checked)
+		if ds := append(sem.ValidateAuthorityAudit(imgReport), sem.ValidateAuthorityAuditContent(imgReport)...); len(ds) != 0 {
+			return BuildResult{}, DiagnosticError{Diagnostics: ds}
+		}
+		data, err := json.MarshalIndent(imgReport, "", "  ")
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+			return BuildResult{}, err
+		}
+		if err := os.WriteFile(reportPath, append(data, '\n'), 0o644); err != nil {
+			return BuildResult{}, err
+		}
+		result.ReportPath = reportPath
+		result.Report = &imgReport
+	}
+	return result, nil
 }
 
 func resolveRepoRoot(raw string) string {

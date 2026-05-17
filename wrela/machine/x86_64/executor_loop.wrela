@@ -1,5 +1,10 @@
 module machine.x86_64.executor_loop
 
+data WakeStrategy {
+    monitor_mwait: Bool
+    fallback_hlt: Bool
+}
+
 class HotPollPolicy {
     fn wait(self) {
         self.pause()
@@ -12,7 +17,13 @@ class HotPollPolicy {
 }
 
 class EventSleepPolicy {
-    asm fn wait(self) {
+    strategy: WakeStrategy
+
+    fn wait(self) {
+        self.wait_intrinsic()
+    }
+
+    asm fn wait_intrinsic(self) {
         hlt
         ret
     }

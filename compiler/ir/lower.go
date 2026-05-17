@@ -95,10 +95,13 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	if ctx.program.Entry.OwnedHardwareType == "" {
 		ctx.program.Entry.OwnedHardwareType = "OwnedHardware"
 	}
+	ctx.program.APICMode = ctx.apicMode()
 
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
+	ctx.lowerTimerRoutes()
+	ctx.lowerInterruptQueueLayouts()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
@@ -794,6 +797,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 		return nil, nil, nil, false
 	}
 	identity, identityOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "identity"))
+	route, routeOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "route"))
 	rx, rxOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "rx"))
 	registersField := ctx.lookupField(recvType, "registers")
 	if registersField == nil {
@@ -813,6 +817,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 		Fields: []FieldValue{
 			{Name: "identity", Value: identity},
 			{Name: "registers", Value: registers},
+			{Name: "route", Value: route},
 			{Name: "rx", Value: rx},
 		},
 	}
@@ -823,6 +828,7 @@ func (ctx *lowerContext) lowerSerialConsolePathFactoryCall(moduleName string, re
 	}
 	ops := append([]Operation{}, receiverOps...)
 	ops = append(ops, identityOps...)
+	ops = append(ops, routeOps...)
 	ops = append(ops, rxOps...)
 	ops = append(ops, registers, construct, enable)
 	return construct, ops, ret, true
@@ -894,7 +900,14 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		return
 	}
 	for _, topic := range ctx.checked.ImageGraph.Topics {
-		layout := TopicLayout{Label: topic.Label, Kind: topic.Kind, Depth: topic.Depth}
+		layout := TopicLayout{
+			Label:        topic.Label,
+			Kind:         topic.Kind,
+			Depth:        topic.Depth,
+			PayloadType:  irTypeFromQualifiedName(topic.PayloadType),
+			PayloadSize:  topic.PayloadSize,
+			PayloadAlign: topic.PayloadAlign,
+		}
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
 			if sub.TopicLabel == topic.Label {
 				layout.Subscribers = append(layout.Subscribers, sub.SubscriberLabel)
@@ -905,6 +918,126 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 	}
 }
 
+func (ctx *lowerContext) lowerTimerRoutes() {
+	if ctx == nil || ctx.checked == nil {
+		return
+	}
+	for _, route := range ctx.checked.ImageGraph.TimerRoutes {
+		ctx.program.Timers = append(ctx.program.Timers, TimerRoute{
+			Label:           route.Label,
+			Source:          route.Source,
+			PeriodUS:        route.PeriodUS,
+			Vector:          route.Vector,
+			SubscriberSlots: append([]string{}, route.SubscriberSlots...),
+		})
+	}
+}
+
+func (ctx *lowerContext) timerInitFactsForValue(value Value) (string, uint64, uint8) {
+	source := "local_apic_pit_calibrated"
+	periodUS := uint64(0)
+	vector := uint8(0x43)
+	if ctx != nil && ctx.program != nil {
+		for _, route := range ctx.program.Timers {
+			if route.Source != "" {
+				source = route.Source
+			}
+			if route.PeriodUS != 0 {
+				periodUS = route.PeriodUS
+			}
+			if route.Vector != 0 {
+				vector = route.Vector
+			}
+			break
+		}
+	}
+	if valuePeriod, ok := constUintFieldValue(value, "period_us"); ok {
+		periodUS = valuePeriod
+	}
+	if sourceKind, ok := constNestedUintFieldValue(value, "source", "kind"); ok {
+		switch sourceKind {
+		case 1:
+			source = "local_apic_pit_calibrated"
+		case 2:
+			source = "hpet"
+		}
+	}
+	return source, periodUS, vector
+}
+
+func (ctx *lowerContext) apicMode() string {
+	if ctx == nil || ctx.checked == nil {
+		return ""
+	}
+	for i := len(ctx.checked.ImageGraph.APICFacts) - 1; i >= 0; i-- {
+		if mode := ctx.checked.ImageGraph.APICFacts[i].Mode; mode != "" {
+			return mode
+		}
+	}
+	return ""
+}
+
+func (ctx *lowerContext) lowerInterruptQueueLayouts() {
+	if ctx == nil || ctx.checked == nil {
+		return
+	}
+	sources := map[string]sem.SharedInterruptSourceNode{}
+	for _, source := range ctx.checked.ImageGraph.SharedInterruptSources {
+		if source.SourceLabel != "" {
+			sources["irq."+source.SourceLabel] = source
+		}
+	}
+	for _, queue := range ctx.checked.ImageGraph.InterruptQueues {
+		if queue.Capacity == 0 {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue capacity must be non-zero")
+			continue
+		}
+		if queue.PayloadSize == 0 || queue.PayloadAlign == 0 {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue payload layout is invalid")
+			continue
+		}
+		if _, ok := interruptQueueLayoutBackingSize(queue.Capacity, queue.PayloadSize); !ok {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue backing size overflows 64-bit arithmetic")
+			continue
+		}
+		source := sources[queue.Label]
+		ctx.program.InterruptQueues = append(ctx.program.InterruptQueues, InterruptQueueLayout{
+			Label:        queue.Label,
+			SourceLabel:  source.SourceLabel,
+			Vector:       uint8(source.Vector),
+			Owner:        ctx.resolveExecutorSeedLabel(queue.Owner),
+			Capacity:     queue.Capacity,
+			PayloadSize:  queue.PayloadSize,
+			PayloadAlign: queue.PayloadAlign,
+			Overflow:     queue.Overflow,
+		})
+	}
+}
+
+const interruptQueueLayoutHeaderSize = uint64(32)
+
+func interruptQueueLayoutBackingSize(capacity, payloadSize uint64) (uint64, bool) {
+	if payloadSize != 0 && capacity > (^uint64(0)-interruptQueueLayoutHeaderSize)/payloadSize {
+		return 0, false
+	}
+	return interruptQueueLayoutHeaderSize + capacity*payloadSize, true
+}
+
+func (ctx *lowerContext) resolveExecutorSeedLabel(label string) string {
+	const prefix = "executor_slot."
+	if ctx == nil || ctx.checked == nil || !strings.HasPrefix(label, prefix) {
+		return label
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(label, prefix))
+	if err != nil || id < 0 || id >= len(ctx.checked.ImageGraph.ExecutorSlots) {
+		return label
+	}
+	if claimed := ctx.checked.ImageGraph.ExecutorSlots[id].Label; claimed != "" {
+		return claimed
+	}
+	return label
+}
+
 func (ctx *lowerContext) lowerVcpuStartPlans() {
 	if ctx == nil || ctx.checked == nil {
 		return
@@ -912,6 +1045,7 @@ func (ctx *lowerContext) lowerVcpuStartPlans() {
 	for _, placement := range ctx.checked.ImageGraph.VcpuPlacements {
 		plan := VcpuStartPlan{
 			VcpuID:    placement.VcpuID,
+			APICMode:  ctx.program.APICMode,
 			SlotLabel: placement.SlotLabel,
 			Terminal:  placement.Terminal,
 		}
@@ -1203,6 +1337,20 @@ func constUintFieldValue(value Value, fieldName string) (uint64, bool) {
 	return 0, false
 }
 
+func constNestedUintFieldValue(value Value, fieldName string, nestedFieldName string) (uint64, bool) {
+	construct, ok := value.(*Construct)
+	if !ok {
+		return 0, false
+	}
+	for _, field := range construct.Fields {
+		if field.Name != fieldName {
+			continue
+		}
+		return constUintFieldValue(field.Value, nestedFieldName)
+	}
+	return 0, false
+}
+
 func constUintValue(value Value) (uint64, bool) {
 	switch v := value.(type) {
 	case *ConstInt:
@@ -1327,6 +1475,21 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		return construct, ops, typ
 	case *ast.CallExpr:
 		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		if recvType != nil && recvType.Module == "machine.x86_64.timer" && recvType.Name == "TimerAuthority" && e.Method == "initialize" {
+			localApic, localApicOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "local_apic"))
+			source, periodUS, vector := ctx.timerInitFactsForValue(receiver)
+			init := TimerInit{
+				Source:    source,
+				PeriodUS:  periodUS,
+				Vector:    vector,
+				Timer:     receiver,
+				LocalApic: localApic,
+			}
+			ops := append([]Operation{}, receiverOps...)
+			ops = append(ops, localApicOps...)
+			ops = append(ops, init)
+			return receiver, ops, ctx.resolveType(moduleName, "void")
+		}
 		if construct, ops, typ, ok := ctx.lowerTopicFactoryCall(moduleName, receiverType, scope, e, receiver, receiverOps, recvType); ok {
 			return construct, ops, typ
 		}
@@ -1442,7 +1605,21 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			}
 		}
 		if sem.IsLoopPolicyType(recvType) && e.Method == "wait" {
-			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name}
+			useMonitorMwait := false
+			fallback := "sti_hlt"
+			currentExecutor := ctx.currentExecutor
+			if currentExecutor == nil {
+				if placements := ctx.executorPlacementsForType(receiverType); len(placements) == 1 {
+					currentExecutor = placements[0]
+				}
+			}
+			if currentExecutor != nil {
+				useMonitorMwait = currentExecutor.LoopStrategy == "monitor_mwait"
+				if currentExecutor.LoopFallback != "" {
+					fallback = currentExecutor.LoopFallback
+				}
+			}
+			wait := TopicWait{SlotLabel: ctx.currentExecutorSlotLabel(receiverType), Policy: recvType.Name, UseMonitorMwait: useMonitorMwait, Fallback: fallback}
 			ops := append([]Operation{}, receiverOps...)
 			ops = append(ops, wait)
 			return receiver, ops, ctx.resolveType(moduleName, "void")
@@ -1455,11 +1632,11 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, executorOps...)
 			if e.Method == "start" {
 				ret := ctx.resolveType("machine.x86_64.cpu_state", "VcpuStartStatus")
-				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
+				start := VcpuStart{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, APICMode: ctx.program.APICMode, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel, Type: ctx.irType(ret)}
 				ops = append(ops, start)
 				return start, ops, ret
 			}
-			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel}
+			enter := VcpuEnter{VcpuID: vcpuID, APICID: apicID, LocalApicBase: localApicBase, APICMode: ctx.program.APICMode, Vcpu: receiver, Executor: executor, SlotLabel: slotLabel}
 			ops = append(ops, enter)
 			return receiver, ops, ctx.resolveType(moduleName, "never")
 		}
@@ -2067,6 +2244,21 @@ func pathModule(pathType string) string {
 		return ""
 	}
 	return strings.Join(parts[:len(parts)-1], ".")
+}
+
+func irTypeFromQualifiedName(qualified string) Type {
+	parts := strings.Split(qualified, ".")
+	if len(parts) == 1 {
+		return Type{Name: qualified, Kind: TypeKindData}
+	}
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return Type{}
+	}
+	return Type{
+		Module: strings.Join(parts[:len(parts)-1], "."),
+		Name:   parts[len(parts)-1],
+		Kind:   TypeKindData,
+	}
 }
 
 func pathName(pathType string) string {

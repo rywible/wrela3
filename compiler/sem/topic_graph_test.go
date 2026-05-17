@@ -205,6 +205,97 @@ image Img {
 	}
 }
 
+func TestRawExecutorSlotConstructorCannotBypassClaimGraph(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+data VcpuStartStatus { started: Bool; id: U64 }
+class ExecutorRegistry {
+    next_id: U64
+    fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) }
+}
+class Vcpu { id: U64 }
+class OwnedHardware {
+    executors: ExecutorRegistry
+    vcpu0: Vcpu
+}
+unique class DelegatedHardware {
+    asm fn exit_to_owned_hardware(self) -> OwnedHardware { ret }
+}
+`, `
+module machine.x86_64.executor_loop
+class HotPollPolicy {}
+`, `
+module test.raw_executor_slot
+use { DelegatedHardware, ExecutorSlot, OwnedHardware } from machine.x86_64.cpu_state
+use { HotPollPolicy } from machine.x86_64.executor_loop
+
+executor Worker {
+    slot: ExecutorSlot
+    loop: HotPollPolicy
+    start fn run(self) -> never { while true {} }
+}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let raw_slot = ExecutorSlot(id = 0)
+        let worker = Worker(slot = raw_slot, loop = HotPollPolicy())
+        hardware.vcpu0.enter(executor = worker)
+    }
+}
+`)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasMessage(ds, diag.SEM0035, "executor Worker uses an unclaimed executor slot") {
+		t.Fatalf("expected SEM0035 for raw executor slot, got %#v", ds)
+	}
+}
+
+func TestForgedExecutorRegistryClaimCannotBypassClaimGraph(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.cpu_state
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+class ExecutorRegistry {
+    next_id: U64
+    fn claim(self, identity: SlotIdentity) -> ExecutorSlot { return ExecutorSlot(id = 0) }
+}
+class Vcpu {}
+class OwnedHardware { vcpu0: Vcpu; executors: ExecutorRegistry }
+unique class DelegatedHardware { asm fn exit_to_owned_hardware(self) -> OwnedHardware { ret } }
+`, `
+module test.forged_executor_registry
+use { DelegatedHardware, ExecutorRegistry, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+
+executor Worker {
+    slot: ExecutorSlot
+    start fn run(self) -> never { while true {} }
+}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let registry = ExecutorRegistry(next_id = 0)
+        let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
+        let worker = Worker(slot = worker_slot)
+        hardware.vcpu0.enter(executor = worker)
+    }
+}
+`)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0049) {
+		t.Fatalf("expected SEM0049 for forged ExecutorRegistry, got %#v", ds)
+	}
+	if !hasMessage(ds, diag.SEM0035, "executor Worker uses an unclaimed executor slot") {
+		t.Fatalf("expected SEM0035 for forged registry claim, got %#v", ds)
+	}
+}
+
 func TestInlineTopicSubscriptionGraphExtraction(t *testing.T) {
 	contract := parseModulesForTest(t, `
 module machine.x86_64.cpu_state
@@ -224,10 +315,10 @@ class U64GapTopic {
     asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret }
 }
 data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot }
-`)
+	`)
 	src := `
 module test.inline_subscription_graph
-use { DelegatedHardware, ExecutorRegistry, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
 
 executor Worker {
@@ -240,8 +331,7 @@ image Img {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let registry = ExecutorRegistry()
-        let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
+        let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
         let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
         let worker = Worker(slot = worker_slot, input = topic.subscribe(subscriber = worker_slot))
         hardware.vcpu0.enter(executor = worker)
@@ -278,7 +368,7 @@ class U64GapTopic {
 data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot }
 `, `
 module test.inline_subscription_mismatch
-use { DelegatedHardware, ExecutorRegistry, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
 
 executor Worker {
@@ -291,9 +381,8 @@ image Img {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let registry = ExecutorRegistry()
-        let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
-        let other_slot = registry.claim(identity = SlotIdentity(label = "other"))
+        let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
+        let other_slot = hardware.executors.claim(identity = SlotIdentity(label = "other"))
         let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
         let worker = Worker(slot = worker_slot, input = topic.subscribe(subscriber = other_slot))
         hardware.vcpu0.enter(executor = worker)
@@ -323,7 +412,7 @@ module machine.x86_64.executor_memory
 class ExecutorMemory {}
 `, `
 module test.inline_memory_mismatch
-use { DelegatedHardware, ExecutorRegistry, ExecutorSlot, OwnedHardware, OwnedMemory, SlotIdentity } from machine.x86_64.cpu_state
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, OwnedMemory, SlotIdentity } from machine.x86_64.cpu_state
 use { ExecutorMemory } from machine.x86_64.executor_memory
 
 executor Worker {
@@ -336,9 +425,8 @@ image Img {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let registry = ExecutorRegistry()
-        let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
-        let other_slot = registry.claim(identity = SlotIdentity(label = "other"))
+        let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
+        let other_slot = hardware.executors.claim(identity = SlotIdentity(label = "other"))
         let worker = Worker(slot = worker_slot, memory = OwnedMemory().claim_executor_arena(owner = other_slot))
         hardware.vcpu0.enter(executor = worker)
     }
@@ -348,6 +436,79 @@ image Img {
 	_, ds := Check(index, modules)
 	if !hasCode(ds, diag.SEM0047) {
 		t.Fatalf("expected SEM0047, got %#v", ds)
+	}
+}
+
+func TestHardwarePlanExecutorMemoryCannotLaunderOwner(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+data ExecutorMemory {}
+`, `
+module machine.x86_64.cpu_state
+use { ExecutorMemory } from machine.x86_64.executor_memory
+data SlotIdentity { label: StringLiteral }
+data ExecutorSlot { id: U64 }
+class ExecutorRegistry {
+    next_id: U64
+    fn claim(self, identity: SlotIdentity) -> ExecutorSlot {
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        return ExecutorSlot(id = id)
+    }
+}
+data HardwarePlan {
+    console_memory: ExecutorMemory
+    worker_memory: ExecutorMemory
+
+    fn executor_memory(self, owner: ExecutorSlot, memory: ExecutorMemory) -> ExecutorMemory {
+        return memory
+    }
+}
+class Vcpu {}
+class OwnedHardware {
+    vcpu0: Vcpu
+    executors: ExecutorRegistry
+    hardware_plan: HardwarePlan
+}
+unique class DelegatedHardware {
+    fn exit_to_owned_hardware(self) -> OwnedHardware {
+        return OwnedHardware(
+            vcpu0 = Vcpu(),
+            executors = ExecutorRegistry(next_id = 0),
+            hardware_plan = HardwarePlan(console_memory = ExecutorMemory(), worker_memory = ExecutorMemory())
+        )
+    }
+}
+`, `
+module test.hardware_plan_memory_launder
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+use { ExecutorMemory } from machine.x86_64.executor_memory
+
+executor Worker {
+    slot: ExecutorSlot
+    memory: ExecutorMemory
+    start fn run(self) -> never { while true {} }
+}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let console_slot = hardware.executors.claim(identity = SlotIdentity(label = "console"))
+        let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
+        let worker_memory = hardware.hardware_plan.executor_memory(
+            owner = worker_slot,
+            memory = hardware.hardware_plan.console_memory
+        )
+        let worker = Worker(slot = worker_slot, memory = worker_memory)
+        hardware.vcpu0.enter(executor = worker)
+    }
+}
+`)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasMessage(ds, diag.SEM0047, "executor Worker memory is owned by console but slot is worker") {
+		t.Fatalf("expected SEM0047 for laundered executor memory, got %#v", ds)
 	}
 }
 
@@ -690,12 +851,16 @@ module sem.explicit_interrupt_configurator
 
 use { DelegatedHardware } from platform.uefi.transition
 use { BootPanic } from platform.hardware.panic
-use { ClaimedPciPlanBuilder, CpuPlan, CpuTopology, EnabledCpu, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
+use { ClaimedPciPlanBuilder, CpuFeatureFacts, CpuPlan, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { HotPollPolicy } from machine.x86_64.executor_loop
-use { ApicInterruptController, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
+use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { SerialConsolePath, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
 use { TopicIdentity } from machine.x86_64.topic_u64
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 executor Worker {
     slot: ExecutorSlot
@@ -725,23 +890,30 @@ image ExplicitInterruptConfigurator {
 	            idt_descriptor = Bytes(address = 0, length = 0),
 	            cr3 = 0
 	        )
-	        let local_apic = LocalApic(base = 0xFEE00000, apic_id = 0, panic = BootPanic())
+	        let panic = BootPanic()
+	        let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
+	        let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x400000, align = 4096)
+	        let root = root_region.create_arena(identity = ArenaIdentity(label = "explicit.interrupt.root"), policy = ArenaPolicy(evict_cache_by_default = true))
+	        let console_seed = ExecutorSlot(id = 0)
+	        let worker_seed = ExecutorSlot(id = 1)
+	        let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
+	        let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
+	        let shared = discovery.interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
+	        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
 	        let hardware_plan = HardwarePlan(
-	            cpus = CpuTopology(
-	                bootstrap = EnabledCpu(uid = 0, apic_id = 0),
-	                secondary = EnabledCpu(uid = 1, apic_id = 1)
-	            ),
+	            cpus = discovery.cpus.require_min_count(count = 2),
 	            interrupts = InterruptRoutingPlan(
-	                local_apic = local_apic,
-	                serial_irq4 = IoApicRoute(
-	                    io_apic = IoApicDiscovered(id = 0, address = 0, gsi_base = 0, panic = BootPanic()),
-	                    gsi = 4,
-	                    flags = 0,
-	                    vector = InterruptVector(value = 0x40),
-	                    destination_apic_id = 0
-	                )
+	                local_apic = discovery.interrupts.local_apic,
+	                serial_irq4 = shared.route,
+	                serial_shared_irq4 = shared,
+	                serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
 	            ),
-	            pci = ClaimedPciPlanBuilder(panic = BootPanic()).empty()
+	            pci = ClaimedPciPlanBuilder(panic = panic).empty(),
+	            timer = discovery.timers.require_periodic(period_us = 1000),
+	            serial_irq_queue = queue,
+	            console_memory = console_memory,
+	            worker_memory = worker_memory,
+	            wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))
 	        )
 	        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
 	    }

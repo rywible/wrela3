@@ -1,8 +1,13 @@
 module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
-use { IoApicRoute, LocalApic } from machine.x86_64.interrupts
+use { WakeStrategy } from machine.x86_64.executor_loop
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { IoApicRoute, LocalApic, SharedInterruptSource, SharedIrqRoute } from machine.x86_64.interrupts
+use { InterruptQueue } from machine.x86_64.interrupt_queue
+use { PlacementPreferenceResult, PlacementTarget } from machine.x86_64.placement
 use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
+use { TimerAuthority } from machine.x86_64.timer
 use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 
@@ -12,10 +17,6 @@ data SlotIdentity {
 
 data PathIdentity {
     label: StringLiteral
-}
-
-data ExecutorSlot {
-    id: U64
 }
 
 data VcpuStartStatus {
@@ -92,6 +93,40 @@ data EnabledCpu {
     apic_id: U32
 }
 
+data CpuLocalityFacts {
+    logical_id: U32
+    apic_id: U32
+    x2apic_id: U32
+    smt_group: U32
+    core_group: U32
+    package_group: U32
+    llc_group: U32
+    numa_node: U32
+    known_mask: U64
+}
+
+data CpuFeatureFacts {
+    monitor_mwait_available: Bool
+}
+
+data CpuDiscovery {
+    enabled: EnabledCpuSet
+    locality0: CpuLocalityFacts
+    locality1: CpuLocalityFacts
+    features: CpuFeatureFacts
+
+    fn require_min_count(self, count: U64) -> CpuTopology {
+        return self.enabled.require_count(count = count)
+    }
+
+    fn wake_strategy(self, features: CpuFeatureFacts) -> WakeStrategy {
+        if features.monitor_mwait_available {
+            return WakeStrategy(monitor_mwait = true, fallback_hlt = true)
+        }
+        return WakeStrategy(monitor_mwait = false, fallback_hlt = true)
+    }
+}
+
 data EnabledCpuSet {
     count: U64
     cpu0: EnabledCpu
@@ -122,12 +157,67 @@ data CpuTopology {
     bootstrap: EnabledCpu
     secondary: EnabledCpu
 
+    fn placement(self, panic: BootPanic) -> CpuPlacementPlan {
+        return CpuPlacementPlan(topology = self, panic = panic)
+    }
+
+    fn can_prove_separate_cores(self) -> Bool {
+        return self.bootstrap.apic_id != self.secondary.apic_id
+    }
+
+    fn has_known_llc_groups(self) -> Bool {
+        return false
+    }
+
     fn vcpu0(self, local_apic_base: PhysicalAddress) -> Vcpu {
         return Vcpu(id = 0, apic_id = self.bootstrap.apic_id, local_apic_base = local_apic_base)
     }
 
     fn vcpu1(self, local_apic_base: PhysicalAddress) -> Vcpu {
         return Vcpu(id = 1, apic_id = self.secondary.apic_id, local_apic_base = local_apic_base)
+    }
+
+    fn wake_strategy(self, features: CpuFeatureFacts) -> WakeStrategy {
+        if features.monitor_mwait_available {
+            return WakeStrategy(monitor_mwait = true, fallback_hlt = true)
+        }
+        return WakeStrategy(monitor_mwait = false, fallback_hlt = true)
+    }
+}
+
+class CpuPlacementPlan {
+    topology: CpuTopology
+    panic: BootPanic
+
+    fn require_separate_physical_cores(self, a: ExecutorSlot, b: ExecutorSlot) {
+        if a.id == b.id {
+            self.panic.fail(code = 0xAC040101)
+        }
+        if self.topology.can_prove_separate_cores() == false {
+            self.panic.fail(code = 0xAC040101)
+        }
+    }
+
+    fn prefer_same_cache_group(self, a: ExecutorSlot, b: ExecutorSlot) -> PlacementPreferenceResult {
+        if self.topology.has_known_llc_groups() {
+            return PlacementPreferenceResult(satisfied = true, fallback = 0)
+        }
+        return PlacementPreferenceResult(satisfied = false, fallback = 1)
+    }
+
+    fn prefer_near_device(self, slot: ExecutorSlot, device: PciDevice) -> PlacementPreferenceResult {
+        return PlacementPreferenceResult(satisfied = false, fallback = 1)
+    }
+
+    fn cpu_for(self, slot: ExecutorSlot) -> PlacementTarget {
+        return PlacementTarget(kind = 1, id = slot.id, known = false)
+    }
+
+    fn wake_strategy(self, features: CpuFeatureFacts) -> WakeStrategy {
+        if features.monitor_mwait_available {
+            return WakeStrategy(monitor_mwait = true, fallback_hlt = true)
+        }
+        return WakeStrategy(monitor_mwait = false, fallback_hlt = true)
     }
 }
 
@@ -140,6 +230,8 @@ data Vcpu {
 data InterruptRoutingPlan {
     local_apic: LocalApic
     serial_irq4: IoApicRoute
+    serial_shared_irq4: SharedIrqRoute
+    serial_irq_source: SharedInterruptSource
 }
 
 data ClaimedPciPlan {
@@ -156,7 +248,7 @@ class ClaimedPciPlanBuilder {
     fn empty(self) -> ClaimedPciPlan {
         let empty_mmio = MmioRegion(address = 0, length = 0, panic = self.panic)
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
-        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0)
+        let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0, revision = 0, header_type = 0, interrupt_pin = 0, interrupt_line = 0)
         let empty_device = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
         return ClaimedPciPlan(
             edu_bar0 = empty_mmio,
@@ -172,6 +264,15 @@ data HardwarePlan {
     cpus: CpuTopology
     interrupts: InterruptRoutingPlan
     pci: ClaimedPciPlan
+    timer: TimerAuthority
+    serial_irq_queue: InterruptQueue
+    console_memory: ExecutorMemory
+    worker_memory: ExecutorMemory
+    wake_strategy: WakeStrategy
+
+    fn executor_memory(self, owner: ExecutorSlot, memory: ExecutorMemory) -> ExecutorMemory {
+        return memory
+    }
 }
 
 unique class OwnedHardware {

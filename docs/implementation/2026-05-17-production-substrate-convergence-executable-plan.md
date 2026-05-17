@@ -311,7 +311,7 @@ data PhysicalRegionAuthority {
     panic: BootPanic
 }
 
-class RootArena {
+data RootArena {
     region: PhysicalRegionAuthority
     identity: ArenaIdentity
     policy: ArenaPolicy
@@ -324,16 +324,24 @@ class RootArena {
 
     fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
         let base = (self.region.base + offset + align - 1) & (0 - align)
-        let end = (base - self.region.base) + length
+        let aligned_offset = base - self.region.base
+        let end = aligned_offset + length
         if end > self.region.length {
             self.region.panic.fail(code = 0xAC070001)
         }
-        self.next_offset = end
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
         return ChildArena(root = self, identity = identity, base = base, length = length, next_offset = 0)
     }
 }
 
-class ChildArena {
+data ChildArena {
     root: RootArena
     identity: ArenaIdentity
     base: PhysicalAddress
@@ -1108,7 +1116,7 @@ data PhysicalRegionAuthority {
     }
 }
 
-class RootArena {
+data RootArena {
     region: PhysicalRegionAuthority
     identity: ArenaIdentity
     policy: ArenaPolicy
@@ -1120,11 +1128,19 @@ class RootArena {
 
     fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
         let base = (self.region.base + offset + align - 1) & (0 - align)
-        let end = (base - self.region.base) + length
+        let aligned_offset = base - self.region.base
+        let end = aligned_offset + length
         if end > self.region.length {
             self.region.panic.fail(code = 0xAC070001)
         }
-        self.next_offset = end
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
         return ChildArena(root = self, identity = identity, base = base, length = length, next_offset = 0)
     }
 
@@ -1154,7 +1170,7 @@ class RootArena {
     }
 }
 
-class ChildArena {
+data ChildArena {
     root: RootArena
     identity: ArenaIdentity
     base: PhysicalAddress
@@ -1167,11 +1183,19 @@ class ChildArena {
 
     fn child_at(self, identity: ArenaIdentity, offset: U64, length: U64, align: U64) -> ChildArena {
         let base = (self.base + offset + align - 1) & (0 - align)
-        let end = (base - self.base) + length
+        let aligned_offset = base - self.base
+        let end = aligned_offset + length
         if end > self.length {
             self.root.region.panic.fail(code = 0xAC070001)
         }
-        self.next_offset = end
+        if aligned_offset < self.next_offset {
+            if end > self.next_offset {
+                self.root.region.panic.fail(code = 0xAC070001)
+            }
+        }
+        if end > self.next_offset {
+            self.next_offset = end
+        }
         return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
     }
 }
@@ -3199,6 +3223,18 @@ Create `interrupt_queue.wrela` with the queue and overflow policy types. Add `Ro
 
 ```wrela
 fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+    if capacity == 0 {
+        self.region.panic.fail(code = 0xAC070001)
+    }
+    if payload.size == 0 {
+        self.region.panic.fail(code = 0xAC070001)
+    }
+    if payload.align == 0 {
+        self.region.panic.fail(code = 0xAC070001)
+    }
+    if capacity > (0 - 1) / payload.size {
+        self.region.panic.fail(code = 0xAC070001)
+    }
     let bytes = capacity * payload.size
     let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
     let storage = MutableBytes(address = child.base, length = child.length)
@@ -3206,7 +3242,7 @@ fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity:
 }
 ```
 
-Use the same method body for `RootArena` and `ChildArena`; both types already expose `child(...)`, so this snippet does not depend on a `self.base` field that only exists on `ChildArena`.
+Use the same allocation and overflow checks for `RootArena` and `ChildArena`; `ChildArena` routes the guard failures through `self.root.region.panic`.
 
 - [ ] **Step 4: Implement semantic extraction**
 

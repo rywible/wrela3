@@ -37,6 +37,7 @@ func TestMadtSyntheticEntryOffsetContract(t *testing.T) {
 		"entry_type != 5",
 		"read_u64(offset = offset + 4)",
 		"0xAC040003",
+		"self.panic.fail(code = 0xAC040004)",
 	} {
 		if !strings.Contains(sourceText, want) {
 			t.Fatalf("MADT source missing %q", want)

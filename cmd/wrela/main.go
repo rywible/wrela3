@@ -18,7 +18,7 @@ func run(args []string) int {
 		return 2
 	}
 
-	modeRaw, root, output, repoRoot, ok := parseBuildArgs(args[1:])
+	modeRaw, root, output, reportPath, repoRoot, ok := parseBuildArgs(args[1:])
 	if !ok || root == "" {
 		fmt.Fprintln(os.Stderr, "usage: wrela build --mode dev <root.wrela> -o <out.efi>")
 		return 2
@@ -34,6 +34,7 @@ func run(args []string) int {
 		Mode:       mode,
 		RootPath:   root,
 		OutputPath: output,
+		ReportPath: reportPath,
 		RepoRoot:   repoRoot,
 	})
 	if err != nil {
@@ -50,15 +51,16 @@ func run(args []string) int {
 	return 0
 }
 
-func parseBuildArgs(args []string) (mode, root, output, repoRoot string, ok bool) {
+func parseBuildArgs(args []string) (mode, root, output, reportPath, repoRoot string, ok bool) {
 	repoRoot = "."
+	reportPath = ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--mode":
 			i++
 			if i >= len(args) {
-				return "", "", "", "", false
+				return "", "", "", "", "", false
 			}
 			mode = args[i]
 		case strings.HasPrefix(arg, "--mode="):
@@ -66,25 +68,33 @@ func parseBuildArgs(args []string) (mode, root, output, repoRoot string, ok bool
 		case arg == "-o":
 			i++
 			if i >= len(args) {
-				return "", "", "", "", false
+				return "", "", "", "", "", false
 			}
 			output = args[i]
 		case arg == "--repo-root":
 			i++
 			if i >= len(args) {
-				return "", "", "", "", false
+				return "", "", "", "", "", false
 			}
 			repoRoot = args[i]
 		case strings.HasPrefix(arg, "--repo-root="):
 			repoRoot = strings.TrimPrefix(arg, "--repo-root=")
+		case arg == "--report":
+			i++
+			if i >= len(args) {
+				return "", "", "", "", "", false
+			}
+			reportPath = args[i]
+		case strings.HasPrefix(arg, "--report="):
+			reportPath = strings.TrimPrefix(arg, "--report=")
 		case strings.HasPrefix(arg, "-"):
-			return "", "", "", "", false
+			return "", "", "", "", "", false
 		default:
 			if root != "" {
-				return "", "", "", "", false
+				return "", "", "", "", "", false
 			}
 			root = arg
 		}
 	}
-	return mode, root, output, repoRoot, true
+	return mode, root, output, reportPath, repoRoot, true
 }

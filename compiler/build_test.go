@@ -1,6 +1,11 @@
 package compiler
 
-import "testing"
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestBuildRejectsReleaseMode(t *testing.T) {
 	_, err := Build(BuildOptions{
@@ -27,5 +32,29 @@ func TestBuildRequiresRootAndOutput(t *testing.T) {
 	_, err = Build(BuildOptions{Mode: ModeDev, RootPath: "main.wrela", RepoRoot: "."})
 	if ce := err.(CodeError); ce.Code != "CLI0004" {
 		t.Fatalf("code = %s, want CLI0004", ce.Code)
+	}
+}
+
+func TestBuildWritesReportWhenRequested(t *testing.T) {
+	dir := t.TempDir()
+	result, err := Build(BuildOptions{
+		Mode:       ModeDev,
+		RootPath:   "examples/hello/main.wrela",
+		OutputPath: filepath.Join(dir, "hello.efi"),
+		ReportPath: filepath.Join(dir, "hello.report.json"),
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if result.ReportPath == "" || result.Report == nil {
+		t.Fatalf("BuildResult missing report: %#v", result)
+	}
+	data, err := os.ReadFile(result.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"authority_audit"`)) {
+		t.Fatalf("report missing authority audit:\n%s", data)
 	}
 }

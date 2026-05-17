@@ -3,6 +3,7 @@ package codegen
 import (
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -30,10 +31,12 @@ type frameSave struct {
 }
 
 type compileContext struct {
-	types        map[string]ir.TypeInfo
-	topicLayouts map[string]topicDataLayout
-	SlotVcpu     map[string]int
-	VcpuPlans    map[string]ir.VcpuStartPlan
+	types           map[string]ir.TypeInfo
+	topicLayouts    map[string]topicDataLayout
+	interruptQueues map[uint8]ir.InterruptQueueLayout
+	SlotVcpu        map[string]int
+	VcpuPlans       map[string]ir.VcpuStartPlan
+	APICMode        string
 }
 
 type internalReloc struct {
@@ -85,13 +88,18 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		return nil, ds
 	}
 	ctx := compileContext{
-		types:        program.Types,
-		topicLayouts: topicLayouts,
-		SlotVcpu:     slotVcpuMap(program),
-		VcpuPlans:    vcpuPlanMap(program),
+		types:           program.Types,
+		topicLayouts:    topicLayouts,
+		interruptQueues: interruptQueueByVector(program),
+		SlotVcpu:        slotVcpuMap(program),
+		VcpuPlans:       vcpuPlanMap(program),
+		APICMode:        program.APICMode,
 	}
 	if ctx.types == nil {
 		ctx.types = map[string]ir.TypeInfo{}
+	}
+	if ds := validateAPStartupContract(); len(ds) != 0 {
+		return nil, ds
 	}
 
 	units := make([]compiledUnit, 0, len(program.Functions)+len(program.AsmMethods)+len(program.InterruptBindings)+1)
@@ -121,6 +129,11 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		return nil, ds
 	}
 	units = append(units, interruptUnits...)
+	timerUnits, ds := compileTimerUnits(program, ctx)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	units = append(units, timerUnits...)
 	if program.Entry.Symbol != "" {
 		unit, ds := compileEntryAdapterUnit(program.Entry, ctx)
 		if len(ds) != 0 {
@@ -129,6 +142,9 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		units = append(units, unit)
 	}
 	units = append(units, compileMemoryTrapUnit())
+	units = append(units, compileAPStartupTimeoutTrapUnit())
+	units = append(units, compileInterruptQueueOverflowTrapUnit())
+	units = append(units, compileTimerUnsupportedSourceTrapUnit())
 
 	sections := []Section{{Name: ".text", Data: nil, Characteristics: 0x60000020}}
 	symbols := map[string]uint64{}
@@ -148,7 +164,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
-	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || len(program.VcpuStarts) > 0 || program.Entry.Symbol != "" {
+	if len(program.WritableData) > 0 || len(program.InterruptQueues) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || len(program.VcpuStarts) > 0 || program.Entry.Symbol != "" || len(units) > 0 {
 		section, offsets, ds := buildData(program)
 		if len(ds) != 0 {
 			return nil, ds
@@ -280,16 +296,28 @@ func compileInterruptDispatchUnits(program *ir.Program, ctx compileContext) ([]c
 		bindings[binding.Vector] = binding
 	}
 
-	known := []uint8{0x40, 0x41, 0x42, 0xF0}
+	known := []uint8{0x40, 0x41, 0x42, 0x43, 0xF0}
 	units := make([]compiledUnit, 0, len(known))
 	for _, vector := range known {
 		symbol := interruptVectorSymbol(vector)
+		if vector == 0x43 && len(program.Timers) > 0 {
+			continue
+		}
 		if vector == 0xF0 {
-			units = append(units, buildInterruptWakeUnit(symbol))
+			units = append(units, buildInterruptWakeUnit(symbol, ctx))
 			continue
 		}
 		if binding, ok := bindings[vector]; ok {
 			unit, unitDiags := buildInterruptDispatchUnit(symbol, binding, ctx)
+			if len(unitDiags) != 0 {
+				ds = append(ds, unitDiags...)
+				continue
+			}
+			units = append(units, unit)
+			continue
+		}
+		if queue, ok := ctx.interruptQueues[vector]; ok {
+			unit, unitDiags := buildInterruptQueueOnlyUnit(symbol, queue, ctx)
 			if len(unitDiags) != 0 {
 				ds = append(ds, unitDiags...)
 				continue
@@ -311,6 +339,8 @@ func interruptVectorSymbol(vector uint8) string {
 		return "_wrela_interrupt_vector41_edu_msi"
 	case 0x42:
 		return "_wrela_interrupt_vector42_ivshmem_msix"
+	case 0x43:
+		return "_wrela_interrupt_vector43_timer"
 	case 0xF0:
 		return "_wrela_interrupt_vectorf0_wake"
 	default:
@@ -333,6 +363,30 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding, ctx 
 	emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
 	emitCallReloc(e, binding.EventFunctionSymbol)
 	emitInterruptTopicPublish(e, binding, ctx)
+	if queue, ok := ctx.interruptQueues[binding.Vector]; ok {
+		emitInterruptQueuePushPayload(e, queue, binding.EventStorageSymbol, uint64(binding.EventStorageSize))
+	}
+	emitLocalApicEOI(e)
+	emitInterruptRestore(e)
+	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
+	e.resolveJumps()
+	if len(e.Diags) != 0 {
+		return compiledUnit{}, e.Diags
+	}
+	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}, nil
+}
+
+func buildInterruptQueueOnlyUnit(symbol string, queue ir.InterruptQueueLayout, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
+	if symbol == "" {
+		return compiledUnit{}, []diag.Diagnostic{{
+			Phase:   diagnosticPhase,
+			Code:    diag.CG0001,
+			Message: fmt.Sprintf("missing interrupt vector symbol 0x%02x", queue.Vector),
+		}}
+	}
+	e := &Emitter{Labels: map[string]int{}, ctx: ctx}
+	emitInterruptSave(e)
+	emitInterruptQueuePush(e, queue)
 	emitLocalApicEOI(e)
 	emitInterruptRestore(e)
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
@@ -410,7 +464,7 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	emitRegRegMove(e, slot, seq)
 	emitMovImmToReg(e, mask, int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, mask)
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, mask, layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
@@ -423,13 +477,28 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 }
 
 func emitLocalApicEOI(e *Emitter) {
+	if usesX2APIC(e.ctx.APICMode) {
+		emitMovImmToReg(e, asm.MustLookup("r10"), 0)
+		emitX2APICWriteMSR(e, x2apicEOIMSR, asm.MustLookup("r10"))
+		return
+	}
+	if usesRuntimeX2APICFallback(e.ctx.APICMode) {
+		// Fallback mode keeps interrupt completion on the xAPIC contract used by
+		// the AP trampoline; x2APIC EOI is reserved for explicitly enabled modes.
+		emitLocalApicMMIOEOI(e)
+		return
+	}
+	emitLocalApicMMIOEOI(e)
+}
+
+func emitLocalApicMMIOEOI(e *Emitter) {
 	emitLoadLocalApicBase(e, asm.MustLookup("r11"))
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.RegOperand{Reg: asm.MustLookup("eax")},
 		asm.ImmOperand{Value: 0},
 	}})
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.MemOperand{Base: asm.MustLookup("r11"), Disp: 0xB0, Width: 32},
+		asm.MemOperand{Base: asm.MustLookup("r11"), Disp: lapicEOI, Width: 32},
 		asm.RegOperand{Reg: asm.MustLookup("eax")},
 	}})
 }
@@ -445,15 +514,13 @@ func buildInterruptTrapUnit(symbol string) compiledUnit {
 	}
 }
 
-func buildInterruptWakeUnit(symbol string) compiledUnit {
-	e := &Emitter{Labels: map[string]int{}}
-	emitPushReg(e, asm.MustLookup("rax"))
-	emitPushReg(e, asm.MustLookup("r11"))
+func buildInterruptWakeUnit(symbol string, ctx compileContext) compiledUnit {
+	e := &Emitter{Labels: map[string]int{}, ctx: ctx}
+	emitInterruptSave(e)
 	emitLocalApicEOI(e)
-	emitPopReg(e, asm.MustLookup("r11"))
-	emitPopReg(e, asm.MustLookup("rax"))
+	emitInterruptRestore(e)
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
-	return compiledUnit{Symbol: symbol, Bytes: e.Code}
+	return compiledUnit{Symbol: symbol, Bytes: e.Code, DataReloc: e.DataReloc}
 }
 
 func emitCallReloc(e *Emitter, symbol string) {
@@ -472,6 +539,20 @@ func compileMemoryTrapUnit() compiledUnit {
 	}
 }
 
+func compileAPStartupTimeoutTrapUnit() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	e.emitInstruction(asm.Instruction{Mnemonic: "cli"})
+	emitHltLoop(e)
+	return compiledUnit{Symbol: "_wrela_ap_startup_timeout", Bytes: e.Code}
+}
+
+func compileInterruptQueueOverflowTrapUnit() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	e.emitInstruction(asm.Instruction{Mnemonic: "cli"})
+	emitHltLoop(e)
+	return compiledUnit{Symbol: "_wrela_interrupt_queue_overflow", Bytes: e.Code}
+}
+
 type builtDataSection struct {
 	Section Section
 	Offsets map[string]uint64
@@ -479,16 +560,71 @@ type builtDataSection struct {
 
 func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnostic) {
 	writable := append([]ir.DataObject{}, program.WritableData...)
+	queueObjects, ds := interruptQueueDataObjects(program)
+	if len(ds) != 0 {
+		return Section{}, nil, ds
+	}
+	writable = append(writable, queueObjects...)
 	topicObjects, ds := topicDataObjects(program)
 	if len(ds) != 0 {
 		return Section{}, nil, ds
 	}
 	writable = append(writable, topicObjects...)
 	writable = append(writable, localApicBaseDataObject())
+	writable = append(writable, monitorMwaitWaitlineDataObjects(program)...)
 	writable = append(writable, vcpuStartupData(program)...)
 	writable = append(writable, interruptRuntimeData(program)...)
 	section, offsets := buildDataSection(".data", writable, 0xC0000040)
 	return section, offsets, nil
+}
+
+func monitorMwaitWaitlineSymbol(slot string) string {
+	return "_wrela_monitor_mwait_waitline_" + sanitizeSymbol(slot)
+}
+
+func monitorMwaitWaitlineDataObjects(program *ir.Program) []ir.DataObject {
+	if program == nil {
+		return nil
+	}
+	labels := map[string]bool{}
+	for _, start := range program.VcpuStarts {
+		if start.SlotLabel != "" {
+			labels[start.SlotLabel] = true
+		}
+	}
+	for _, fn := range program.Functions {
+		for _, block := range fn.Blocks {
+			for _, op := range block.Ops {
+				switch wait := op.(type) {
+				case ir.TopicWait:
+					if wait.UseMonitorMwait && wait.SlotLabel != "" {
+						labels[wait.SlotLabel] = true
+					}
+				case *ir.TopicWait:
+					if wait != nil && wait.UseMonitorMwait && wait.SlotLabel != "" {
+						labels[wait.SlotLabel] = true
+					}
+				}
+			}
+		}
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0, len(labels))
+	for label := range labels {
+		ordered = append(ordered, label)
+	}
+	sort.Strings(ordered)
+	out := make([]ir.DataObject, 0, len(ordered))
+	for _, label := range ordered {
+		out = append(out, ir.DataObject{
+			Symbol: monitorMwaitWaitlineSymbol(label),
+			Bytes:  make([]byte, 8),
+			Align:  8,
+		})
+	}
+	return out
 }
 
 func interruptRuntimeData(program *ir.Program) []ir.DataObject {
@@ -578,6 +714,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitBinary(e, v, frame)
 			case *ir.Call:
 				emitCall(e, v, frame)
+			case *ir.TimerInit:
+				emitTimerInit(e, frame, v)
 			case *ir.Return:
 				hasReturn = true
 				emitReturn(e, v, frame)
@@ -631,9 +769,9 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				vv := v
 				emitTopicWaitIfArmed(e, frame, &vv)
 			case *ir.TopicWait:
-				emitHltWait(e)
+				emitTopicWait(e, *v)
 			case ir.TopicWait:
-				emitHltWait(e)
+				emitTopicWait(e, v)
 			case *ir.VcpuStart:
 				emitVcpuStart(e, v, frame, ctx)
 			case ir.VcpuStart:
@@ -646,6 +784,9 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				vv := v
 				emitVcpuEnter(e, &vv, frame, ctx)
 				hasReturn = true
+			case ir.TimerInit:
+				vv := v
+				emitTimerInit(e, frame, &vv)
 			}
 		}
 	}
@@ -1137,36 +1278,80 @@ func emitHltWait(e *Emitter) {
 	e.emit(0xF4)
 }
 
+func emitStiHltWait(e *Emitter) {
+	e.emit(0xFB)
+	emitHltWait(e)
+}
+
+func emitTopicWait(e *Emitter, wait ir.TopicWait) {
+	if wait.UseMonitorMwait {
+		emitMonitorMwaitWait(e, wait)
+		return
+	}
+	emitFallbackWait(e, wait.Fallback)
+}
+
+func emitFallbackWait(e *Emitter, fallback string) {
+	if fallback == "sti_hlt" {
+		emitStiHltWait(e)
+		return
+	}
+	emitHltWait(e)
+}
+
 func emitMonitorMwait(e *Emitter, addressReg asm.Reg) {
+	emitMonitorInstruction(e, addressReg)
+	emitMwaitInstruction(e)
+}
+
+func emitMonitorInstruction(e *Emitter, addressReg asm.Reg) {
 	if addressReg.Name != "rax" {
 		e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 			asm.RegOperand{Reg: asm.MustLookup("rax")},
 			asm.RegOperand{Reg: addressReg},
 		}})
 	}
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-	}})
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("edx")},
-		asm.RegOperand{Reg: asm.MustLookup("edx")},
-	}})
+	e.emit(0x31, 0xC9)
+	e.emit(0x31, 0xD2)
 	e.emit(0x0F, 0x01, 0xC8)
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-		asm.RegOperand{Reg: asm.MustLookup("ecx")},
-	}})
-	e.emitInstruction(asm.Instruction{Mnemonic: "xor", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("eax")},
-		asm.RegOperand{Reg: asm.MustLookup("eax")},
-	}})
+}
+
+func emitMwaitInstruction(e *Emitter) {
+	e.emit(0x31, 0xC9)
+	e.emit(0x31, 0xC0)
 	e.emit(0x0F, 0x01, 0xC9)
+}
+
+func emitMonitorMwaitWait(e *Emitter, wait ir.TopicWait) {
+	fallback := e.newLabel("monitor_mwait_fallback")
+	done := e.newLabel("monitor_mwait_done")
+
+	e.emit(0x53)
+	emitMovImmToReg(e, asm.MustLookup("rax"), 1)
+	e.emit(0x0F, 0xA2)
+	emitMovImmToReg(e, asm.MustLookup("r10"), 8)
+	emitRegRegOp(e, 0x21, asm.MustLookup("rcx"), asm.MustLookup("r10"))
+	emitMovImmToReg(e, asm.MustLookup("r10"), 0)
+	emitCmpRegReg(e, asm.MustLookup("rcx"), asm.MustLookup("r10"))
+	e.emit(0x5B)
+	e.emitJcc(0x84, fallback)
+
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), monitorMwaitWaitlineSymbol(wait.SlotLabel))
+	emitLoadMemToReg(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
+	emitMonitorInstruction(e, asm.MustLookup("rax"))
+	emitCmpRegMem(e, asm.MustLookup("r10"), asm.MustLookup("rax"), 0, 64)
+	e.emitJcc(0x85, done)
+	emitMwaitInstruction(e)
+	e.emitJmp(done)
+
+	e.bindLabel(fallback)
+	emitFallbackWait(e, wait.Fallback)
+	e.bindLabel(done)
 }
 
 func compileWaitFallbackUnitForTest() compiledUnit {
 	e := &Emitter{Labels: map[string]int{}}
-	emitHltWait(e)
+	emitStiHltWait(e)
 	return compiledUnit{Symbol: "wait_fallback_test", Bytes: e.Code}
 }
 
@@ -1174,6 +1359,13 @@ func compileMonitorMwaitUnitForTest() compiledUnit {
 	e := &Emitter{Labels: map[string]int{}}
 	emitMonitorMwait(e, asm.MustLookup("rax"))
 	return compiledUnit{Symbol: "monitor_mwait_test", Bytes: e.Code}
+}
+
+func compileTopicWaitUnitForTest(wait ir.TopicWait) compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	emitTopicWait(e, wait)
+	e.resolveJumps()
+	return compiledUnit{Symbol: "topic_wait_test", Bytes: e.Code, DataReloc: e.DataReloc}
 }
 
 func emitPrologue(e *Emitter, params []ir.Value, frame Frame) {
@@ -1241,6 +1433,17 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	case "and":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
+	case "mul", "*":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegIMul(e, scratchRegs[0], scratchRegs[1])
+	case "/":
+		if op.Type.Name != "U64" {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: /"})
+			return
+		}
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegOp(e, 0x31, asm.MustLookup("rdx"), asm.MustLookup("rdx"))
+		emitUnsignedDivReg(e, scratchRegs[1])
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
 		if !ok || constValue.Value > 63 {
@@ -1470,6 +1673,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitBinary(e, v, frame)
 		case *ir.Call:
 			emitCall(e, v, frame)
+		case *ir.TimerInit:
+			emitTimerInit(e, frame, v)
 		case *ir.Return:
 			emitReturn(e, v, frame)
 		case *ir.If:
@@ -1522,9 +1727,9 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			vv := v
 			emitTopicWaitIfArmed(e, frame, &vv)
 		case *ir.TopicWait:
-			emitHltWait(e)
+			emitTopicWait(e, *v)
 		case ir.TopicWait:
-			emitHltWait(e)
+			emitTopicWait(e, v)
 		case *ir.VcpuStart:
 			emitVcpuStart(e, v, frame, e.ctx)
 		case ir.VcpuStart:
@@ -1535,6 +1740,9 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 		case ir.VcpuEnter:
 			vv := v
 			emitVcpuEnter(e, &vv, frame, e.ctx)
+		case ir.TimerInit:
+			vv := v
+			emitTimerInit(e, frame, &vv)
 		}
 	}
 }
@@ -1977,7 +2185,7 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitRegRegMove(e, slot, seq)
 	emitMovImmToReg(e, asm.MustLookup("rdx"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdx"))
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, asm.MustLookup("rdx"), layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
@@ -2046,7 +2254,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitRegRegMove(e, slot, producer)
 	emitMovImmToReg(e, value, int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, value)
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, value, layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, producer, 1)
@@ -2168,11 +2376,22 @@ func emitWakeSlot(e *Emitter, slot string, ctx compileContext) {
 		}
 		return
 	}
+	emitTouchMonitorMwaitWaitline(e, slot)
 	emitLoadLocalApicBase(e, asm.MustLookup("r11"))
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), vcpuAPICIDCommandSymbol(vcpuID))
 	emitLoadMemToReg(e, asm.MustLookup("rax"), asm.MustLookup("rax"), 0, 64)
-	emitLapicWriteRegWithBaseReg(e, asm.MustLookup("r11"), lapicICRHigh, asm.MustLookup("rax"))
-	emitLapicWriteWithBaseReg(e, asm.MustLookup("r11"), lapicICRLow, 0x00004000|0xF0)
+	emitSendIcrForMode(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0x00004000|0xF0, ctx.APICMode)
+}
+
+func emitTouchMonitorMwaitWaitline(e *Emitter, slot string) {
+	if slot == "" {
+		return
+	}
+	emitMovDataAddressToReg(e, asm.MustLookup("rax"), monitorMwaitWaitlineSymbol(slot))
+	emitLoadMemToReg(e, asm.MustLookup("r11"), asm.MustLookup("rax"), 0, 64)
+	emitAddImm(e, asm.MustLookup("r11"), 1)
+	emitStoreMemFromReg(e, asm.MustLookup("rax"), 0, asm.MustLookup("r11"), 64)
+	emitMfence(e)
 }
 
 func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg, dst asm.Reg, tmp asm.Reg) {
@@ -2189,6 +2408,11 @@ func emitReliableTopicMinCursor(e *Emitter, layout topicDataLayout, base asm.Reg
 		emitRegRegMove(e, dst, tmp)
 		e.bindLabel(skip)
 	}
+}
+
+func emitScaleTopicSlot(e *Emitter, slot asm.Reg, scratch asm.Reg, layout topicDataLayout) {
+	emitMovImmToReg(e, scratch, int64(layout.SlotSize))
+	emitRegRegIMul(e, slot, scratch)
 }
 
 func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
@@ -2250,7 +2474,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitRegRegMove(e, slot, cursor)
 	emitMovImmToReg(e, asm.MustLookup("rdi"), int64(layout.Depth-1))
 	emitRegRegOp(e, 0x21, slot, asm.MustLookup("rdi"))
-	emitShiftImm(e, 0x04, slot, 6)
+	emitScaleTopicSlot(e, slot, asm.MustLookup("rdi"), layout)
 	emitAddImm(e, slot, int64(layout.SlotsOffset))
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, cursor, 1)
@@ -2906,6 +3130,17 @@ func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {
 		rex |= 0x01
 	}
 	e.emit(rex, opcode, encodeModRM(3, right.Low3, left.Low3))
+}
+
+func emitRegRegIMul(e *Emitter, dst asm.Reg, src asm.Reg) {
+	rex := byte(0x48)
+	if dst.High {
+		rex |= 0x04
+	}
+	if src.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0x0F, 0xAF, encodeModRM(3, dst.Low3, src.Low3))
 }
 
 func emitSetccAl(e *Emitter, opcode byte) {

@@ -7,11 +7,38 @@ data InterruptVector {
     value: U32
 }
 
+data InterruptSourceIdentity {
+    label: StringLiteral
+}
+
+data SharedInterruptSource {
+    vector: InterruptVector
+    identity: InterruptSourceIdentity
+}
+
 data InterruptOverride {
     bus: U8
     source: U8
     gsi: U32
     flags: U16
+}
+
+data ApicModeFacts {
+    xapic_available: Bool
+    x2apic_available: Bool
+    local_apic_base: PhysicalAddress
+}
+
+data ApicModeSelection {
+    mode: U32
+    required: Bool
+
+    fn with_xapic_fallback(self) -> ApicModeSelection {
+        if self.mode == 2 {
+            return self
+        }
+        return ApicModeSelection(mode = 1, required = false)
+    }
 }
 
 data InterruptOverrideSet {
@@ -24,6 +51,7 @@ data InterruptOverrideSet {
     override5: InterruptOverride
     override6: InterruptOverride
     override7: InterruptOverride
+    panic: BootPanic
 
     fn append(self, bus: U8, source: U8, gsi: U32, flags: U16) {
         let entry = InterruptOverride(bus = bus, source = source, gsi = gsi, flags = flags)
@@ -35,7 +63,10 @@ data InterruptOverrideSet {
         if self.count == 5 { self.override5 = entry }
         if self.count == 6 { self.override6 = entry }
         if self.count == 7 { self.override7 = entry }
-        if self.count < 8 { self.count = self.count + 1 }
+        if self.count < 8 { self.count = self.count + 1
+            return
+        }
+        self.panic.fail(code = 0xAC040006)
     }
 
     fn at(self, index: U64) -> InterruptOverride {
@@ -132,7 +163,9 @@ data IoApicSet {
         if self.count == 0 {
             self.io_apic0 = IoApicDiscovered(id = id, address = address, gsi_base = gsi_base, panic = panic)
             self.count = 1
+            return
         }
+        panic.fail(code = 0xAC040005)
     }
 }
 
@@ -165,11 +198,38 @@ data IoApicRoute {
     }
 }
 
+class SharedIrqRoute {
+    route: IoApicRoute
+    vector: InterruptVector
+
+    fn claim_source(self, identity: InterruptSourceIdentity) -> SharedInterruptSource {
+        return SharedInterruptSource(vector = InterruptVector(value = self.vector.value), identity = InterruptSourceIdentity(label = identity.label))
+    }
+}
+
 data InterruptAuthority {
     local_apic: LocalApic
     io_apics: IoApicSet
     overrides: InterruptOverrideSet
+    apic_facts: ApicModeFacts
     panic: BootPanic
+
+    fn select_apic_mode(self) -> ApicModeSelection {
+        if self.apic_facts.x2apic_available {
+            return ApicModeSelection(mode = 2, required = false)
+        }
+        if self.apic_facts.xapic_available {
+            return ApicModeSelection(mode = 1, required = false)
+        }
+        self.panic.fail(code = 0xAC050010)
+    }
+
+    fn require_x2apic(self) -> ApicModeSelection {
+        if self.apic_facts.x2apic_available == false {
+            self.panic.fail(code = 0xAC050011)
+        }
+        return ApicModeSelection(mode = 2, required = true)
+    }
 
     fn route_isa_irq(self, irq: U8, vector: InterruptVector) -> IoApicRoute {
         let gsi = self.overrides.gsi_for_isa_irq(irq = irq)
@@ -182,6 +242,11 @@ data InterruptAuthority {
             self.panic.fail(code = 0xAC050001)
         }
         return IoApicRoute(io_apic = io_apic, gsi = gsi, flags = flags, vector = InterruptVector(value = vector.value), destination_apic_id = self.local_apic.apic_id)
+    }
+
+    fn route_shared_irq(self, irq: U8, vector: InterruptVector) -> SharedIrqRoute {
+        let route = self.route_isa_irq(irq = irq, vector = vector)
+        return SharedIrqRoute(route = route, vector = InterruptVector(value = vector.value))
     }
 }
 

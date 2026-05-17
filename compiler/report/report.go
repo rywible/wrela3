@@ -9,6 +9,44 @@ type ImageReport struct {
 	AuthorityAudit AuthorityAuditReport `json:"authority_audit"`
 }
 
+func NewImageReport(image string) ImageReport {
+	return ImageReport{
+		Version: 1,
+		Image:   image,
+		Memory: MemoryReport{
+			RootRegions:     []MemoryRootReport{},
+			Arenas:          []ArenaReport{},
+			ExecutorBudgets: []ExecutorBudgetReport{},
+		},
+		Hardware: HardwareReport{
+			Claims:      []AuthorityRecord{},
+			PCI:         []PCIReport{},
+			Timers:      []TimerReport{},
+			Locality:    []LocalityReport{},
+			Framebuffer: FramebufferReport{},
+		},
+		Runtime: RuntimeReport{
+			Executors:       []ExecutorReport{},
+			Placement:       []PlacementReport{},
+			Interrupts:      []AuthorityRecord{},
+			Topics:          []TopicReport{},
+			InterruptQueues: []InterruptQueueReport{},
+			WakePaths:       []WakePathReport{},
+		},
+		AuthorityAudit: AuthorityAuditReport{
+			MemoryRoots:    []AuthorityRecord{},
+			Arenas:         []AuthorityRecord{},
+			HardwareClaims: []AuthorityRecord{},
+			Interrupts:     []AuthorityRecord{},
+			Timers:         []AuthorityRecord{},
+			Queues:         []AuthorityRecord{},
+			Topics:         []AuthorityRecord{},
+			WakeTargets:    []AuthorityRecord{},
+			DMABuffers:     []AuthorityRecord{},
+		},
+	}
+}
+
 type MemoryReport struct {
 	TotalBytes      uint64                 `json:"total_bytes"`
 	RootRegions     []MemoryRootReport     `json:"root_regions"`
@@ -28,6 +66,7 @@ type ArenaReport struct {
 	Base   uint64 `json:"base"`
 	Bytes  uint64 `json:"bytes"`
 	Owner  string `json:"owner"`
+	Kind   string `json:"kind"`
 }
 
 type ExecutorBudgetReport struct {
@@ -36,14 +75,16 @@ type ExecutorBudgetReport struct {
 }
 
 type HardwareReport struct {
-	PCI      []PCIReport      `json:"pci"`
-	APIC     APICReport       `json:"apic"`
-	Timers   []TimerReport    `json:"timers"`
-	Locality []LocalityReport `json:"locality"`
+	Claims      []AuthorityRecord `json:"claims"`
+	PCI         []PCIReport       `json:"pci"`
+	APIC        APICReport        `json:"apic"`
+	Timers      []TimerReport     `json:"timers"`
+	Locality    []LocalityReport  `json:"locality"`
+	Framebuffer FramebufferReport `json:"framebuffer"`
 }
 
 type PCIReport struct {
-	Identity string `json:"identity"`
+	Identity string      `json:"identity"`
 	BARs     []BARReport `json:"bars"`
 }
 
@@ -55,12 +96,15 @@ type BARReport struct {
 }
 
 type APICReport struct {
-	Mode string `json:"mode"`
+	Mode             string `json:"mode"`
+	SelectedAPICMode uint32 `json:"selected_apic_mode"`
+	Required         bool   `json:"required"`
+	Fallback         string `json:"fallback,omitempty"`
 }
 
 type TimerReport struct {
-	Label  string `json:"label"`
-	Source string `json:"source"`
+	Label    string `json:"label"`
+	Source   string `json:"source"`
 	PeriodUS uint64 `json:"period_us"`
 }
 
@@ -71,9 +115,20 @@ type LocalityReport struct {
 	Known   bool   `json:"known"`
 }
 
+type FramebufferReport struct {
+	Base   uint64 `json:"base"`
+	Bytes  uint64 `json:"bytes"`
+	Width  uint32 `json:"width"`
+	Height uint32 `json:"height"`
+	Stride uint32 `json:"stride"`
+	Format uint32 `json:"format"`
+	Known  bool   `json:"known"`
+}
+
 type RuntimeReport struct {
 	Executors       []ExecutorReport       `json:"executors"`
 	Placement       []PlacementReport      `json:"placement"`
+	Interrupts      []AuthorityRecord      `json:"interrupts"`
 	Topics          []TopicReport          `json:"topics"`
 	InterruptQueues []InterruptQueueReport `json:"interrupt_queues"`
 	WakePaths       []WakePathReport       `json:"wake_paths"`
