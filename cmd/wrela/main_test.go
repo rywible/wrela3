@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,22 @@ func TestRunAcceptsOutputFlagAfterRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Fatalf("expected output file %q to exist: %v", out, err)
+	}
+}
+
+func TestRunAcceptsReportFlag(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "hello.efi")
+	rep := filepath.Join(dir, "hello.report.json")
+	code := run([]string{"build", "--mode", "dev", "examples/hello/main.wrela", "-o", out, "--report", rep})
+	if code != 0 {
+		t.Fatalf("run exit = %d, want 0", code)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("expected EFI output: %v", err)
+	}
+	if _, err := os.Stat(rep); err != nil {
+		t.Fatalf("expected report output: %v", err)
 	}
 }
 

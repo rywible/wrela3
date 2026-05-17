@@ -9,6 +9,41 @@ type ImageReport struct {
 	AuthorityAudit AuthorityAuditReport `json:"authority_audit"`
 }
 
+func NewImageReport(image string) ImageReport {
+	return ImageReport{
+		Version: 1,
+		Image:   image,
+		Memory: MemoryReport{
+			RootRegions:     []MemoryRootReport{},
+			Arenas:          []ArenaReport{},
+			ExecutorBudgets: []ExecutorBudgetReport{},
+		},
+		Hardware: HardwareReport{
+			PCI:      []PCIReport{},
+			Timers:   []TimerReport{},
+			Locality: []LocalityReport{},
+		},
+		Runtime: RuntimeReport{
+			Executors:       []ExecutorReport{},
+			Placement:       []PlacementReport{},
+			Topics:          []TopicReport{},
+			InterruptQueues: []InterruptQueueReport{},
+			WakePaths:       []WakePathReport{},
+		},
+		AuthorityAudit: AuthorityAuditReport{
+			MemoryRoots:    []AuthorityRecord{},
+			Arenas:         []AuthorityRecord{},
+			HardwareClaims: []AuthorityRecord{},
+			Interrupts:     []AuthorityRecord{},
+			Timers:         []AuthorityRecord{},
+			Queues:         []AuthorityRecord{},
+			Topics:         []AuthorityRecord{},
+			WakeTargets:    []AuthorityRecord{},
+			DMABuffers:     []AuthorityRecord{},
+		},
+	}
+}
+
 type MemoryReport struct {
 	TotalBytes      uint64                 `json:"total_bytes"`
 	RootRegions     []MemoryRootReport     `json:"root_regions"`
@@ -43,7 +78,7 @@ type HardwareReport struct {
 }
 
 type PCIReport struct {
-	Identity string `json:"identity"`
+	Identity string      `json:"identity"`
 	BARs     []BARReport `json:"bars"`
 }
 
@@ -59,8 +94,8 @@ type APICReport struct {
 }
 
 type TimerReport struct {
-	Label  string `json:"label"`
-	Source string `json:"source"`
+	Label    string `json:"label"`
+	Source   string `json:"source"`
 	PeriodUS uint64 `json:"period_us"`
 }
 
