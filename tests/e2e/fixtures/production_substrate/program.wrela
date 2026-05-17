@@ -56,7 +56,6 @@ executor ProductionSubstrateProgram {
         self.interrupts.initialize_for_com1_receive()
         self.edu_msi.route(vector = InterruptVector(value = 0x41), target = self.interrupts.local_apic)
         self.ivshmem_msix.route_entry(entry = 0, vector = InterruptVector(value = 0x42), target = self.interrupts.local_apic)
-        self.serial_path.enable_receive_interrupts()
         self.interrupts.enable_cpu_interrupts()
         self.edu_path.raise_test_interrupt()
         self.ivshmem_tx.ring_peer(peer_id = self.ivshmem_rx.position(), vector = 0)

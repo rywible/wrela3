@@ -32,7 +32,7 @@ data PhysicalRegionAuthority {
     }
 }
 
-class RootArena {
+data RootArena {
     region: PhysicalRegionAuthority
     identity: ArenaIdentity
     policy: ArenaPolicy
@@ -113,7 +113,7 @@ class RootArena {
     }
 }
 
-class ChildArena {
+data ChildArena {
     root: RootArena
     identity: ArenaIdentity
     base: PhysicalAddress
