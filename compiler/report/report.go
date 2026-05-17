@@ -19,9 +19,10 @@ func NewImageReport(image string) ImageReport {
 			ExecutorBudgets: []ExecutorBudgetReport{},
 		},
 		Hardware: HardwareReport{
-			PCI:      []PCIReport{},
-			Timers:   []TimerReport{},
-			Locality: []LocalityReport{},
+			PCI:         []PCIReport{},
+			Timers:      []TimerReport{},
+			Locality:    []LocalityReport{},
+			Framebuffer: FramebufferReport{},
 		},
 		Runtime: RuntimeReport{
 			Executors:       []ExecutorReport{},
@@ -71,10 +72,11 @@ type ExecutorBudgetReport struct {
 }
 
 type HardwareReport struct {
-	PCI      []PCIReport      `json:"pci"`
-	APIC     APICReport       `json:"apic"`
-	Timers   []TimerReport    `json:"timers"`
-	Locality []LocalityReport `json:"locality"`
+	PCI         []PCIReport       `json:"pci"`
+	APIC        APICReport        `json:"apic"`
+	Timers      []TimerReport     `json:"timers"`
+	Locality    []LocalityReport  `json:"locality"`
+	Framebuffer FramebufferReport `json:"framebuffer"`
 }
 
 type PCIReport struct {
@@ -104,6 +106,16 @@ type LocalityReport struct {
 	Kind    string `json:"kind"`
 	Value   string `json:"value"`
 	Known   bool   `json:"known"`
+}
+
+type FramebufferReport struct {
+	Base   uint64 `json:"base"`
+	Bytes  uint64 `json:"bytes"`
+	Width  uint32 `json:"width"`
+	Height uint32 `json:"height"`
+	Stride uint32 `json:"stride"`
+	Format uint32 `json:"format"`
+	Known  bool   `json:"known"`
 }
 
 type RuntimeReport struct {

@@ -107,6 +107,39 @@ type InterruptConfiguratorNode struct {
 	Span      source.Span
 }
 
+type APICFactNode struct {
+	Mode            string
+	XAPICAvailable  bool
+	X2APICAvailable bool
+	Span            source.Span
+}
+
+type TimerFactNode struct {
+	Label    string
+	Source   string
+	PeriodUS uint64
+	Span     source.Span
+}
+
+type LocalityFactNode struct {
+	Subject string
+	Kind    string
+	Value   string
+	Known   bool
+	Span    source.Span
+}
+
+type FramebufferFactNode struct {
+	Base   uint64
+	Bytes  uint64
+	Width  uint32
+	Height uint32
+	Stride uint32
+	Format uint32
+	Known  bool
+	Span   source.Span
+}
+
 type HardwareClaimNode struct {
 	Kind string
 	Key  string
@@ -161,6 +194,10 @@ type ImageGraph struct {
 	Paths                   []PathNode
 	InterruptTopicRoutes    []InterruptTopicRouteNode
 	InterruptConfigurators  []InterruptConfiguratorNode
+	APICFacts               []APICFactNode
+	TimerFacts              []TimerFactNode
+	LocalityFacts           []LocalityFactNode
+	FramebufferFacts        []FramebufferFactNode
 	HardwareClaims          []HardwareClaimNode
 	VcpuPlacements          []VcpuPlacementNode
 	MemoryRoots             []MemoryRootNode

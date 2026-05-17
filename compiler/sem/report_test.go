@@ -48,6 +48,42 @@ func TestBuildImageReport(t *testing.T) {
 	}
 }
 
+func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		HardwareClaims: []HardwareClaimNode{
+			{Kind: "pci_bar", Key: "edu.bar0"},
+		},
+		APICFacts: []APICFactNode{
+			{Mode: "xapic_fallback"},
+		},
+		TimerFacts: []TimerFactNode{
+			{Label: "periodic.1000us", Source: "local_apic_pit_calibrated", PeriodUS: 1000},
+		},
+		LocalityFacts: []LocalityFactNode{
+			{Subject: "cpu0", Kind: "numa_node", Value: "0", Known: false},
+		},
+		FramebufferFacts: []FramebufferFactNode{
+			{Known: false},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if len(r.AuthorityAudit.HardwareClaims) != 1 || r.AuthorityAudit.HardwareClaims[0].Owner != "delegated_hardware" {
+		t.Fatalf("hardware claims missing from report: %#v", r.AuthorityAudit.HardwareClaims)
+	}
+	if r.Hardware.APIC.Mode != "xapic_fallback" {
+		t.Fatalf("APIC mode missing from report: %#v", r.Hardware.APIC)
+	}
+	if len(r.Hardware.Timers) != 1 || r.Hardware.Timers[0].Source != "local_apic_pit_calibrated" {
+		t.Fatalf("timer facts missing from report: %#v", r.Hardware.Timers)
+	}
+	if len(r.Hardware.Locality) != 1 || r.Hardware.Locality[0].Known {
+		t.Fatalf("unknown locality fact missing from report: %#v", r.Hardware.Locality)
+	}
+	if r.Hardware.Framebuffer.Known {
+		t.Fatalf("unknown framebuffer fact missing from report: %#v", r.Hardware.Framebuffer)
+	}
+}
+
 func TestImageNameForReportDefaultsToImage(t *testing.T) {
 	reportImage := BuildImageReport(nil)
 	if reportImage.Image != "image" {

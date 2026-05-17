@@ -44,9 +44,10 @@ func TestNewImageReportUsesEmptyArrays(t *testing.T) {
 			ExecutorBudgets []ExecutorBudgetReport `json:"executor_budgets"`
 		} `json:"memory"`
 		Hardware struct {
-			PCI      []PCIReport      `json:"pci"`
-			Timers   []TimerReport    `json:"timers"`
-			Locality []LocalityReport `json:"locality"`
+			PCI         []PCIReport       `json:"pci"`
+			Timers      []TimerReport     `json:"timers"`
+			Locality    []LocalityReport  `json:"locality"`
+			Framebuffer FramebufferReport `json:"framebuffer"`
 		} `json:"hardware"`
 		Runtime struct {
 			Executors       []ExecutorReport       `json:"executors"`

@@ -36,8 +36,48 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 			Owner: arena.Owner,
 		})
 	}
+	appendDiscoveryFacts(&r, checked.ImageGraph)
 
 	return r
+}
+
+func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
+	for _, claim := range g.HardwareClaims {
+		r.AuthorityAudit.HardwareClaims = append(r.AuthorityAudit.HardwareClaims, report.AuthorityRecord{
+			Kind:  claim.Kind,
+			Label: claim.Key,
+			Owner: "delegated_hardware",
+		})
+	}
+	for _, fact := range g.APICFacts {
+		r.Hardware.APIC.Mode = fact.Mode
+	}
+	for _, timer := range g.TimerFacts {
+		r.Hardware.Timers = append(r.Hardware.Timers, report.TimerReport{
+			Label:    timer.Label,
+			Source:   timer.Source,
+			PeriodUS: timer.PeriodUS,
+		})
+	}
+	for _, locality := range g.LocalityFacts {
+		r.Hardware.Locality = append(r.Hardware.Locality, report.LocalityReport{
+			Subject: locality.Subject,
+			Kind:    locality.Kind,
+			Value:   locality.Value,
+			Known:   locality.Known,
+		})
+	}
+	for _, framebuffer := range g.FramebufferFacts {
+		r.Hardware.Framebuffer = report.FramebufferReport{
+			Base:   framebuffer.Base,
+			Bytes:  framebuffer.Bytes,
+			Width:  framebuffer.Width,
+			Height: framebuffer.Height,
+			Stride: framebuffer.Stride,
+			Format: framebuffer.Format,
+			Known:  framebuffer.Known,
+		}
+	}
 }
 
 func imageNameForReport(checked *CheckedProgram) string {

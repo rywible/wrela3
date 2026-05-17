@@ -36,6 +36,10 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	if fieldTypeName(t, discovered, "framebuffer") != "FramebufferInfo" {
 		t.Fatalf("DiscoveredHardware.framebuffer must be FramebufferInfo")
 	}
+	framebuffer := moduleType(t, index, "platform.hardware.discovery", "FramebufferInfo")
+	if fieldTypeName(t, framebuffer, "known") != "Bool" {
+		t.Fatalf("FramebufferInfo.known must make absence explicit")
+	}
 	for _, typ := range []struct{ module, name string }{
 		{"machine.x86_64.cpu_state", "CpuLocalityFacts"},
 		{"machine.x86_64.cpu_state", "CpuDiscovery"},
@@ -115,6 +119,15 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		!strings.Contains(discoverySource, "pci_device_count = self.pci.count") {
 		t.Fatalf("hardware discovery source must enumerate PCI and report discovered device count")
 	}
+	for _, want := range []string{
+		"local_apic_timer_available = true",
+		"pit_available = true",
+		"known = false",
+	} {
+		if !strings.Contains(discoverySource, want) {
+			t.Fatalf("hardware discovery source missing %q", want)
+		}
+	}
 	bytesSource := readRepoFile(t, "wrela/platform/hardware/bytes.wrela")
 	for _, want := range []string{
 		"self.panic.fail(code = 0xAC030001)",
@@ -133,3 +146,78 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoveryFactsRecordedFromImageSource(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "discovery-facts.wrela", discoveryFactExtractionSource)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	if len(checked.ImageGraph.APICFacts) == 0 || checked.ImageGraph.APICFacts[0].Mode != "xapic_fallback" {
+		t.Fatalf("APIC facts not recorded: %#v", checked.ImageGraph.APICFacts)
+	}
+	if len(checked.ImageGraph.TimerFacts) != 1 ||
+		checked.ImageGraph.TimerFacts[0].Label != "periodic.1000us" ||
+		checked.ImageGraph.TimerFacts[0].PeriodUS != 1000 {
+		t.Fatalf("timer facts not recorded: %#v", checked.ImageGraph.TimerFacts)
+	}
+	if len(checked.ImageGraph.LocalityFacts) != 1 ||
+		checked.ImageGraph.LocalityFacts[0].Subject != "cpu0" ||
+		checked.ImageGraph.LocalityFacts[0].Known {
+		t.Fatalf("unknown locality fact not recorded: %#v", checked.ImageGraph.LocalityFacts)
+	}
+	if len(checked.ImageGraph.FramebufferFacts) != 1 || checked.ImageGraph.FramebufferFacts[0].Known {
+		t.Fatalf("unknown framebuffer fact not recorded: %#v", checked.ImageGraph.FramebufferFacts)
+	}
+	reportImage := BuildImageReport(checked)
+	if len(reportImage.Hardware.Timers) != 1 || reportImage.Hardware.Timers[0].PeriodUS != 1000 {
+		t.Fatalf("timer facts missing from report: %#v", reportImage.Hardware.Timers)
+	}
+	if reportImage.Hardware.Framebuffer.Known {
+		t.Fatalf("framebuffer fact missing from report: %#v", reportImage.Hardware.Framebuffer)
+	}
+}
+
+const discoveryFactExtractionSource = `
+module examples.discovery_facts
+use { BootPanic } from platform.hardware.panic
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
+use { DelegatedHardware } from platform.uefi.transition
+use { OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
+use { MutableBytes, Bytes } from machine.x86_64.executor_memory
+use { InterruptVector } from machine.x86_64.interrupts
+
+image DiscoveryFactsImage {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let panic = BootPanic()
+        let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
+        let interrupts = discovery.interrupts
+        let local_apic = interrupts.local_apic
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let cpu0_numa = discovery.cpus.locality0.numa_node
+        let framebuffer_known = discovery.framebuffer.known
+        let arena = MutableBytes(address = 0, length = 0)
+        let hardware_plan = HardwarePlan(
+            cpus = discovery.cpus.require_min_count(count = 2),
+            interrupts = InterruptRoutingPlan(
+                local_apic = local_apic,
+                serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
+            ),
+            pci = ClaimedPciPlanBuilder(panic = panic).empty()
+        )
+        let _timer_source = timer.source.kind
+        let _cpu0_numa = cpu0_numa
+        let _framebuffer_known = framebuffer_known
+        return hardware.exit_to_owned_hardware(
+            memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = arena), executor_arena = arena, io_ports = IoPortAuthority()),
+            cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0),
+            hardware_plan = hardware_plan
+        )
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
+`

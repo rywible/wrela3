@@ -1602,6 +1602,96 @@ func (c *checker) exprStaticType(moduleName string, expr ast.Expr, scope *Scope)
 	return nil
 }
 
+func (c *checker) recordDiscoveryFactFromField(sel *ast.FieldExpr, recvType *Type) {
+	if sel == nil || recvType == nil {
+		return
+	}
+	switch {
+	case recvType.Module == "machine.x86_64.interrupts" && recvType.Name == "InterruptAuthority" && sel.Field == "local_apic":
+		c.graph.APICFacts = append(c.graph.APICFacts, APICFactNode{
+			Mode:            "xapic_fallback",
+			XAPICAvailable:  true,
+			X2APICAvailable: false,
+			Span:            sel.SpanV,
+		})
+	case recvType.Module == "machine.x86_64.cpu_state" && recvType.Name == "CpuLocalityFacts" && sel.Field == "numa_node":
+		subject := "unknown_cpu"
+		if parent, ok := sel.Base.(*ast.FieldExpr); ok {
+			switch parent.Field {
+			case "locality0":
+				subject = "cpu0"
+			case "locality1":
+				subject = "cpu1"
+			}
+		}
+		c.graph.LocalityFacts = append(c.graph.LocalityFacts, LocalityFactNode{
+			Subject: subject,
+			Kind:    "numa_node",
+			Value:   "0",
+			Known:   false,
+			Span:    sel.SpanV,
+		})
+	case recvType.Module == "platform.hardware.discovery" && recvType.Name == "FramebufferInfo":
+		switch sel.Field {
+		case "base", "length", "width", "height", "stride", "format", "known":
+			c.graph.FramebufferFacts = append(c.graph.FramebufferFacts, FramebufferFactNode{
+				Known: false,
+				Span:  sel.SpanV,
+			})
+		}
+	}
+}
+
+type constValue struct {
+	Uint   uint64
+	String string
+	Known  bool
+	Fields map[string]constValue
+}
+
+func (v constValue) asUint() (uint64, bool) {
+	return v.Uint, v.Known
+}
+
+func (v constValue) asString() (string, bool) {
+	return v.String, v.Known
+}
+
+func callConstArgs(call *ast.CallExpr) map[string]constValue {
+	values := map[string]constValue{}
+	if call == nil {
+		return values
+	}
+	for _, arg := range call.Args {
+		if arg.Name == "" {
+			continue
+		}
+		values[arg.Name] = constValueFromExpr(arg.Value)
+	}
+	return values
+}
+
+func constValueFromExpr(expr ast.Expr) constValue {
+	switch e := expr.(type) {
+	case *ast.IntLiteral:
+		value, ok := unsignedIntegerLiteral(e)
+		return constValue{Uint: value, Known: ok}
+	case *ast.StringLiteral:
+		return constValue{String: e.Value, Known: true}
+	case *ast.ConstructorExpr:
+		fields := map[string]constValue{}
+		for _, field := range e.Args {
+			if field.Name == "" {
+				continue
+			}
+			fields[field.Name] = constValueFromExpr(field.Value)
+		}
+		return constValue{Fields: fields, Known: len(fields) > 0}
+	default:
+		return constValue{}
+	}
+}
+
 func stringLiteralArg(expr *ast.ConstructorExpr, name string) (string, bool) {
 	for _, arg := range expr.Args {
 		if arg.Name != name {
@@ -2043,6 +2133,33 @@ func (c *checker) checkHardwareClaims() {
 	}
 }
 
+func (c *checker) recordDiscoveryFactFromCall(call *ast.CallExpr, recvType *Type, args map[string]constValue) {
+	if call == nil || recvType == nil {
+		return
+	}
+	if recvType.Module == "machine.x86_64.timer" && recvType.Name == "TimerDiscovery" && call.Method == "require_periodic" {
+		period, ok := args["period_us"].asUint()
+		if !ok {
+			return
+		}
+		c.graph.TimerFacts = append(c.graph.TimerFacts, TimerFactNode{
+			Label:    fmt.Sprintf("periodic.%dus", period),
+			Source:   "local_apic_pit_calibrated",
+			PeriodUS: period,
+			Span:     call.SpanV,
+		})
+	}
+	if recvType.Module == "machine.x86_64.cpu_state" && recvType.Name == "CpuPlacementPlan" && call.Method == "cpu_for" {
+		c.graph.LocalityFacts = append(c.graph.LocalityFacts, LocalityFactNode{
+			Subject: "executor",
+			Kind:    "cpu_locality",
+			Value:   "unknown",
+			Known:   false,
+			Span:    call.SpanV,
+		})
+	}
+}
+
 func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string, int, bool) {
 	switch qualifiedTypeName(receiverType) + "::" + call.Method {
 	case "machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive":
@@ -2304,6 +2421,7 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 		return c.mustType(moduleName, "Bool")
 	case *ast.FieldExpr:
 		baseType := c.typeExpr(moduleName, e.Base, scope, ctx)
+		c.recordDiscoveryFactFromField(e, baseType)
 		fieldType := c.lookupField(baseType, e.Field, e.SpanV)
 		if fieldType != nil && !typeCanCarryHiddenLifetime(fieldType) && !typeCanCarryHiddenLifetime(baseType) {
 			c.rememberLifetime(e, Lifetime{Kind: LifetimeExecutorRoot})
@@ -2612,6 +2730,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	}
 
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
+	c.recordDiscoveryFactFromCall(expr, recvType, callConstArgs(expr))
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
 	c.recordArenaGraphCall(moduleName, expr, recvType, scope, ctx)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
