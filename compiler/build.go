@@ -112,6 +112,9 @@ func Build(opts BuildOptions) (BuildResult, error) {
 			reportPath = filepath.Join(repoRoot, reportPath)
 		}
 		imgReport := sem.BuildImageReport(checked)
+		if ds := append(sem.ValidateAuthorityAudit(imgReport), sem.ValidateAuthorityAuditContent(imgReport)...); len(ds) != 0 {
+			return BuildResult{}, DiagnosticError{Diagnostics: ds}
+		}
 		data, err := json.MarshalIndent(imgReport, "", "  ")
 		if err != nil {
 			return BuildResult{}, err

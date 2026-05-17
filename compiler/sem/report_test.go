@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
+	"github.com/ryanwible/wrela3/compiler/diag"
+	"github.com/ryanwible/wrela3/compiler/report"
 )
 
 func TestBuildImageReport(t *testing.T) {
@@ -105,6 +107,88 @@ func TestImageReportIncludesWakePaths(t *testing.T) {
 	}
 	if len(r.AuthorityAudit.WakeTargets) != 1 || r.AuthorityAudit.WakeTargets[0].Owner != "timer.periodic" {
 		t.Fatalf("wake target audit missing from report: %#v", r.AuthorityAudit.WakeTargets)
+	}
+}
+
+func TestAuthorityAuditReportCompleteness(t *testing.T) {
+	if !hasCode(ValidateAuthorityAudit(report.ImageReport{}), diag.SEM0075) {
+		t.Fatalf("expected SEM0075 for nil authority audit sections")
+	}
+	r := report.ImageReport{AuthorityAudit: completeEmptyAuthorityAudit()}
+	if ds := ValidateAuthorityAudit(r); len(ds) != 0 {
+		t.Fatalf("audit diagnostics: %#v", ds)
+	}
+}
+
+func TestAuthorityAuditRequiresTimerRecordWhenTimerIsUsed(t *testing.T) {
+	r := report.ImageReport{
+		Hardware: report.HardwareReport{
+			Timers: []report.TimerReport{{Label: "periodic.1000us", Source: "local_apic_pit_calibrated", PeriodUS: 1000}},
+		},
+		AuthorityAudit: completeEmptyAuthorityAudit(),
+	}
+	if !hasCode(ValidateAuthorityAuditContent(r), diag.SEM0075) {
+		t.Fatalf("expected SEM0075 when timer report has no timer authority audit record")
+	}
+	r.AuthorityAudit.Timers = []report.AuthorityRecord{{Kind: "timer", Label: "periodic.1000us"}}
+	if ds := ValidateAuthorityAuditContent(r); len(ds) != 0 {
+		t.Fatalf("unexpected content diagnostics: %#v", ds)
+	}
+}
+
+func TestImageReportIncludesCompleteAuthorityAuditMappings(t *testing.T) {
+	checked := &CheckedProgram{ImageGraph: ImageGraph{
+		InterruptTopicRoutes: []InterruptTopicRouteNode{
+			{PathLabel: "serial", TopicLabel: "serial.rx"},
+		},
+		SharedInterruptSources: []SharedInterruptSourceNode{
+			{RouteKey: "isa_irq:4/vector:0x40", SourceLabel: "serial.rx"},
+		},
+		TimerFacts: []TimerFactNode{
+			{Label: "periodic.1000us", Source: "local_apic_pit_calibrated", PeriodUS: 1000},
+		},
+		Topics: []TopicNode{
+			{Label: "timer.periodic", Kind: "timer_tick", PayloadType: "machine.x86_64.topic_payload.TimerTickPayload", PayloadSize: 24, PayloadAlign: 8, Depth: 64},
+		},
+		WakeTargets: []WakeTargetNode{
+			{SlotLabel: "worker", Owner: "timer.periodic", Strategy: "sti_hlt", Fallback: "sti_hlt"},
+		},
+		DMABuffers: []DMABufferNode{
+			{Label: "edu.dma", OwnerDevice: "edu"},
+		},
+	}}
+	r := BuildImageReport(checked)
+	if len(r.AuthorityAudit.Interrupts) != 2 {
+		t.Fatalf("interrupt audit missing: %#v", r.AuthorityAudit.Interrupts)
+	}
+	if len(r.AuthorityAudit.Timers) != 1 {
+		t.Fatalf("timer audit missing: %#v", r.AuthorityAudit.Timers)
+	}
+	if len(r.Runtime.Topics) != 1 || len(r.AuthorityAudit.Topics) != 1 {
+		t.Fatalf("topic report/audit missing: runtime=%#v audit=%#v", r.Runtime.Topics, r.AuthorityAudit.Topics)
+	}
+	if len(r.AuthorityAudit.WakeTargets) != 1 {
+		t.Fatalf("wake audit missing: %#v", r.AuthorityAudit.WakeTargets)
+	}
+	if len(r.AuthorityAudit.DMABuffers) != 1 {
+		t.Fatalf("DMA audit missing: %#v", r.AuthorityAudit.DMABuffers)
+	}
+	if ds := append(ValidateAuthorityAudit(r), ValidateAuthorityAuditContent(r)...); len(ds) != 0 {
+		t.Fatalf("authority audit diagnostics: %#v", ds)
+	}
+}
+
+func completeEmptyAuthorityAudit() report.AuthorityAuditReport {
+	return report.AuthorityAuditReport{
+		MemoryRoots:    []report.AuthorityRecord{},
+		Arenas:         []report.AuthorityRecord{},
+		HardwareClaims: []report.AuthorityRecord{},
+		Interrupts:     []report.AuthorityRecord{},
+		Timers:         []report.AuthorityRecord{},
+		Queues:         []report.AuthorityRecord{},
+		Topics:         []report.AuthorityRecord{},
+		WakeTargets:    []report.AuthorityRecord{},
+		DMABuffers:     []report.AuthorityRecord{},
 	}
 }
 

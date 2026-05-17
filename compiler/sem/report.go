@@ -1,6 +1,9 @@
 package sem
 
-import "github.com/ryanwible/wrela3/compiler/report"
+import (
+	"github.com/ryanwible/wrela3/compiler/diag"
+	"github.com/ryanwible/wrela3/compiler/report"
+)
 
 func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 	r := report.NewImageReport(imageNameForReport(checked))
@@ -40,6 +43,10 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 	appendExecutorMemoryAndLocality(&r, checked.ImageGraph)
 	appendWakePaths(&r, checked.ImageGraph)
 	appendRuntimeFacts(&r, checked.ImageGraph)
+	appendInterruptsToAudit(&r, checked.ImageGraph)
+	appendTimersToAudit(&r, checked.ImageGraph)
+	appendTopicsToReportAndAudit(&r, checked.ImageGraph)
+	appendDMABuffersToAudit(&r, checked.ImageGraph)
 
 	return r
 }
@@ -144,6 +151,106 @@ func appendWakePaths(r *report.ImageReport, g ImageGraph) {
 			Owner: wake.Owner,
 		})
 	}
+}
+
+func appendInterruptsToAudit(r *report.ImageReport, g ImageGraph) {
+	for _, route := range g.InterruptTopicRoutes {
+		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, report.AuthorityRecord{
+			Kind:  "interrupt_route",
+			Label: route.PathLabel,
+			Owner: route.TopicLabel,
+		})
+	}
+	for _, source := range g.SharedInterruptSources {
+		r.AuthorityAudit.Interrupts = append(r.AuthorityAudit.Interrupts, report.AuthorityRecord{
+			Kind:  "shared_interrupt_source",
+			Label: source.SourceLabel,
+			Owner: source.RouteKey,
+		})
+	}
+}
+
+func appendTimersToAudit(r *report.ImageReport, g ImageGraph) {
+	seen := map[string]bool{}
+	appendTimer := func(label, owner string) {
+		if label == "" || seen[label] {
+			return
+		}
+		seen[label] = true
+		r.AuthorityAudit.Timers = append(r.AuthorityAudit.Timers, report.AuthorityRecord{
+			Kind:  "timer",
+			Label: label,
+			Owner: owner,
+		})
+	}
+	for _, timer := range g.TimerFacts {
+		appendTimer(timer.Label, timer.Source)
+	}
+	for _, route := range g.TimerRoutes {
+		appendTimer(route.Label, route.Source)
+	}
+}
+
+func appendTopicsToReportAndAudit(r *report.ImageReport, g ImageGraph) {
+	for _, topic := range g.Topics {
+		r.Runtime.Topics = append(r.Runtime.Topics, report.TopicReport{
+			Label:       topic.Label,
+			PayloadType: topic.PayloadType,
+			Bytes:       topic.PayloadSize,
+			Align:       topic.PayloadAlign,
+			Depth:       topic.Depth,
+		})
+		r.AuthorityAudit.Topics = append(r.AuthorityAudit.Topics, report.AuthorityRecord{
+			Kind:  topic.Kind,
+			Label: topic.Label,
+			Owner: "topic_graph",
+		})
+	}
+}
+
+func appendDMABuffersToAudit(r *report.ImageReport, g ImageGraph) {
+	for _, dma := range g.DMABuffers {
+		r.AuthorityAudit.DMABuffers = append(r.AuthorityAudit.DMABuffers, report.AuthorityRecord{
+			Kind:  "dma_buffer",
+			Label: dma.Label,
+			Owner: dma.OwnerDevice,
+		})
+	}
+}
+
+func ValidateAuthorityAudit(r report.ImageReport) []diag.Diagnostic {
+	var ds []diag.Diagnostic
+	require := func(ok bool, name string) {
+		if !ok {
+			ds = append(ds, diag.Diagnostic{Phase: "sem", Code: diag.SEM0075, Severity: diag.Error, Message: "authority audit report missing " + name})
+		}
+	}
+	require(r.AuthorityAudit.MemoryRoots != nil, "memory_roots")
+	require(r.AuthorityAudit.Arenas != nil, "arenas")
+	require(r.AuthorityAudit.HardwareClaims != nil, "hardware_claims")
+	require(r.AuthorityAudit.Interrupts != nil, "interrupts")
+	require(r.AuthorityAudit.Timers != nil, "timers")
+	require(r.AuthorityAudit.Queues != nil, "queues")
+	require(r.AuthorityAudit.Topics != nil, "topics")
+	require(r.AuthorityAudit.WakeTargets != nil, "wake_targets")
+	require(r.AuthorityAudit.DMABuffers != nil, "dma_buffers")
+	return ds
+}
+
+func ValidateAuthorityAuditContent(r report.ImageReport) []diag.Diagnostic {
+	var ds []diag.Diagnostic
+	requireRecord := func(records []report.AuthorityRecord, name string, reportUses bool) {
+		if reportUses && len(records) == 0 {
+			ds = append(ds, diag.Diagnostic{Phase: "sem", Code: diag.SEM0075, Severity: diag.Error, Message: "authority audit report missing records for " + name})
+		}
+	}
+	requireRecord(r.AuthorityAudit.MemoryRoots, "memory_roots", len(r.Memory.RootRegions) != 0)
+	requireRecord(r.AuthorityAudit.Arenas, "arenas", len(r.Memory.Arenas) != 0)
+	requireRecord(r.AuthorityAudit.Timers, "timers", len(r.Hardware.Timers) != 0)
+	requireRecord(r.AuthorityAudit.Queues, "queues", len(r.Runtime.InterruptQueues) != 0)
+	requireRecord(r.AuthorityAudit.Topics, "topics", len(r.Runtime.Topics) != 0)
+	requireRecord(r.AuthorityAudit.WakeTargets, "wake_targets", len(r.Runtime.WakePaths) != 0)
+	return ds
 }
 
 func imageNameForReport(checked *CheckedProgram) string {
