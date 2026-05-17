@@ -124,6 +124,11 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		return nil, ds
 	}
 	units = append(units, interruptUnits...)
+	timerUnits, ds := compileTimerUnits(program, ctx)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	units = append(units, timerUnits...)
 	if program.Entry.Symbol != "" {
 		unit, ds := compileEntryAdapterUnit(program.Entry, ctx)
 		if len(ds) != 0 {
@@ -284,10 +289,13 @@ func compileInterruptDispatchUnits(program *ir.Program, ctx compileContext) ([]c
 		bindings[binding.Vector] = binding
 	}
 
-	known := []uint8{0x40, 0x41, 0x42, 0xF0}
+	known := []uint8{0x40, 0x41, 0x42, 0x43, 0xF0}
 	units := make([]compiledUnit, 0, len(known))
 	for _, vector := range known {
 		symbol := interruptVectorSymbol(vector)
+		if vector == 0x43 && len(program.Timers) > 0 {
+			continue
+		}
 		if vector == 0xF0 {
 			units = append(units, buildInterruptWakeUnit(symbol))
 			continue
@@ -315,6 +323,8 @@ func interruptVectorSymbol(vector uint8) string {
 		return "_wrela_interrupt_vector41_edu_msi"
 	case 0x42:
 		return "_wrela_interrupt_vector42_ivshmem_msix"
+	case 0x43:
+		return "_wrela_interrupt_vector43_timer"
 	case 0xF0:
 		return "_wrela_interrupt_vectorf0_wake"
 	default:

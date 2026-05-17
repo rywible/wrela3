@@ -537,6 +537,14 @@ type VcpuStartPlan struct {
 	Terminal      bool
 }
 
+type TimerRoute struct {
+	Label           string
+	Source          string
+	PeriodUS        uint64
+	Vector          uint8
+	SubscriberSlots []string
+}
+
 type AsmMethod struct {
 	Symbol       string
 	ReceiverType string
@@ -563,4 +571,5 @@ type Program struct {
 	InterruptContexts []InterruptContext
 	Topics            []TopicLayout
 	VcpuStarts        []VcpuStartPlan
+	Timers            []TimerRoute
 }

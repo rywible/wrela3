@@ -1,5 +1,8 @@
 module machine.x86_64.timer
 
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TimerTickTopic, TimerTickSubscription } from machine.x86_64.topic_payload
+use { TopicIdentity } from machine.x86_64.topic_u64
 use { BootPanic } from platform.hardware.panic
 
 data TimerSource {
@@ -10,6 +13,11 @@ data TimerAuthority {
     source: TimerSource
     period_us: U64
     panic: BootPanic
+
+    fn subscribe(self, subscriber: ExecutorSlot) -> TimerTickSubscription {
+        let topic = TimerTickTopic(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
+        return topic.subscribe(subscriber = subscriber)
+    }
 }
 
 data TimerDiscovery {

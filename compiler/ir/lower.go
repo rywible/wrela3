@@ -99,6 +99,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
+	ctx.lowerTimerRoutes()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
@@ -909,6 +910,21 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		}
 		layout.Producers = ctx.publisherSlotsForTopic(topic.Label)
 		ctx.program.Topics = append(ctx.program.Topics, layout)
+	}
+}
+
+func (ctx *lowerContext) lowerTimerRoutes() {
+	if ctx == nil || ctx.checked == nil {
+		return
+	}
+	for _, route := range ctx.checked.ImageGraph.TimerRoutes {
+		ctx.program.Timers = append(ctx.program.Timers, TimerRoute{
+			Label:           route.Label,
+			Source:          route.Source,
+			PeriodUS:        route.PeriodUS,
+			Vector:          route.Vector,
+			SubscriberSlots: append([]string{}, route.SubscriberSlots...),
+		})
 	}
 }
 

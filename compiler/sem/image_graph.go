@@ -124,6 +124,16 @@ type TimerFactNode struct {
 	Span     source.Span
 }
 
+type TimerRouteNode struct {
+	Label           string
+	Source          string
+	PeriodUS        uint64
+	Vector          uint8
+	TopicLabel      string
+	SubscriberSlots []string
+	Span            source.Span
+}
+
 type LocalityFactNode struct {
 	Subject string
 	Kind    string
@@ -199,6 +209,7 @@ type ImageGraph struct {
 	InterruptConfigurators  []InterruptConfiguratorNode
 	APICFacts               []APICFactNode
 	TimerFacts              []TimerFactNode
+	TimerRoutes             []TimerRouteNode
 	LocalityFacts           []LocalityFactNode
 	FramebufferFacts        []FramebufferFactNode
 	HardwareClaims          []HardwareClaimNode
@@ -233,6 +244,13 @@ func (g ImageGraph) HasWakeSource(slot string) bool {
 		}
 	}
 	for _, route := range g.InterruptTopicRoutes {
+		for _, subscriber := range route.SubscriberSlots {
+			if subscriber == slot {
+				return true
+			}
+		}
+	}
+	for _, route := range g.TimerRoutes {
 		for _, subscriber := range route.SubscriberSlots {
 			if subscriber == slot {
 				return true

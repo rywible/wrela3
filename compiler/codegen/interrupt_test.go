@@ -218,6 +218,7 @@ func TestCompileGeneratesInterruptDispatchStubs(t *testing.T) {
 		"_wrela_interrupt_vector40_serial",
 		"_wrela_interrupt_vector41_edu_msi",
 		"_wrela_interrupt_vector42_ivshmem_msix",
+		"_wrela_interrupt_vector43_timer",
 		"_wrela_interrupt_vectorf0_wake",
 	} {
 		if _, ok := img.Symbols[symbol]; !ok {

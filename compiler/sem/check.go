@@ -46,6 +46,10 @@ type localOrigin struct {
 	TopicPayloadType    string
 	TopicPayloadSize    uint64
 	TopicPayloadAlign   uint64
+	TimerLabel          string
+	TimerSource         string
+	TimerPeriodUS       uint64
+	IsTimerRoute        bool
 	PathLabel           string
 	PublishesInterrupts bool
 	EventType           string
@@ -1864,6 +1868,13 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 			}
 		}
 	}
+	if typ.Module == "machine.x86_64.timer" && typ.Name == "TimerAuthority" {
+		if period, ok := unsignedIntegerLiteral(constructorArg(expr, "period_us")); ok {
+			origin.TimerLabel = fmt.Sprintf("periodic.%dus", period)
+			origin.TimerSource = "local_apic_pit_calibrated"
+			origin.TimerPeriodUS = period
+		}
+	}
 	if typ.Kind == KindDriverPath {
 		if identity := constructorArg(expr, "identity"); identity != nil {
 			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
@@ -1945,6 +1956,24 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		}
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	case receiverType.Module == "machine.x86_64.timer" && receiverType.Name == "TimerDiscovery" && expr.Method == "require_periodic":
+		if period, ok := callConstArgs(expr)["period_us"].asUint(); ok {
+			origin.TimerLabel = fmt.Sprintf("periodic.%dus", period)
+			origin.TimerSource = "local_apic_pit_calibrated"
+			origin.TimerPeriodUS = period
+		}
+	case receiverType.Module == "machine.x86_64.timer" && receiverType.Name == "TimerAuthority" && expr.Method == "subscribe":
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		origin.IsTimerRoute = true
+		origin.TimerLabel = receiverOrigin.TimerLabel
+		origin.TimerSource = receiverOrigin.TimerSource
+		origin.TimerPeriodUS = receiverOrigin.TimerPeriodUS
+		origin.TopicLabel = "timer.periodic"
+		origin.TopicKind = "timer_tick"
+		origin.TopicPayloadType = "machine.x86_64.topic_payload.TimerTickPayload"
+		origin.TopicPayloadSize = 24
+		origin.TopicPayloadAlign = 8
+		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case receiverType.Module == "machine.x86_64.pci" &&
 		receiverType.Name == "PciDeviceSet" &&
 		expr.Method == "require_device":
@@ -2027,7 +2056,30 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case IsTopicPublisherType(origin.Type):
 		c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{TopicLabel: origin.TopicLabel, Binding: name, Span: span})
 	case IsTopicSubscriptionType(origin.Type):
+		if origin.IsTimerRoute && c.graph.TopicByLabel(origin.TopicLabel).Label == "" {
+			c.graph.Topics = append(c.graph.Topics, TopicNode{
+				Label:        origin.TopicLabel,
+				Kind:         origin.TopicKind,
+				Depth:        64,
+				PayloadType:  origin.TopicPayloadType,
+				PayloadSize:  origin.TopicPayloadSize,
+				PayloadAlign: origin.TopicPayloadAlign,
+				Binding:      name + ".topic",
+				Span:         span,
+			})
+		}
 		c.graph.TopicSubscriptions = append(c.graph.TopicSubscriptions, TopicSubscriptionNode{TopicLabel: origin.TopicLabel, SubscriberLabel: origin.SlotLabel, Binding: name, Span: span})
+		if origin.IsTimerRoute {
+			c.graph.TimerRoutes = append(c.graph.TimerRoutes, TimerRouteNode{
+				Label:           origin.TimerLabel,
+				Source:          origin.TimerSource,
+				PeriodUS:        origin.TimerPeriodUS,
+				Vector:          0x43,
+				TopicLabel:      origin.TopicLabel,
+				SubscriberSlots: []string{origin.SlotLabel},
+				Span:            span,
+			})
+		}
 	case origin.Type.Kind == KindDriverPath:
 		publishes := origin.PublishesInterrupts || origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
