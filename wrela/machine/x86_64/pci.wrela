@@ -52,67 +52,10 @@ data PcieEcamWindows {
     window0: PcieEcamWindow
     panic: BootPanic
 
-    fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
-        let seen = 0
-        let bus = self.window0.start_bus
-        while bus <= self.window0.end_bus {
-            let device = 0
-            while device < 32 {
-                let function = 0
-                let scan_more_functions = true
-                while function < 8 {
-                    let vendor_device = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0)
-                    if (vendor_device & 0xFFFF) != 0xFFFF {
-                        if (vendor_device & 0xFFFF) == vendor_id {
-                            if (vendor_device >> 16) == device_id {
-                                if seen == occurrence {
-                                    let class_reg = self.window0.read_config32(bus = bus, device = device, function = function, offset = 8)
-                                    return PciDevice(
-                                        window = self.window0,
-                                        identity = PciDeviceIdentity(
-                                            segment = self.window0.segment,
-                                            bus = bus,
-                                            device = device,
-                                            function = function,
-                                            vendor_id = vendor_device & 0xFFFF,
-                                            device_id = vendor_device >> 16,
-                                            class_code = class_reg >> 24,
-                                            subclass = (class_reg >> 16) & 0xFF,
-                                            prog_if = (class_reg >> 8) & 0xFF
-                                        ),
-                                        panic = self.panic
-                                    )
-                                }
-                                seen = seen + 1
-                            }
-                        }
-                        if function == 0 {
-                            let header = self.window0.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
-                            if (header & 0x00800000) == 0 {
-                                scan_more_functions = false
-                            }
-                        }
-                    } else {
-                        if function == 0 {
-                            scan_more_functions = false
-                        }
-                    }
-                    if scan_more_functions == false {
-                        function = 8
-                    }
-                    function = function + 1
-                }
-                device = device + 1
-            }
-            if bus == self.window0.end_bus {
-                self.panic.fail(code = 0xAC060010)
-            }
-            bus = bus + 1
-        }
-        self.panic.fail(code = 0xAC060010)
-    }
-
     fn enumerate(self) -> PciDeviceSet {
+        if self.count == 0 {
+            self.panic.fail(code = 0xAC060013)
+        }
         let devices = PciDeviceSetBuilder(panic = self.panic).empty()
         let bus = self.window0.start_bus
         while bus <= self.window0.end_bus {
@@ -181,6 +124,9 @@ data PciDevice {
         let mask = self.read_config32(offset = offset)
         self.write_config32(offset = offset, value = original)
         let bar_type = (original >> 1) & 3
+        if (mask & 0xFFFFFFF0) == 0 {
+            self.panic.fail(code = 0xAC060005)
+        }
         if bar_type == 0 {
             let base = original & 0xFFFFFFF0
             let size = (0 - (mask & 0xFFFFFFF0)) & 0xFFFFFFFF
@@ -229,18 +175,15 @@ data PciDevice {
 
     fn enable_mmio_and_bus_master(self) {
         let command_status = self.read_config32(offset = 0x04)
-        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
+        self.write_config32(offset = 0x04, value = (command_status & 0x0000FFFF) | 0x00000006)
     }
 
     fn claim_msi(self) -> MsiCapability {
-        let command_status = self.read_config32(offset = 0x04)
-        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
+        self.enable_mmio_and_bus_master()
         return MsiCapability(device = self, capability_offset = self.find_capability(capability_id = 0x05))
     }
 
     fn claim_msix(self, table_bar_index: U8) -> MsixCapability {
-        let command_status = self.read_config32(offset = 0x04)
-        self.write_config32(offset = 0x04, value = command_status | 0x00000006)
         let cap = self.find_capability(capability_id = 0x11)
         let table_info = self.read_config32(offset = cap + 4)
         let bir = table_info & 0x7
@@ -249,6 +192,7 @@ data PciDevice {
         }
         let table_offset = table_info & 0xFFFFFFF8
         let table = self.claim_mmio_bar(index = table_bar_index)
+        self.enable_mmio_and_bus_master()
         return MsixCapability(device = self, capability_offset = cap, table = table, table_offset = table_offset)
     }
 }

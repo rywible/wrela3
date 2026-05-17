@@ -1770,7 +1770,7 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "OwnedMemory" && expr.Method == "claim_executor_arena":
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	case receiverType.Module == "machine.x86_64.pci" &&
-		(receiverType.Name == "PciDeviceSet" || receiverType.Name == "PcieEcamWindows") &&
+		receiverType.Name == "PciDeviceSet" &&
 		expr.Method == "require_device":
 		origin.PciDeviceKey = pciDeviceKeyFromRequireDevice(expr)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
@@ -1945,6 +1945,7 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
 			return
 		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_bar", Key: key + "." + literalArgKey(call, "table_bar_index"), Span: call.SpanV})
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
 	case (qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsiCapability" && call.Method == "route") ||
 		(qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsixCapability" && call.Method == "route_entry"):

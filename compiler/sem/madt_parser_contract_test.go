@@ -26,11 +26,17 @@ func TestMadtSyntheticEntryOffsetContract(t *testing.T) {
 
 	sourceText := readRepoFile(t, "wrela/platform/acpi/madt.wrela")
 	for _, want := range []string{
-		"entry_type == 9",
+		"entry_type != 9",
 		"read_u32(offset = offset + 4)",
 		"read_u32(offset = offset + 8)",
 		"read_u32(offset = offset + 12)",
-		"out.append(uid = bytes.read_u32(offset = offset + 12), apic_id = bytes.read_u32(offset = offset + 4))",
+		"(flags & 1) == 0",
+		"out.cpu1 = cpu",
+		"entry_length < 2",
+		"offset + entry_length > self.length",
+		"entry_type != 5",
+		"read_u64(offset = offset + 4)",
+		"0xAC040003",
 	} {
 		if !strings.Contains(sourceText, want) {
 			t.Fatalf("MADT source missing %q", want)

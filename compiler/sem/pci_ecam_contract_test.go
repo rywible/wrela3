@@ -16,6 +16,8 @@ func TestPciEcamEnumerationSourceContract(t *testing.T) {
 		"while device < 32",
 		"while function < 8",
 		"vendor_device & 0xFFFF",
+		"self.count == 0",
+		"self.panic.fail(code = 0xAC060013)",
 		"self.panic.fail(code = 0xAC060012)",
 		"self.panic.fail(code = 0xAC060010)",
 	}

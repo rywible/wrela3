@@ -12,6 +12,7 @@ func TestHardwareDiscoveryReportAPIBuilds(t *testing.T) {
 	for _, want := range []string{
 		"data DiscoveryReport",
 		"fn report(self, memory: MutableBytes, hardware_plan: HardwarePlan) -> DiscoveryReport",
+		"pci_device_count = self.pci.count",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("discovery report source missing %q", want)

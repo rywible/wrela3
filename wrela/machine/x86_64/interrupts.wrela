@@ -103,7 +103,7 @@ data LocalApic {
     }
 
     fn message_address(self) -> U32 {
-        return 0xFEE00000 | (self.apic_id << 12)
+        return 0xFEE00000 | ((self.apic_id & 0xFF) << 12)
     }
 }
 
@@ -155,10 +155,13 @@ data IoApicRoute {
         if (self.flags & 0x000C) == 0x000C {
             low = low | (1 << 15)
         }
+        let masked_low = low | (1 << 16)
         self.io_apic.mmio().write32(offset = 0, value = 0x10 + redir)
-        self.io_apic.mmio().write32(offset = 0x10, value = low)
+        self.io_apic.mmio().write32(offset = 0x10, value = masked_low)
         self.io_apic.mmio().write32(offset = 0, value = 0x11 + redir)
         self.io_apic.mmio().write32(offset = 0x10, value = self.destination_apic_id << 24)
+        self.io_apic.mmio().write32(offset = 0, value = 0x10 + redir)
+        self.io_apic.mmio().write32(offset = 0x10, value = low)
     }
 }
 
@@ -171,6 +174,9 @@ data InterruptAuthority {
     fn route_isa_irq(self, irq: U8, vector: InterruptVector) -> IoApicRoute {
         let gsi = self.overrides.gsi_for_isa_irq(irq = irq)
         let flags = self.overrides.flags_for_isa_irq(irq = irq)
+        if self.io_apics.count == 0 {
+            self.panic.fail(code = 0xAC050003)
+        }
         let io_apic = self.io_apics.io_apic0
         if gsi < io_apic.gsi_base {
             self.panic.fail(code = 0xAC050001)

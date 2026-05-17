@@ -305,7 +305,7 @@ func TestRequiredPciDeviceMissingFailsBoot(t *testing.T) {
 	tmp := t.TempDir()
 	vars := filepath.Join(tmp, "OVMF_VARS.fd")
 	copyFile(t, deps.firmware.Vars, vars)
-	image := filepath.Join(tmp, "hello-missing-ivshmem.efi")
+	image := filepath.Join(tmp, "hello-missing-edu.efi")
 	_, err := compiler.Build(compiler.BuildOptions{
 		Mode:       compiler.ModeDev,
 		RootPath:   "examples/hello/main.wrela",
@@ -326,16 +326,15 @@ func TestRequiredPciDeviceMissingFailsBoot(t *testing.T) {
 		SuccessText:   "panic: AC060010",
 		Timeout:       qemuTimeout(),
 		SMP:           2,
-		EnableEdu:     true,
 	})
 	if err != nil {
 		t.Fatalf("qemu failed before missing PCI panic: %v\nserial output:\n%s", err, out)
 	}
 	if strings.Contains(out, "hello from wrela") {
-		t.Fatalf("missing ivshmem boot unexpectedly reached hello output:\n%s", out)
+		t.Fatalf("missing EDU boot unexpectedly reached hello output:\n%s", out)
 	}
 	if !strings.Contains(out, "panic: AC060010") {
-		t.Fatalf("missing ivshmem boot did not report expected panic:\n%s", out)
+		t.Fatalf("missing EDU boot did not report expected panic:\n%s", out)
 	}
 }
 

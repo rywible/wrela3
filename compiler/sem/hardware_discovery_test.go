@@ -24,8 +24,8 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		t.Fatalf("OwnedHardware.hardware_plan must be HardwarePlan")
 	}
 	discovered := moduleType(t, index, "platform.hardware.discovery", "DiscoveredHardware")
-	if fieldTypeName(t, discovered, "pci") != "PcieEcamWindows" {
-		t.Fatalf("DiscoveredHardware.pci must be lazy PcieEcamWindows")
+	if fieldTypeName(t, discovered, "pci") != "PciDeviceSet" {
+		t.Fatalf("DiscoveredHardware.pci must be PciDeviceSet")
 	}
 	report := moduleType(t, index, "platform.hardware.discovery", "DiscoveryReport")
 	for _, field := range []string{
@@ -45,7 +45,6 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, discovered, "report")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_madt")
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.root", "AcpiRoot"), "require_mcfg")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows"), "require_device")
 	root := moduleType(t, index, "platform.acpi.root", "AcpiRoot")
 	assertMethodExists(t, root, "require_table")
 	assertMethodExists(t, root, "require_madt")
@@ -73,7 +72,7 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 
 	assertMethodExists(t, moduleType(t, index, "platform.acpi.mcfg", "McfgTable"), "ecam_windows")
 	windows := moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindows")
-	assertMethodExists(t, windows, "require_device")
+	assertMethodExists(t, windows, "enumerate")
 	pci := moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet")
 	assertMethodExists(t, pci, "require_device")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")
@@ -88,8 +87,13 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	if fieldTypeName(t, route, "destination_apic_id") != "U32" || fieldTypeName(t, route, "flags") != "U16" {
 		t.Fatalf("IoApicRoute must carry destination APIC ID and MADT override flags")
 	}
+	discoverySource := readRepoFile(t, "wrela/platform/hardware/discovery.wrela")
+	if !strings.Contains(discoverySource, "pci = mcfg.ecam_windows().enumerate()") ||
+		!strings.Contains(discoverySource, "pci_device_count = self.pci.count") {
+		t.Fatalf("hardware discovery source must enumerate PCI and report discovered device count")
+	}
 	source := readRepoFile(t, "wrela/machine/x86_64/interrupts.wrela")
-	for _, want := range []string{"self.destination_apic_id << 24", "flags & 0x0003", "flags & 0x000C", "flags_for_isa_irq"} {
+	for _, want := range []string{"self.destination_apic_id << 24", "flags & 0x0003", "flags & 0x000C", "flags_for_isa_irq", "self.io_apics.count == 0", "(self.apic_id & 0xFF) << 12"} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("interrupt route source missing %q", want)
 		}

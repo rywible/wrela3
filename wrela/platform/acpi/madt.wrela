@@ -12,7 +12,28 @@ data MadtTable {
 
     fn local_apic_base(self) -> PhysicalAddress {
         let bytes = PhysicalBytes(address = self.address, length = self.length, panic = self.panic).bounded()
-        return bytes.read_u32(offset = 36)
+        let base = bytes.read_u32(offset = 36)
+        let offset = 44
+        while offset < self.length {
+            let entry_type = bytes.read_u8(offset = offset)
+            let entry_length = bytes.read_u8(offset = offset + 1)
+            if entry_length < 2 {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if offset + entry_length > self.length {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if entry_type != 5 {
+                offset = offset
+            } else {
+                if entry_length < 12 {
+                    self.panic.fail(code = 0xAC040002)
+                }
+                return bytes.read_u64(offset = offset + 4)
+            }
+            offset = offset + entry_length
+        }
+        return base
     }
 
     fn enabled_cpus(self) -> EnabledCpuSet {
@@ -22,16 +43,54 @@ data MadtTable {
         while offset < self.length {
             let entry_type = bytes.read_u8(offset = offset)
             let entry_length = bytes.read_u8(offset = offset + 1)
-            if entry_type == 0 {
+            if entry_length < 2 {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if offset + entry_length > self.length {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if entry_type != 0 {
+                offset = offset
+            } else {
+                if entry_length < 8 {
+                    self.panic.fail(code = 0xAC040002)
+                }
                 let flags = bytes.read_u32(offset = offset + 4)
-                if (flags & 1) != 0 {
-                    out.append(uid = bytes.read_u8(offset = offset + 2), apic_id = bytes.read_u8(offset = offset + 3))
+                if (flags & 1) == 0 {
+                    offset = offset
+                } else {
+                    let cpu = EnabledCpu(uid = bytes.read_u8(offset = offset + 2), apic_id = bytes.read_u8(offset = offset + 3))
+                    if out.count == 0 {
+                        out.cpu0 = cpu
+                        out.count = 1
+                    } else {
+                        if out.count == 1 {
+                            out.cpu1 = cpu
+                            out.count = 2
+                        }
+                    }
                 }
             }
-            if entry_type == 9 {
+            if entry_type != 9 {
+                offset = offset
+            } else {
+                if entry_length < 16 {
+                    self.panic.fail(code = 0xAC040002)
+                }
                 let flags = bytes.read_u32(offset = offset + 8)
-                if (flags & 1) != 0 {
-                    out.append(uid = bytes.read_u32(offset = offset + 12), apic_id = bytes.read_u32(offset = offset + 4))
+                if (flags & 1) == 0 {
+                    offset = offset
+                } else {
+                    let cpu = EnabledCpu(uid = bytes.read_u32(offset = offset + 12), apic_id = bytes.read_u32(offset = offset + 4))
+                    if out.count == 0 {
+                        out.cpu0 = cpu
+                        out.count = 1
+                    } else {
+                        if out.count == 1 {
+                            out.cpu1 = cpu
+                            out.count = 2
+                        }
+                    }
                 }
             }
             offset = offset + entry_length
@@ -46,8 +105,22 @@ data MadtTable {
         while offset < self.length {
             let entry_type = bytes.read_u8(offset = offset)
             let entry_length = bytes.read_u8(offset = offset + 1)
-            if entry_type == 1 {
-                out.append(id = bytes.read_u8(offset = offset + 2), address = bytes.read_u32(offset = offset + 4), gsi_base = bytes.read_u32(offset = offset + 8), panic = self.panic)
+            if entry_length < 2 {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if offset + entry_length > self.length {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if entry_type != 1 {
+                offset = offset
+            } else {
+                if entry_length < 12 {
+                    self.panic.fail(code = 0xAC040002)
+                }
+                if out.count == 0 {
+                    out.io_apic0 = IoApicDiscovered(id = bytes.read_u8(offset = offset + 2), address = bytes.read_u32(offset = offset + 4), gsi_base = bytes.read_u32(offset = offset + 8), panic = self.panic)
+                    out.count = 1
+                }
             }
             offset = offset + entry_length
         }
@@ -62,7 +135,18 @@ data MadtTable {
         while offset < self.length {
             let entry_type = bytes.read_u8(offset = offset)
             let entry_length = bytes.read_u8(offset = offset + 1)
-            if entry_type == 2 {
+            if entry_length < 2 {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if offset + entry_length > self.length {
+                self.panic.fail(code = 0xAC040002)
+            }
+            if entry_type != 2 {
+                offset = offset
+            } else {
+                if entry_length < 10 {
+                    self.panic.fail(code = 0xAC040002)
+                }
                 out.append(
                     bus = bytes.read_u8(offset = offset + 2),
                     source = bytes.read_u8(offset = offset + 3),
@@ -77,9 +161,13 @@ data MadtTable {
 
     fn interrupt_authority(self) -> InterruptAuthority {
         let cpus = self.enabled_cpus().require_count(count = 1)
+        let io_apics = self.io_apics()
+        if io_apics.count == 0 {
+            self.panic.fail(code = 0xAC040003)
+        }
         return InterruptAuthority(
             local_apic = LocalApic(base = self.local_apic_base(), apic_id = cpus.bootstrap.apic_id, panic = self.panic),
-            io_apics = self.io_apics(),
+            io_apics = io_apics,
             overrides = self.interrupt_source_overrides(),
             panic = self.panic
         )

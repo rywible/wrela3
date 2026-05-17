@@ -362,9 +362,16 @@ func TestPciCapabilitiesWalkedFromDiscoveredDevices(t *testing.T) {
 	if msix == nil || !functionHasConstInt(msix, 0x11) {
 		t.Fatalf("claim_msix must search capability id 0x11")
 	}
+	enableCommand := findIRFunction(program, "_wrela_method_machine_x86_64_pci_PciDevice_enable_mmio_and_bus_master")
+	if enableCommand == nil ||
+		!functionHasConstInt(enableCommand, 0x04) ||
+		!functionHasConstInt(enableCommand, 0x0000FFFF) ||
+		!functionHasConstInt(enableCommand, 0x00000006) {
+		t.Fatalf("enable_mmio_and_bus_master must mask PCI status bits and set command memory/bus-master bits")
+	}
 	for _, fn := range []*ir.Function{msi, msix} {
-		if !functionHasConstInt(fn, 0x04) || !functionHasConstInt(fn, 0x00000006) {
-			t.Fatalf("%s must enable PCI command memory and bus-master bits", fn.Symbol)
+		if !functionCalls(fn, "_wrela_method_machine_x86_64_pci_PciDevice_enable_mmio_and_bus_master") {
+			t.Fatalf("%s must enable PCI command memory and bus-master bits through the masked helper", fn.Symbol)
 		}
 	}
 }

@@ -1,0 +1,61 @@
+// expect: SEM0050: duplicate hardware claim pci_bar:vendor=0x1234/device=0x11e8/occurrence=0.1
+module platform.hardware.panic
+class BootPanic { asm fn fail(self, code: U64) -> never { hlt } }
+
+module platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+class MmioRegion { address: PhysicalAddress; length: U64; panic: BootPanic }
+
+module machine.x86_64.interrupts
+data InterruptVector { value: U8 }
+data LocalApic { base: PhysicalAddress; apic_id: U32; panic: BootPanic }
+
+module machine.x86_64.pci
+use { MmioRegion } from platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+
+class MsixCapability {}
+
+class PciDevice {
+    panic: BootPanic
+    fn claim_mmio_bar(self, index: U8) -> MmioRegion {
+        return MmioRegion(address = 0, length = 0, panic = self.panic)
+    }
+    fn claim_msix(self, table_bar_index: U8) -> MsixCapability {
+        return MsixCapability()
+    }
+}
+
+class PciDeviceSet {
+    panic: BootPanic
+    fn require_device(self, vendor_id: U16, device_id: U16, occurrence: U64) -> PciDevice {
+        return PciDevice(panic = self.panic)
+    }
+}
+
+class PciFixtureFactory {
+    panic: BootPanic
+    fn devices(self) -> PciDeviceSet {
+        return PciDeviceSet(panic = self.panic)
+    }
+}
+
+module tests.fixtures.negative.duplicate_pci_msix_table_bar_claim
+use { BootPanic } from platform.hardware.panic
+use { PciFixtureFactory } from machine.x86_64.pci
+
+image BadDuplicateMsixTableBar {
+    transitions { delegated_hardware -> owned_hardware }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let devices = PciFixtureFactory(panic = BootPanic()).devices()
+        let edu = devices.require_device(vendor_id = 0x1234, device_id = 0x11e8, occurrence = 0)
+        let table = edu.claim_mmio_bar(index = 1)
+        let msix = edu.claim_msix(table_bar_index = 1)
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        while true {}
+    }
+}
