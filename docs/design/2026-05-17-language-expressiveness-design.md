@@ -11,13 +11,14 @@ source pleasant, precise, and hard to misuse.
 This milestone adds the language surface needed to express reusable driver,
 queue, topic, result, and memory patterns directly:
 
-- generics for storage, topics, queues, results, and capability-bearing types
+- generics for memory views, topics, queues, results, and capability-bearing
+  types
 - static traits/interfaces for capability-shaped APIs
 - enums/sum types for explicit state and result values
 - const values and compile-time expressions
 - typed memory views and address-space/region kinds
 - pattern matching over sum types
-- fixed-capacity typed arena arrays with fast allocation by default
+- fixed-capacity typed arena reservations with fast allocation by default
 
 The goal is a coherent language layer, not a minimal feature slice. The
 implementation may still be internally sequenced, but the milestone is complete
@@ -55,8 +56,8 @@ authority, or make driver wiring feel dynamic when it is still image-static.
 
 ### Fast Paths Are Plain
 
-The most common spelling should be the performant one. Typed arena arrays should
-reserve contiguous storage without a hidden initialization pass. Explicit
+The most common spelling should be the performant one. Typed arena reservations
+should reserve contiguous memory without a hidden initialization pass. Explicit
 initialization remains available when the program wants an initialized view.
 
 ### Static Before Dynamic
@@ -67,10 +68,10 @@ reflection.
 
 ### Storage And Policy Are Separate
 
-Arena arrays provide fixed-capacity typed storage. Higher-level containers such
-as buffers, rings, queues, and tables own occupancy policy, not allocation.
-This keeps capacity visible and lets data structures choose their own
-initialization and validity rules.
+Arena-reserved slots provide fixed-capacity typed memory. Higher-level
+containers such as buffers, rings, queues, and tables own occupancy policy, not
+allocation. This keeps capacity visible and lets data structures choose their
+own initialization and validity rules.
 
 ### Preserve The Authority Model
 
@@ -83,7 +84,7 @@ executor-local views from raw integers.
 ### Generic Types And Methods
 
 Wrela gains type parameters for declaration forms that naturally represent
-reusable storage or capability shapes:
+reusable memory views or capability shapes:
 
 ```wrela
 data Slice<T> {
@@ -92,7 +93,7 @@ data Slice<T> {
 }
 
 data FixedBuffer<T> {
-    storage: Array<T>
+    slots: Slots<T>
     length: U64
 }
 
@@ -104,7 +105,7 @@ class Topic<T> {
 ```
 
 Generic parameters are concrete, sized type parameters by default. A generic
-type may be instantiated only with a type whose storage layout is known at
+type may be instantiated only with a type whose memory layout is known at
 compile time. Concrete instantiations are monomorphized before IR lowering, so
 layout and codegen see ordinary concrete types.
 
@@ -113,14 +114,14 @@ capability adapters:
 
 ```wrela
 class FixedBuffer<T> {
-    storage: Array<T>
+    slots: Slots<T>
     length: U64
 
     fn push(self, value: T) -> Result<Unit, BufferFull> {
-        if self.length == self.storage.capacity {
+        if self.length == self.slots.capacity {
             return Result.Err(error = BufferFull())
         }
-        self.storage.write(index = self.length, value = value)
+        self.slots.write(index = self.length, value = value)
         self.length = self.length + 1
         return Result.Ok(value = Unit())
     }
@@ -139,11 +140,25 @@ Arena allocation keeps the existing functional style used by `place` and
 `reserve`:
 
 ```wrela
-let events = tick.array(Event, count = EVENT_CAPACITY)
+let event_slots = tick.reserve_array(Event, count = EVENT_CAPACITY)
 ```
 
 Here `Event` is a compile-time type argument passed in expression position to a
 compiler-known arena intrinsic. It is not a runtime value.
+
+`place` remains the typed object placement primitive:
+
+```wrela
+let events = tick.place(FixedBuffer<Event>(
+    slots = event_slots,
+    length = 0
+))
+```
+
+This bump-allocates enough arena or frame memory for `FixedBuffer<Event>`,
+writes the constructed fields into that memory, and returns the placed
+`FixedBuffer<Event>` value. The returned value is arena-backed and carries the
+same hidden lifetime as the arena or frame receiver.
 
 ### Static Traits And Interfaces
 
@@ -222,8 +237,8 @@ return Result.Err(error = BufferFull())
 Enum layout is deterministic:
 
 - a compiler-chosen discriminant field records the active variant
-- payload storage is the maximum size and alignment required by any variant
-- zero-payload variants occupy only the discriminant storage plus required
+- payload area is the maximum size and alignment required by any variant
+- zero-payload variants occupy only the discriminant area plus required
   padding
 - generic enum instantiations are monomorphized before layout
 
@@ -287,7 +302,7 @@ Static assertions make layout and capacity assumptions reviewable:
 static_assert(EVENT_BYTES <= PAGE_SIZE, message = "event frame exceeds one page")
 ```
 
-Constants may be used in array counts, arena lengths, interrupt vectors, PCI
+Constants may be used in slot counts, arena lengths, interrupt vectors, PCI
 IDs, register offsets, descriptor sizes, queue depths, and other ordinary
 expression positions.
 
@@ -306,34 +321,37 @@ data MutableSlice<T> {
     length: U64
 }
 
-data Array<T> {
+data Slots<T> {
     address: PhysicalAddress
     capacity: U64
 }
 ```
 
 `Slice<T>` is an initialized readable view. `MutableSlice<T>` is an initialized
-read/write view. `Array<T>` is fixed-capacity typed storage. `Array<T>` is the
-fast arena allocation result and does not imply that every slot currently holds
-a readable initialized value.
+read/write view. `Slots<T>` is fixed-capacity typed memory reserved for values
+of type `T`. `Slots<T>` is the fast arena reservation result and does not imply
+that every slot currently holds a readable initialized value.
 
 The API split is intentional:
 
 ```wrela
-let storage = tick.array(Event, count = EVENT_CAPACITY)
-let events = tick.place(FixedBuffer<Event>(storage = storage, length = 0))
+let event_slots = tick.reserve_array(Event, count = EVENT_CAPACITY)
+let events = tick.place(FixedBuffer<Event>(
+    slots = event_slots,
+    length = 0
+))
 ```
 
-`Array<T>` exposes capacity and write operations:
+`Slots<T>` exposes capacity and write operations:
 
 ```wrela
-storage.write(index = i, value = event)
+event_slots.write(index = i, value = event)
 ```
 
 Direct reads belong to initialized views and containers:
 
 ```wrela
-let initialized = storage.fill(value = Event(kind = 0))
+let initialized = event_slots.fill(value = Event(kind = 0))
 let first = initialized.get(index = 0)
 ```
 
@@ -382,7 +400,7 @@ data Volatile<T> {
 
 data DmaBuffer<T> {
     owner: PciDevice
-    storage: Array<T>
+    slots: Slots<T>
 }
 ```
 
@@ -397,12 +415,12 @@ Region kinds are not source-visible virtual address spaces. They are typed
 provenance and access-mode distinctions over the existing physical-authority
 model.
 
-### Typed Arena Arrays
+### Typed Arena Array Reservations
 
-Typed arena arrays are first-class arena intrinsics:
+Typed arena array reservations are first-class arena intrinsics:
 
 ```wrela
-let events = tick.array(Event, count = EVENT_CAPACITY)
+let event_slots = tick.reserve_array(Event, count = EVENT_CAPACITY)
 ```
 
 This matches the existing functional style:
@@ -410,51 +428,74 @@ This matches the existing functional style:
 ```wrela
 tick.place(Event(kind = 1))
 tick.reserve(length = 64, align = 8)
-tick.array(Event, count = 64)
+tick.reserve_array(Event, count = 64)
 ```
 
 Semantics:
 
 - `Event` must be a concrete sized type.
 - `count` must be a `U64` expression.
+- optional `align`, if present, must be a non-zero power of two and at least
+  `alignof(Event)`
 - allocation size is `count * sizeof(Event)` with checked overflow
-- allocation alignment is `alignof(Event)`
+- allocation alignment is `alignof(Event)` unless a stricter `align` is given
 - allocation uses the same bump cursor as `place` and `reserve`
 - out-of-space or overflow traps through the existing memory OOM path
-- the returned value is `Array<Event>`
+- the returned value is `Slots<Event>`
 - the returned value carries the same hidden lifetime as the receiver arena or
   frame
-- `Array<T>` cannot be forged from raw addresses in ordinary code
+- `Slots<T>` cannot be forged from raw addresses in ordinary code
 
-`array` does not initialize every slot. This keeps the fast path plain and makes
-fixed-capacity storage cheap enough to use as the normal way to express hot
-working sets.
+`reserve_array` does not initialize every slot. This keeps the fast path plain
+and makes fixed-capacity typed memory cheap enough to use as the normal way to
+express hot working sets.
 
 Readable initialized views are explicit:
 
 ```wrela
-let initialized = events.fill(value = Event(kind = 0))
+let initialized = event_slots.fill(value = Event(kind = 0))
 let event = initialized.get(index = 0)
 ```
 
 Containers are the normal way to add occupancy policy:
 
 ```wrela
+data FixedBuffer<T> {
+    slots: Slots<T>
+    length: U64
+}
+
 data Ring<T> {
-    storage: Array<T>
+    slots: Slots<T>
     head: U64
     tail: U64
     len: U64
 }
 ```
 
-`Ring<T>` decides which slots are readable. `Array<T>` decides only where the
-fixed capacity lives.
+`FixedBuffer<T>` treats `length` as the initialized readable prefix.
+`Ring<T>` decides which occupied ring positions are readable. `Slots<T>`
+decides only where the fixed capacity lives.
+
+The explicit primitive composition is:
+
+```wrela
+let event_slots = tick.reserve_array(Event, count = EVENT_CAPACITY)
+let events = tick.place(FixedBuffer<Event>(
+    slots = event_slots,
+    length = 0
+))
+```
+
+This is intentionally two operations. `reserve_array` allocates the element
+slots. `place` allocates and initializes the small policy object that tracks
+which slots are live. Source order remains layout order inside the arena or
+frame.
 
 The semantic API is method-shaped:
 
 ```wrela
-storage.write(index = i, value = event)
+event_slots.write(index = i, value = event)
 slice.get(index = i)
 slice.set(index = i, value = event)
 ```
@@ -520,7 +561,8 @@ expression node that can represent:
 - primitive types: `U64`, `Bool`, `never`
 
 The expression parser must also recognize type-name operands in compiler-known
-contexts such as `array(Event, ...)`, `sizeof(Event)`, and `alignof(Event)`.
+contexts such as `reserve_array(Event, ...)`, `sizeof(Event)`, and
+`alignof(Event)`.
 
 ### Name Resolution And Indexing
 
@@ -530,7 +572,7 @@ instantiations. It must reject:
 - duplicate generic parameter names
 - arity mismatches such as `Topic<A, B>` when `Topic<T>` is declared
 - use of value names as type arguments
-- use of unsized or non-layout-bearing types as generic storage parameters
+- use of unsized or non-layout-bearing types as generic memory parameters
 
 Trait declarations and `impl` declarations are indexed by trait name, type
 arguments, and implemented concrete or generic type pattern.
@@ -540,16 +582,16 @@ arguments, and implemented concrete or generic type pattern.
 The checker validates generic declaration bodies once against their constraints
 and validates each concrete instantiation after substitution. It must enforce:
 
-- sized type parameters where storage layout is required
+- sized type parameters where memory layout is required
 - trait bounds before trait method calls
 - enum pattern binding types
 - exhaustive `match` arms
 - hidden lifetime propagation through generic records and classes
-- array lifetime escape rules equivalent to `place` and `reserve`
+- slot lifetime escape rules equivalent to `place` and `reserve`
 - region-kind construction restrictions
 
-Generic containers that hold frame-backed arrays or slices carry hidden
-lifetimes through their fields. A `FixedBuffer<Event>` backed by a frame array
+Generic containers that hold frame-backed slots or slices carry hidden
+lifetimes through their fields. A `FixedBuffer<Event>` backed by frame slots
 cannot be stored into executor-root state unless the lifetime rules allow it.
 
 ### Layout And IR
@@ -561,7 +603,7 @@ for diagnostics and reports.
 The layout package adds concrete layout for enum instantiations:
 
 - discriminant offset
-- active payload storage offset
+- active payload area offset
 - variant payload field offsets
 - total size and alignment
 
@@ -570,11 +612,11 @@ The IR gains explicit operations for:
 - enum construction
 - variant tests
 - payload extraction
-- array allocation
-- array writes
+- slot reservation
+- slot writes
 - initialized slice reads/writes
 
-Array allocation should lower to the same arena bump machinery used by
+Slot reservation should lower to the same arena bump machinery used by
 `ArenaReserve` and `ArenaPlace`, with length and alignment derived from the
 element type.
 
@@ -582,9 +624,9 @@ element type.
 
 x86_64 codegen must emit:
 
-- checked array allocation size calculation
+- checked slot reservation size calculation
 - arena bump bounds checks and OOM path calls
-- array/slice bounds checks
+- slots/slice bounds checks
 - enum discriminant stores and tests
 - payload copies using the monomorphized payload layout
 - direct calls for trait-constrained generic methods after monomorphization
@@ -600,7 +642,7 @@ The milestone should add focused diagnostics for:
 
 - generic arity mismatch
 - unknown type parameter
-- unsized type used where storage is required
+- unsized type used where memory layout is required
 - missing trait implementation
 - trait method signature mismatch
 - ambiguous or overlapping `impl`
@@ -608,10 +650,10 @@ The milestone should add focused diagnostics for:
 - impossible enum variant pattern
 - const expression overflow or non-const operand
 - invalid `sizeof` or `alignof` operand
-- array count overflow or allocation-size overflow
-- array/slice lifetime escape
+- slot count overflow or reservation-size overflow
+- slots/slice lifetime escape
 - raw construction of protected memory-region views
-- attempted read from raw `Array<T>` storage without an initialized view or
+- attempted read from raw `Slots<T>` memory without an initialized view or
   container API
 
 Error messages should point at the source construct that made the bad promise,
@@ -627,7 +669,7 @@ Parser tests should cover:
 - enum declarations and variant constructors
 - `if let` and `match`
 - const declarations, `sizeof`, `alignof`, and `static_assert`
-- arena `array(Type, count = n)` syntax
+- arena `reserve_array(Type, count = n)` syntax
 
 Semantic tests should cover:
 
@@ -637,9 +679,9 @@ Semantic tests should cover:
 - enum exhaustiveness and payload binding
 - const overflow and invalid const operands
 - protected region-kind construction
-- frame lifetime propagation through `Array<T>`, `Slice<T>`,
+- frame lifetime propagation through `Slots<T>`, `Slice<T>`,
   `MutableSlice<T>`, `FixedBuffer<T>`, and `TopicSubscription<T>`
-- rejection of raw `Array<T>` reads
+- rejection of raw `Slots<T>` reads
 - acceptance of container-mediated reads within initialized occupancy
 
 Layout and IR tests should cover:
@@ -647,13 +689,13 @@ Layout and IR tests should cover:
 - generic data/class layout after monomorphization
 - enum discriminant and payload layout
 - deterministic names for concrete instantiations
-- array allocation lowering to arena bump operations
+- slot reservation lowering to arena bump operations
 - generic topic and queue lowering
 
 Codegen tests should cover:
 
-- array allocation overflow and arena bounds traps
-- array write bounds checks
+- slot reservation overflow and arena bounds traps
+- slot write bounds checks
 - slice get/set bounds checks
 - enum construction and pattern matching
 - trait-constrained calls lowered to direct concrete calls
@@ -662,7 +704,7 @@ Codegen tests should cover:
 Integration tests should prove:
 
 - hello and production substrate examples can use generic topics/results
-- at least one executor uses arena arrays as its hot working set
+- at least one executor uses arena-reserved slots as its hot working set
 - concrete `TimerTickTopic`, `EduInterruptTopic`, and `SerialRxTopic`
   duplication is replaced or clearly deprecated
 - QEMU e2e behavior remains stable where firmware is available
@@ -675,7 +717,7 @@ This milestone does not add:
 - dynamic trait objects, vtables, or runtime interface dispatch
 - a general heap
 - growable arrays or hidden reallocation
-- per-element compiler definite-initialization tracking for raw arrays
+- per-element compiler definite-initialization tracking for raw slots
 - uninitialized readable slices
 - source-visible virtual address spaces, page tables, W^X, NX, or guard pages
 - IOMMU enforcement
@@ -700,11 +742,11 @@ The milestone is complete when:
 - `if let` and exhaustive `match` work over generic enums
 - constants, `sizeof`, `alignof`, and `static_assert` are usable in memory,
   queue, topic, and hardware declarations
-- `Array<T>`, `Slice<T>`, and `MutableSlice<T>` carry hidden lifetimes through
+- `Slots<T>`, `Slice<T>`, and `MutableSlice<T>` carry hidden lifetimes through
   generic containers
-- `tick.array(Type, count = n)` allocates fixed-capacity typed storage using
+- `tick.reserve_array(Type, count = n)` reserves fixed-capacity typed memory using
   the same bump discipline as `place` and `reserve`
-- raw `Array<T>` storage is fast by default and not directly readable
+- raw `Slots<T>` memory is fast by default and not directly readable
 - initialized reads go through initialized views or container APIs
 - MMIO, volatile, DMA, firmware, physical RAM, and executor-local region kinds
   are distinct and cannot be forged from integers by ordinary code
