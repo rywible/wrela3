@@ -18,6 +18,17 @@ data ExecutorSlot {
     id: U64
 }
 
+data PlacementPreferenceResult {
+    satisfied: Bool
+    fallback: U64
+}
+
+data PlacementTarget {
+    kind: U64
+    id: U64
+    known: Bool
+}
+
 data VcpuStartStatus {
     started: Bool
     id: U64
@@ -144,12 +155,50 @@ data CpuTopology {
     bootstrap: EnabledCpu
     secondary: EnabledCpu
 
+    fn placement(self, panic: BootPanic) -> CpuPlacementPlan {
+        return CpuPlacementPlan(topology = self, panic = panic)
+    }
+
+    fn can_prove_separate_cores(self) -> Bool {
+        return self.bootstrap.apic_id != self.secondary.apic_id
+    }
+
+    fn has_known_llc_groups(self) -> Bool {
+        return false
+    }
+
     fn vcpu0(self, local_apic_base: PhysicalAddress) -> Vcpu {
         return Vcpu(id = 0, apic_id = self.bootstrap.apic_id, local_apic_base = local_apic_base)
     }
 
     fn vcpu1(self, local_apic_base: PhysicalAddress) -> Vcpu {
         return Vcpu(id = 1, apic_id = self.secondary.apic_id, local_apic_base = local_apic_base)
+    }
+}
+
+class CpuPlacementPlan {
+    topology: CpuTopology
+    panic: BootPanic
+
+    fn require_separate_physical_cores(self, a: ExecutorSlot, b: ExecutorSlot) {
+        if self.topology.can_prove_separate_cores() == false {
+            self.panic.fail(code = 0xAC040101)
+        }
+    }
+
+    fn prefer_same_cache_group(self, a: ExecutorSlot, b: ExecutorSlot) -> PlacementPreferenceResult {
+        if self.topology.has_known_llc_groups() {
+            return PlacementPreferenceResult(satisfied = true, fallback = 0)
+        }
+        return PlacementPreferenceResult(satisfied = false, fallback = 1)
+    }
+
+    fn prefer_near_device(self, slot: ExecutorSlot, device: PciDevice) -> PlacementPreferenceResult {
+        return PlacementPreferenceResult(satisfied = false, fallback = 1)
+    }
+
+    fn cpu_for(self, slot: ExecutorSlot) -> PlacementTarget {
+        return PlacementTarget(kind = 1, id = slot.id, known = false)
     }
 }
 

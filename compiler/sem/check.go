@@ -242,6 +242,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 			}}
 	}
 
+	c.checkHiddenSchedulerVocabulary()
 	c.checkImageSignatures()
 	c.checkUnresolvedTypes()
 	c.checkDeclBodiesAndConstructors()
@@ -2871,6 +2872,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	c.recordDiscoveryFactFromCall(expr, recvType, callConstArgs(expr))
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
 	c.recordArenaGraphCall(moduleName, expr, recvType, scope, ctx)
+	c.recordPlacementGraphCall(moduleName, expr, recvType, scope)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}

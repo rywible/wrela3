@@ -216,6 +216,24 @@ type VcpuPlacementNode struct {
 	Span            source.Span
 }
 
+type PlacementConstraintNode struct {
+	Kind      string
+	A         string
+	B         string
+	Required  bool
+	Satisfied bool
+	Fallback  string
+	Span      source.Span
+}
+
+type PlacementDecisionNode struct {
+	SlotLabel string
+	Target    string
+	Satisfied bool
+	Fallback  string
+	Span      source.Span
+}
+
 type ImageGraph struct {
 	Constructed             []ConstructedNode
 	DriverPaths             []DriverPathNode
@@ -236,6 +254,8 @@ type ImageGraph struct {
 	FramebufferFacts        []FramebufferFactNode
 	HardwareClaims          []HardwareClaimNode
 	VcpuPlacements          []VcpuPlacementNode
+	PlacementConstraints    []PlacementConstraintNode
+	PlacementDecisions      []PlacementDecisionNode
 	MemoryRoots             []MemoryRootNode
 	Arenas                  []ArenaNode
 	DMABuffers              []DMABufferNode
