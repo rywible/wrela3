@@ -53,6 +53,8 @@ func (c *checker) recordArenaGraphCall(moduleName string, expr *ast.CallExpr, re
 			c.recordRootArenaChildAt(expr, receiverOrigin)
 		case "executor_memory":
 			c.recordRootArenaExecutorMemory(moduleName, expr, receiverOrigin, scope)
+		case "executor_memory_near":
+			c.recordRootArenaExecutorMemoryNear(moduleName, expr, receiverOrigin, scope)
 		case "cache_arena":
 			c.recordRootArenaCacheArena(expr, receiverOrigin)
 		case "dma_buffer":
@@ -131,12 +133,28 @@ func (c *checker) recordChildArenaChildAt(expr *ast.CallExpr, receiverOrigin loc
 
 func (c *checker) recordRootArenaExecutorMemory(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	length, _ := arenaUnsignedIntArg(expr, "length")
+	align, _ := arenaUnsignedIntArg(expr, "align")
 	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
 		Label:  "",
 		Parent: receiverOrigin.ArenaLabel,
+		Bytes:  length,
+		Align:  align,
 		Owner:  owner,
 		Kind:   "executor_memory",
 		Span:   expr.SpanV,
+	})
+}
+
+func (c *checker) recordRootArenaExecutorMemoryNear(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
+	c.recordRootArenaExecutorMemory(moduleName, expr, receiverOrigin, scope)
+	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	c.graph.PlacementDecisions = append(c.graph.PlacementDecisions, PlacementDecisionNode{
+		SlotLabel: owner,
+		Target:    "cpu",
+		Satisfied: false,
+		Fallback:  "unknown_locality",
+		Span:      expr.SpanV,
 	})
 }
 

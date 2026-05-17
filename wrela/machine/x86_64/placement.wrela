@@ -1,1 +1,12 @@
 module machine.x86_64.placement
+
+data PlacementPreferenceResult {
+    satisfied: Bool
+    fallback: U64
+}
+
+data PlacementTarget {
+    kind: U64
+    id: U64
+    known: Bool
+}

@@ -2,6 +2,7 @@ module machine.x86_64.cpu_state
 
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { IoApicRoute, LocalApic } from machine.x86_64.interrupts
+use { PlacementPreferenceResult, PlacementTarget } from machine.x86_64.placement
 use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
 use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
@@ -16,17 +17,6 @@ data PathIdentity {
 
 data ExecutorSlot {
     id: U64
-}
-
-data PlacementPreferenceResult {
-    satisfied: Bool
-    fallback: U64
-}
-
-data PlacementTarget {
-    kind: U64
-    id: U64
-    known: Bool
 }
 
 data VcpuStartStatus {

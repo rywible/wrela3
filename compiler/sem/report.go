@@ -37,6 +37,7 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 		})
 	}
 	appendDiscoveryFacts(&r, checked.ImageGraph)
+	appendExecutorMemoryAndLocality(&r, checked.ImageGraph)
 	appendRuntimeFacts(&r, checked.ImageGraph)
 
 	return r
@@ -93,6 +94,38 @@ func appendRuntimeFacts(r *report.ImageReport, g ImageGraph) {
 			Kind:  "interrupt_queue",
 			Label: queue.Label,
 			Owner: queue.Owner,
+		})
+	}
+}
+
+func appendExecutorMemoryAndLocality(r *report.ImageReport, g ImageGraph) {
+	for _, arena := range g.Arenas {
+		if arena.Kind != "executor_memory" {
+			continue
+		}
+		r.Memory.ExecutorBudgets = append(r.Memory.ExecutorBudgets, report.ExecutorBudgetReport{
+			SlotLabel: arena.Owner,
+			Bytes:     arena.Bytes,
+		})
+	}
+	for _, constraint := range g.PlacementConstraints {
+		r.Runtime.Placement = append(r.Runtime.Placement, report.PlacementReport{
+			Kind:      constraint.Kind,
+			SubjectA:  constraint.A,
+			SubjectB:  constraint.B,
+			Required:  constraint.Required,
+			Satisfied: constraint.Satisfied,
+			Fallback:  constraint.Fallback,
+		})
+	}
+	for _, placement := range g.PlacementDecisions {
+		r.Runtime.Placement = append(r.Runtime.Placement, report.PlacementReport{
+			Kind:      "cpu_for_slot",
+			SubjectA:  placement.SlotLabel,
+			SubjectB:  placement.Target,
+			Required:  false,
+			Satisfied: placement.Satisfied,
+			Fallback:  placement.Fallback,
 		})
 	}
 }

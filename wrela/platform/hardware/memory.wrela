@@ -2,6 +2,7 @@ module platform.hardware.memory
 
 use { BootPanic } from platform.hardware.panic
 use { ExecutorSlot } from machine.x86_64.cpu_state
+use { PlacementTarget } from machine.x86_64.placement
 use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { CacheArena } from machine.x86_64.cache_memory
 use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
@@ -65,6 +66,11 @@ class RootArena {
     }
 
     fn executor_memory(self, owner: ExecutorSlot, length: U64, align: U64) -> ExecutorMemory {
+        let child = self.child(identity = ArenaIdentity(label = "executor.memory"), length = length, align = align)
+        return ExecutorMemory(arena_base = child.base, arena_length = child.length, next_offset = 0)
+    }
+
+    fn executor_memory_near(self, owner: ExecutorSlot, near: PlacementTarget, length: U64, align: U64) -> ExecutorMemory {
         let child = self.child(identity = ArenaIdentity(label = "executor.memory"), length = length, align = align)
         return ExecutorMemory(arena_base = child.base, arena_length = child.length, next_offset = 0)
     }
