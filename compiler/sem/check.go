@@ -59,6 +59,9 @@ type localOrigin struct {
 	ExecutorBinding     string
 	TerminalVcpu        bool
 	PciDeviceKey        string
+	SharedIRQRouteKey   string
+	SharedIRQVector     int
+	SharedSourceLabel   string
 }
 
 func NewScope(parent *Scope) *Scope {
@@ -213,6 +216,7 @@ type checker struct {
 	methodLifetimeSummaries map[string]MethodLifetimeSummary
 	activeMethodSummaries   map[string]bool
 	currentMethodSummary    *MethodLifetimeSummary
+	seenSharedIRQSource     map[string]bool
 }
 
 type driverPathOwner struct {
@@ -1664,6 +1668,20 @@ func (v constValue) asString() (string, bool) {
 	return v.String, v.Known
 }
 
+func (v constValue) fieldUint(name string) (uint64, bool) {
+	if v.Fields == nil {
+		return 0, false
+	}
+	return v.Fields[name].asUint()
+}
+
+func (v constValue) fieldString(name string) (string, bool) {
+	if v.Fields == nil {
+		return "", false
+	}
+	return v.Fields[name].asString()
+}
+
 func callConstArgs(call *ast.CallExpr) map[string]constValue {
 	values := map[string]constValue{}
 	if call == nil {
@@ -1974,6 +1992,19 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		origin.TopicPayloadSize = 24
 		origin.TopicPayloadAlign = 8
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
+	case receiverType.Module == "machine.x86_64.interrupts" && receiverType.Name == "InterruptAuthority" && expr.Method == "route_shared_irq":
+		args := callConstArgs(expr)
+		irq, irqOK := args["irq"].asUint()
+		vector, vectorOK := args["vector"].fieldUint("value")
+		if irqOK && vectorOK {
+			origin.SharedIRQRouteKey = sharedIRQRouteKey(irq, vector)
+			origin.SharedIRQVector = int(vector)
+		}
+	case receiverType.Module == "machine.x86_64.interrupts" && receiverType.Name == "SharedIrqRoute" && expr.Method == "claim_source":
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		origin.SharedIRQRouteKey = receiverOrigin.SharedIRQRouteKey
+		origin.SharedIRQVector = receiverOrigin.SharedIRQVector
+		origin.SharedSourceLabel, _ = callConstArgs(expr)["identity"].fieldString("label")
 	case receiverType.Module == "machine.x86_64.pci" &&
 		receiverType.Name == "PciDeviceSet" &&
 		expr.Method == "require_device":
@@ -2080,6 +2111,8 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 				Span:            span,
 			})
 		}
+	case origin.SharedIRQRouteKey != "" && origin.SharedSourceLabel != "":
+		c.recordSharedInterruptSourceOrigin(origin, span)
 	case origin.Type.Kind == KindDriverPath:
 		publishes := origin.PublishesInterrupts || origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
@@ -2100,6 +2133,27 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	}
 }
 
+func (c *checker) recordSharedInterruptSourceOrigin(origin localOrigin, span source.Span) {
+	if origin.SharedIRQRouteKey == "" || origin.SharedSourceLabel == "" {
+		return
+	}
+	if c.seenSharedIRQSource == nil {
+		c.seenSharedIRQSource = map[string]bool{}
+	}
+	key := origin.SharedIRQRouteKey + "|" + origin.SharedSourceLabel
+	if c.seenSharedIRQSource[key] {
+		c.error(span, diag.SEM0062, "duplicate shared interrupt source "+origin.SharedSourceLabel)
+		return
+	}
+	c.seenSharedIRQSource[key] = true
+	c.graph.SharedInterruptSources = append(c.graph.SharedInterruptSources, SharedInterruptSourceNode{
+		RouteKey:    origin.SharedIRQRouteKey,
+		SourceLabel: origin.SharedSourceLabel,
+		Vector:      origin.SharedIRQVector,
+		Span:        span,
+	})
+}
+
 func (c *checker) finalizeInterruptTopicRoutes() {
 	for i := range c.graph.InterruptTopicRoutes {
 		route := &c.graph.InterruptTopicRoutes[i]
@@ -2118,6 +2172,8 @@ func (c *checker) recordGraphFromExprStmt(moduleName string, expr ast.Expr, scop
 		return
 	}
 	c.recordInterruptConfiguratorCall(moduleName, call, scope)
+	valueType := c.exprStaticType(moduleName, expr, scope)
+	c.recordSharedInterruptSourceOrigin(c.originForExprValue(moduleName, expr, valueType, scope), call.SpanV)
 	if origin := c.vcpuOrigin(call, scope); origin.HasVcpuID {
 		c.graph.VcpuPlacements = append(c.graph.VcpuPlacements, VcpuPlacementNode{
 			VcpuID:          origin.VcpuID,
@@ -2152,6 +2208,14 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
 	switch {
 	case qualifiedTypeName(receiverType) == "machine.x86_64.interrupts.InterruptAuthority" && call.Method == "route_isa_irq":
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "isa_irq", Key: literalArgKey(call, "irq"), Span: call.SpanV})
+		vectorKey := interruptVectorArgKey(call)
+		if strings.HasPrefix(vectorKey, "<") {
+			c.error(call.SpanV, diag.SEM0055, "interrupt vectors in hardware claims must be source literals")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.interrupts.InterruptAuthority" && call.Method == "route_shared_irq":
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "isa_irq", Key: literalArgKey(call, "irq"), Span: call.SpanV})
 		vectorKey := interruptVectorArgKey(call)
 		if strings.HasPrefix(vectorKey, "<") {

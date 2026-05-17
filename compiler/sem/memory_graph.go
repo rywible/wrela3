@@ -1,6 +1,8 @@
 package sem
 
 import (
+	"fmt"
+
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/source"
@@ -55,10 +57,14 @@ func (c *checker) recordArenaGraphCall(moduleName string, expr *ast.CallExpr, re
 			c.recordRootArenaCacheArena(expr, receiverOrigin)
 		case "dma_buffer":
 			c.recordRootArenaDMA(expr, receiverOrigin, scope)
+		case "interrupt_queue":
+			c.recordArenaInterruptQueue(moduleName, expr, receiverOrigin, scope)
 		}
 	case "platform.hardware.memory.ChildArena":
 		if expr.Method == "child_at" {
 			c.recordChildArenaChildAt(expr, receiverOrigin)
+		} else if expr.Method == "interrupt_queue" {
+			c.recordArenaInterruptQueue(moduleName, expr, receiverOrigin, scope)
 		}
 	}
 }
@@ -162,12 +168,82 @@ func (c *checker) recordRootArenaDMA(expr *ast.CallExpr, receiverOrigin localOri
 	})
 }
 
+func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
+	overflow, overflowOK := interruptOverflowPolicy(namedArgExpr(expr.Args, "overflow"))
+	if !overflowOK {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue overflow policy is missing or invalid")
+	}
+	label, _ := queueIdentityForArg(namedArgExpr(expr.Args, "identity"))
+	owner := c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	capacity, _ := arenaUnsignedIntArg(expr, "capacity")
+	payloadKind := interruptPayloadKind(namedArgExpr(expr.Args, "payload"))
+	c.graph.InterruptQueues = append(c.graph.InterruptQueues, InterruptQueueNode{
+		Label:       label,
+		Owner:       owner,
+		Capacity:    capacity,
+		PayloadKind: payloadKind,
+		Overflow:    overflow,
+		Span:        expr.SpanV,
+	})
+	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
+		Label:  label,
+		Parent: receiverOrigin.ArenaLabel,
+		Owner:  owner,
+		Kind:   "interrupt_queue",
+		Span:   expr.SpanV,
+	})
+}
+
 func dmaOwnerIdentity(expr ast.Expr, scope *Scope) string {
 	key, ok := pciOriginKey(expr, scope)
 	if ok {
 		return key
 	}
 	return ""
+}
+
+func queueIdentityForArg(expr ast.Expr) (string, bool) {
+	identity, ok := expr.(*ast.ConstructorExpr)
+	if !ok || identity == nil {
+		return "", false
+	}
+	label, ok := stringLiteralArg(identity, "label")
+	return label, ok
+}
+
+func interruptPayloadKind(expr ast.Expr) string {
+	payload, ok := expr.(*ast.ConstructorExpr)
+	if !ok || payload == nil {
+		return ""
+	}
+	kind, ok := unsignedIntegerLiteral(constructorArg(payload, "kind"))
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("kind:%d", kind)
+}
+
+func interruptOverflowPolicy(expr ast.Expr) (string, bool) {
+	overflow, ok := expr.(*ast.ConstructorExpr)
+	if !ok || overflow == nil {
+		return "", false
+	}
+	mode, ok := unsignedIntegerLiteral(constructorArg(overflow, "mode"))
+	if !ok {
+		return "", false
+	}
+	switch mode {
+	case 0:
+		return "drop_newest", true
+	case 1:
+		return "drop_oldest", true
+	case 2:
+		return "set_flag", true
+	case 3:
+		return "fatal", true
+	default:
+		return "", false
+	}
 }
 
 func arenaIdentityForArg(expr ast.Expr) (string, bool) {

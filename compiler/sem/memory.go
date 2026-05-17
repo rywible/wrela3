@@ -253,7 +253,24 @@ func parameterCanCarryHiddenLifetime(typ *Type) bool {
 }
 
 func typeCanCarryHiddenLifetime(typ *Type) bool {
+	if isValueOnlyAuthorityRecord(typ) {
+		return false
+	}
 	return typ != nil && (typ.Kind == KindData || typ.Kind == KindClass || ClassifyMemoryType(typ) == MemoryKindFrameArena)
+}
+
+func isValueOnlyAuthorityRecord(typ *Type) bool {
+	switch qualifiedTypeName(typ) {
+	case "machine.x86_64.cpu_state.ExecutorSlot",
+		"machine.x86_64.interrupt_queue.QueueIdentity",
+		"machine.x86_64.interrupt_queue.InterruptPayloadKind",
+		"machine.x86_64.interrupt_queue.InterruptOverflowPolicy",
+		"machine.x86_64.interrupts.InterruptSourceIdentity",
+		"machine.x86_64.interrupts.InterruptVector":
+		return true
+	default:
+		return false
+	}
 }
 
 func primitiveCanCarryHiddenLifetime(typ *Type) bool {

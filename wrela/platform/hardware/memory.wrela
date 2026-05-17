@@ -4,6 +4,7 @@ use { BootPanic } from platform.hardware.panic
 use { ExecutorSlot } from machine.x86_64.cpu_state
 use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { CacheArena } from machine.x86_64.cache_memory
+use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { PciDevice } from machine.x86_64.pci
 
 data ArenaIdentity {
@@ -87,6 +88,23 @@ class RootArena {
             bytes = MutableBytes(address = child.base, length = child.length)
         )
     }
+
+    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        let bytes = capacity * payload.size
+        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
+        let storage = MutableBytes(address = child.base, length = child.length)
+        return InterruptQueue(
+            identity = QueueIdentity(label = identity.label),
+            owner = ExecutorSlot(id = owner.id),
+            storage = MutableBytes(address = storage.address, length = storage.length),
+            capacity = capacity,
+            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
+            overflow = InterruptOverflowPolicy(mode = overflow.mode),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+    }
 }
 
 class ChildArena {
@@ -121,6 +139,23 @@ class ChildArena {
         }
         self.next_offset = end
         return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
+    }
+
+    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
+        let bytes = capacity * payload.size
+        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
+        let storage = MutableBytes(address = child.base, length = child.length)
+        return InterruptQueue(
+            identity = QueueIdentity(label = identity.label),
+            owner = ExecutorSlot(id = owner.id),
+            storage = MutableBytes(address = storage.address, length = storage.length),
+            capacity = capacity,
+            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
+            overflow = InterruptOverflowPolicy(mode = overflow.mode),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
     }
 }
 

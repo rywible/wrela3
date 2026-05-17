@@ -1,6 +1,10 @@
 package sem
 
-import "github.com/ryanwible/wrela3/compiler/source"
+import (
+	"fmt"
+
+	"github.com/ryanwible/wrela3/compiler/source"
+)
 
 type ConstructedNode struct {
 	Type *Type
@@ -186,6 +190,22 @@ type DMABufferNode struct {
 	Span        source.Span
 }
 
+type InterruptQueueNode struct {
+	Label       string
+	Owner       string
+	Capacity    uint64
+	PayloadKind string
+	Overflow    string
+	Span        source.Span
+}
+
+type SharedInterruptSourceNode struct {
+	RouteKey    string
+	SourceLabel string
+	Vector      int
+	Span        source.Span
+}
+
 type VcpuPlacementNode struct {
 	VcpuID          int
 	ExecutorBinding string
@@ -217,6 +237,12 @@ type ImageGraph struct {
 	MemoryRoots             []MemoryRootNode
 	Arenas                  []ArenaNode
 	DMABuffers              []DMABufferNode
+	InterruptQueues         []InterruptQueueNode
+	SharedInterruptSources  []SharedInterruptSourceNode
+}
+
+func sharedIRQRouteKey(irq uint64, vector uint64) string {
+	return fmt.Sprintf("isa_irq:%d/vector:0x%02x", irq, vector)
 }
 
 func (g ImageGraph) TopicByLabel(label string) TopicNode {

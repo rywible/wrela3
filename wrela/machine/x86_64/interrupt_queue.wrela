@@ -1,0 +1,30 @@
+module machine.x86_64.interrupt_queue
+
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { MutableBytes } from machine.x86_64.executor_memory
+
+data QueueIdentity {
+    label: StringLiteral
+}
+
+data InterruptPayloadKind {
+    kind: U64
+    size: U64
+    align: U64
+}
+
+data InterruptOverflowPolicy {
+    mode: U64
+}
+
+data InterruptQueue {
+    identity: QueueIdentity
+    owner: ExecutorSlot
+    storage: MutableBytes
+    capacity: U64
+    payload: InterruptPayloadKind
+    overflow: InterruptOverflowPolicy
+    head: U64
+    tail: U64
+    overflowed: Bool
+}

@@ -7,6 +7,15 @@ data InterruptVector {
     value: U32
 }
 
+data InterruptSourceIdentity {
+    label: StringLiteral
+}
+
+data SharedInterruptSource {
+    vector: InterruptVector
+    identity: InterruptSourceIdentity
+}
+
 data InterruptOverride {
     bus: U8
     source: U8
@@ -183,6 +192,15 @@ data IoApicRoute {
     }
 }
 
+class SharedIrqRoute {
+    route: IoApicRoute
+    vector: InterruptVector
+
+    fn claim_source(self, identity: InterruptSourceIdentity) -> SharedInterruptSource {
+        return SharedInterruptSource(vector = InterruptVector(value = self.vector.value), identity = InterruptSourceIdentity(label = identity.label))
+    }
+}
+
 data InterruptAuthority {
     local_apic: LocalApic
     io_apics: IoApicSet
@@ -218,6 +236,11 @@ data InterruptAuthority {
             self.panic.fail(code = 0xAC050001)
         }
         return IoApicRoute(io_apic = io_apic, gsi = gsi, flags = flags, vector = InterruptVector(value = vector.value), destination_apic_id = self.local_apic.apic_id)
+    }
+
+    fn route_shared_irq(self, irq: U8, vector: InterruptVector) -> SharedIrqRoute {
+        let route = self.route_isa_irq(irq = irq, vector = vector)
+        return SharedIrqRoute(route = route, vector = InterruptVector(value = vector.value))
     }
 }
 
