@@ -37,6 +37,7 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 		})
 	}
 	appendDiscoveryFacts(&r, checked.ImageGraph)
+	appendRuntimeFacts(&r, checked.ImageGraph)
 
 	return r
 }
@@ -77,6 +78,22 @@ func appendDiscoveryFacts(r *report.ImageReport, g ImageGraph) {
 			Format: framebuffer.Format,
 			Known:  framebuffer.Known,
 		}
+	}
+}
+
+func appendRuntimeFacts(r *report.ImageReport, g ImageGraph) {
+	for _, queue := range g.InterruptQueues {
+		r.Runtime.InterruptQueues = append(r.Runtime.InterruptQueues, report.InterruptQueueReport{
+			Label:    queue.Label,
+			Owner:    queue.Owner,
+			Capacity: queue.Capacity,
+			Overflow: queue.Overflow,
+		})
+		r.AuthorityAudit.Queues = append(r.AuthorityAudit.Queues, report.AuthorityRecord{
+			Kind:  "interrupt_queue",
+			Label: queue.Label,
+			Owner: queue.Owner,
+		})
 	}
 }
 

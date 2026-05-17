@@ -10,7 +10,7 @@ func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "missing-overflow-policy.wrela", interruptQueueSource(`
         let queue = root.interrupt_queue(
             identity = QueueIdentity(label = "irq.serial.rx"),
-            owner = slot,
+            owner = ExecutorSlot(id = 0),
             capacity = 4,
             payload = InterruptPayloadKind(kind = 1, size = 8, align = 8)
         )
@@ -24,7 +24,7 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
         let queue = root.interrupt_queue(
             identity = QueueIdentity(label = "irq.serial.rx"),
-            owner = slot,
+            owner = ExecutorSlot(id = 0),
             capacity = 4,
             payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
             overflow = InterruptOverflowPolicy(mode = 2)
@@ -37,7 +37,7 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
 	}
 	queue := checked.ImageGraph.InterruptQueues[0]
-	if queue.Label != "irq.serial.rx" || queue.Owner != "" || queue.Capacity != 4 || queue.PayloadKind != "kind:1" || queue.Overflow != "set_flag" {
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "kind:1" || queue.PayloadSize != 8 || queue.PayloadAlign != 8 || queue.Overflow != "set_flag_and_wake" {
 		t.Fatalf("interrupt queue node = %#v", queue)
 	}
 }
@@ -109,7 +109,6 @@ image InterruptQueueTest {
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let region = PhysicalRegionAuthority(base = 0x100000, length = 0x200000, align = 4096, provenance = 1, panic = panic)
         let root = region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = false))
-        let slot = ExecutorSlot(id = 0)
 ` + queueSetup + `
         let arena = MutableBytes(address = 0, length = 0)
         let memory_plan = MemoryPlan(

@@ -191,12 +191,14 @@ type DMABufferNode struct {
 }
 
 type InterruptQueueNode struct {
-	Label       string
-	Owner       string
-	Capacity    uint64
-	PayloadKind string
-	Overflow    string
-	Span        source.Span
+	Label        string
+	Owner        string
+	Capacity     uint64
+	PayloadKind  string
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Overflow     string
+	Span         source.Span
 }
 
 type SharedInterruptSourceNode struct {

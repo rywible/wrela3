@@ -545,6 +545,15 @@ type TimerRoute struct {
 	SubscriberSlots []string
 }
 
+type InterruptQueueLayout struct {
+	Label        string
+	Owner        string
+	Capacity     uint64
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Overflow     string
+}
+
 type AsmMethod struct {
 	Symbol       string
 	ReceiverType string
@@ -570,6 +579,7 @@ type Program struct {
 	InterruptBindings []InterruptBinding
 	InterruptContexts []InterruptContext
 	Topics            []TopicLayout
+	InterruptQueues   []InterruptQueueLayout
 	VcpuStarts        []VcpuStartPlan
 	Timers            []TimerRoute
 }

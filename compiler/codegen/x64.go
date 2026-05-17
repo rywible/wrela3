@@ -157,7 +157,7 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		section, offsets := buildDataSection(".rdata", program.Data, 0x40000040)
 		dataSections = append(dataSections, builtDataSection{Section: section, Offsets: offsets})
 	}
-	if len(program.WritableData) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || len(program.VcpuStarts) > 0 || program.Entry.Symbol != "" {
+	if len(program.WritableData) > 0 || len(program.InterruptQueues) > 0 || len(program.Topics) > 0 || len(program.InterruptContexts) > 0 || len(program.InterruptBindings) > 0 || len(program.VcpuStarts) > 0 || program.Entry.Symbol != "" {
 		section, offsets, ds := buildData(program)
 		if len(ds) != 0 {
 			return nil, ds
@@ -500,6 +500,7 @@ type builtDataSection struct {
 
 func buildData(program *ir.Program) (Section, map[string]uint64, []diag.Diagnostic) {
 	writable := append([]ir.DataObject{}, program.WritableData...)
+	writable = append(writable, interruptQueueDataObjects(program)...)
 	topicObjects, ds := topicDataObjects(program)
 	if len(ds) != 0 {
 		return Section{}, nil, ds
@@ -1262,6 +1263,9 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	case "and":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
+	case "mul", "*":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegIMul(e, scratchRegs[0], scratchRegs[1])
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
 		if !ok || constValue.Value > 63 {
@@ -2927,6 +2931,17 @@ func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {
 		rex |= 0x01
 	}
 	e.emit(rex, opcode, encodeModRM(3, right.Low3, left.Low3))
+}
+
+func emitRegRegIMul(e *Emitter, dst asm.Reg, src asm.Reg) {
+	rex := byte(0x48)
+	if dst.High {
+		rex |= 0x04
+	}
+	if src.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0x0F, 0xAF, encodeModRM(3, dst.Low3, src.Low3))
 }
 
 func emitSetccAl(e *Emitter, opcode byte) {

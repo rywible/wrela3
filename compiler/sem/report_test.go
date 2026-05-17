@@ -65,6 +65,9 @@ func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 		FramebufferFacts: []FramebufferFactNode{
 			{Known: false},
 		},
+		InterruptQueues: []InterruptQueueNode{
+			{Label: "irq.serial.rx", Owner: "console", Capacity: 64, Overflow: "drop_newest_and_set_flag"},
+		},
 	}}
 	r := BuildImageReport(checked)
 	if len(r.AuthorityAudit.HardwareClaims) != 1 || r.AuthorityAudit.HardwareClaims[0].Owner != "delegated_hardware" {
@@ -81,6 +84,12 @@ func TestImageReportIncludesDiscoveryFacts(t *testing.T) {
 	}
 	if r.Hardware.Framebuffer.Known {
 		t.Fatalf("unknown framebuffer fact missing from report: %#v", r.Hardware.Framebuffer)
+	}
+	if len(r.Runtime.InterruptQueues) != 1 || r.Runtime.InterruptQueues[0].Label != "irq.serial.rx" {
+		t.Fatalf("interrupt queues missing from report: %#v", r.Runtime.InterruptQueues)
+	}
+	if len(r.AuthorityAudit.Queues) != 1 || r.AuthorityAudit.Queues[0].Owner != "console" {
+		t.Fatalf("queue audit missing from report: %#v", r.AuthorityAudit.Queues)
 	}
 }
 

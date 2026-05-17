@@ -130,7 +130,7 @@ func (c *checker) recordChildArenaChildAt(expr *ast.CallExpr, receiverOrigin loc
 }
 
 func (c *checker) recordRootArenaExecutorMemory(moduleName string, expr *ast.CallExpr, receiverOrigin localOrigin, scope *Scope) {
-	owner := c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
 		Label:  "",
 		Parent: receiverOrigin.ArenaLabel,
@@ -174,16 +174,18 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 		c.error(expr.SpanV, diag.SEM0060, "interrupt queue overflow policy is missing or invalid")
 	}
 	label, _ := queueIdentityForArg(namedArgExpr(expr.Args, "identity"))
-	owner := c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "owner"), scope)
+	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	capacity, _ := arenaUnsignedIntArg(expr, "capacity")
-	payloadKind := interruptPayloadKind(namedArgExpr(expr.Args, "payload"))
+	payloadKind, payloadSize, payloadAlign := interruptPayloadKind(namedArgExpr(expr.Args, "payload"))
 	c.graph.InterruptQueues = append(c.graph.InterruptQueues, InterruptQueueNode{
-		Label:       label,
-		Owner:       owner,
-		Capacity:    capacity,
-		PayloadKind: payloadKind,
-		Overflow:    overflow,
-		Span:        expr.SpanV,
+		Label:        label,
+		Owner:        owner,
+		Capacity:     capacity,
+		PayloadKind:  payloadKind,
+		PayloadSize:  payloadSize,
+		PayloadAlign: payloadAlign,
+		Overflow:     overflow,
+		Span:         expr.SpanV,
 	})
 	c.graph.Arenas = append(c.graph.Arenas, ArenaNode{
 		Label:  label,
@@ -202,6 +204,21 @@ func dmaOwnerIdentity(expr ast.Expr, scope *Scope) string {
 	return ""
 }
 
+func (c *checker) interruptQueueOwnerLabel(moduleName string, expr ast.Expr, scope *Scope) string {
+	if label := c.slotLabelForExpr(moduleName, expr, scope); label != "" {
+		return label
+	}
+	cons, ok := expr.(*ast.ConstructorExpr)
+	if !ok || cons == nil || qualifiedTypeName(c.exprStaticType(moduleName, expr, scope)) != "machine.x86_64.cpu_state.ExecutorSlot" {
+		return ""
+	}
+	id, ok := unsignedIntegerLiteral(constructorArg(cons, "id"))
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("executor_slot.%d", id)
+}
+
 func queueIdentityForArg(expr ast.Expr) (string, bool) {
 	identity, ok := expr.(*ast.ConstructorExpr)
 	if !ok || identity == nil {
@@ -211,16 +228,18 @@ func queueIdentityForArg(expr ast.Expr) (string, bool) {
 	return label, ok
 }
 
-func interruptPayloadKind(expr ast.Expr) string {
+func interruptPayloadKind(expr ast.Expr) (string, uint64, uint64) {
 	payload, ok := expr.(*ast.ConstructorExpr)
 	if !ok || payload == nil {
-		return ""
+		return "", 0, 0
 	}
 	kind, ok := unsignedIntegerLiteral(constructorArg(payload, "kind"))
 	if !ok {
-		return ""
+		return "", 0, 0
 	}
-	return fmt.Sprintf("kind:%d", kind)
+	size, _ := unsignedIntegerLiteral(constructorArg(payload, "size"))
+	align, _ := unsignedIntegerLiteral(constructorArg(payload, "align"))
+	return fmt.Sprintf("kind:%d", kind), size, align
 }
 
 func interruptOverflowPolicy(expr ast.Expr) (string, bool) {
@@ -234,13 +253,13 @@ func interruptOverflowPolicy(expr ast.Expr) (string, bool) {
 	}
 	switch mode {
 	case 0:
-		return "drop_newest", true
+		return "drop_newest_and_set_flag", true
 	case 1:
-		return "drop_oldest", true
+		return "drop_oldest_and_set_flag", true
 	case 2:
-		return "set_flag", true
+		return "set_flag_and_wake", true
 	case 3:
-		return "fatal", true
+		return "boot_fatal", true
 	default:
 		return "", false
 	}

@@ -100,6 +100,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
 	ctx.lowerTimerRoutes()
+	ctx.lowerInterruptQueueLayouts()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
@@ -924,6 +925,30 @@ func (ctx *lowerContext) lowerTimerRoutes() {
 			PeriodUS:        route.PeriodUS,
 			Vector:          route.Vector,
 			SubscriberSlots: append([]string{}, route.SubscriberSlots...),
+		})
+	}
+}
+
+func (ctx *lowerContext) lowerInterruptQueueLayouts() {
+	if ctx == nil || ctx.checked == nil {
+		return
+	}
+	for _, queue := range ctx.checked.ImageGraph.InterruptQueues {
+		if queue.Capacity == 0 {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue capacity must be non-zero")
+			continue
+		}
+		if queue.PayloadSize == 0 || queue.PayloadAlign == 0 {
+			ctx.addDiag(queue.Span, diag.SEM0060, "interrupt queue payload layout is invalid")
+			continue
+		}
+		ctx.program.InterruptQueues = append(ctx.program.InterruptQueues, InterruptQueueLayout{
+			Label:        queue.Label,
+			Owner:        queue.Owner,
+			Capacity:     queue.Capacity,
+			PayloadSize:  queue.PayloadSize,
+			PayloadAlign: queue.PayloadAlign,
+			Overflow:     queue.Overflow,
 		})
 	}
 }
