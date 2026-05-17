@@ -2,21 +2,20 @@
 
 ## Memory and address spaces
 - This is required for production and not optional because memory safety, isolation, deterministic placement, and memory-footprint predictability break quickly as images and drivers grow beyond a toy shape.
-- Selected direction: Wrela source models memory as direct physical region authority first with hierarchical arenas, bounded `with` frames, statically checked lifetimes, bounded root executor memory, and cache memory that evicts by default.
+- Production memory is now physical-region authority first. Firmware-derived `PhysicalRegionAuthority` values create named root arenas; executors, queues, caches, AP records, and DMA-intended buffers claim bounded children; frame lifetimes remain checked with `with` frames; the image report is the audit surface for ownership and wake paths.
 - x86_64 paging remains target boot glue only: the backend emits a minimal 2 MiB identity map required by long mode, but Wrela source does not expose virtual address spaces, higher-half layout, page permissions, W^X, NX, or guard pages in this stage.
-- v0 exclusion reason: this work was intentionally deferred to keep the first compiler iteration small and to validate the core end-to-end flow before hardening memory policy.
 - This stage must not block adding hardware-enforced page permissions, guard pages, DMA/IOMMU policy, or higher-half layout as backend artifacts generated from the physical-region authority graph.
 
 ## CPU and interrupts
 - This is required for production and not optional because AP startup, interrupts, and timer behavior are mandatory for reliable execution beyond single-core lab demos.
-- v0 implementation now proves COM1 receive via IOAPIC, EDU via MSI, ivshmem-doorbell via MSI-X, AP startup, and explicit vCPU placement on QEMU lab hardware.
+- Implemented direction: COM1 receive via IOAPIC, EDU via MSI, ivshmem-doorbell via MSI-X, AP startup, explicit vCPU placement, shared interrupt source claims, bounded interrupt queues, local-APIC timer routes, x2APIC selection with xAPIC fallback, and typed `TimerTickPayload` topics are source-visible and reportable.
 - v0 still exposes no CPU traps.
-- Production work remains for shared interrupts, timers, interrupt queues, x2APIC, richer topology placement, and hardware-derived multiprocessor routing beyond the current two-vCPU examples. Real-hardware AP startup also needs calibrated PIT/TSC delays instead of fixed spin loops, explicit high-CR3 trampoline support or a documented low-page-table contract, and an interrupt save policy if Wrela ever emits FPU/SSE/AVX instructions.
+- Remaining production work: richer topology heuristics, hardware-derived multiprocessor routing beyond the current lab fixtures, explicit high-CR3 trampoline support, and an interrupt save policy if Wrela ever emits FPU/SSE/AVX instructions.
 
 ## Hardware discovery
 - This is required for production and not optional because ACPI, PCIe, and framebuffer discovery are expected for realistic boots and platform integration.
-- Implemented direction: UEFI roots, ACPI RSDP/RSDT/XSDT lookup, MADT CPU/interrupt facts, MCFG ECAM windows, PCI BAR/MSI/MSI-X claims, and required-hardware boot fatal paths are source-visible Wrela authorities.
-- Remaining production work: multiple ECAM windows, PCI bridge bus walking, richer PCI capability coverage, framebuffer discovery, IOMMU/DMA policy, robust firmware quirk handling, and broader hardware-in-loop coverage.
+- Implemented direction: UEFI roots, ACPI RSDP/RSDT/XSDT lookup, MADT CPU/interrupt facts, MCFG ECAM windows, PCI bridge bus walking, PCI BAR/MSI/MSI-X claims, timer/locality/framebuffer fact shapes, and required-hardware boot fatal paths are source-visible Wrela authorities.
+- Remaining production work: richer PCI capability coverage, IOMMU/DMA policy, robust firmware quirk handling, and broader hardware-in-loop coverage.
 
 ## Drivers and IO
 - This is required for production and not optional because storage, network, and frame-buffer paths depend on robust driver abstractions, not toy I/O.
@@ -25,7 +24,8 @@
 
 ## Executor runtime
 - Implemented direction: executors are explicitly assigned to vCPUs through source-visible `ExecutorSlot` values and vCPU `start`/`enter` dispatch. Communication uses SPMC topics with compiler-planned cache-line layout and wake paths. There is no hidden scheduler, migration, or work stealing.
-- Remaining production work: dynamic hardware discovery beyond static q35 two-vCPU startup, richer topology placement, generalized topic payload typing, and production-grade monitor/mwait feature selection.
+- Implemented substrate work now includes required/preferred placement constraints, locality-aware executor memory fallback reporting, generalized topic payload layout, `TimerTickPayload`, and explicit wake strategy reporting with `monitor/mwait` bytes available and `sti_hlt` fallback.
+- Remaining production work: richer topology placement, broader CPU feature calibration, and production-grade monitor/mwait policy selection.
 
 ## Language/type system
 - This is required for production and not optional because richer ownership, traits, and phase modeling are essential for maintainable system code.
