@@ -1,6 +1,8 @@
 package sem
 
 import (
+	"strings"
+
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/report"
 )
@@ -195,7 +197,7 @@ func appendTopicsToReportAndAudit(r *report.ImageReport, g ImageGraph) {
 	for _, topic := range g.Topics {
 		r.Runtime.Topics = append(r.Runtime.Topics, report.TopicReport{
 			Label:       topic.Label,
-			PayloadType: topic.PayloadType,
+			PayloadType: reportPayloadType(topic.PayloadType),
 			Bytes:       topic.PayloadSize,
 			Align:       topic.PayloadAlign,
 			Depth:       topic.Depth,
@@ -206,6 +208,13 @@ func appendTopicsToReportAndAudit(r *report.ImageReport, g ImageGraph) {
 			Owner: "topic_graph",
 		})
 	}
+}
+
+func reportPayloadType(payload string) string {
+	if idx := strings.LastIndex(payload, "."); idx >= 0 {
+		return payload[idx+1:]
+	}
+	return payload
 }
 
 func appendDMABuffersToAudit(r *report.ImageReport, g ImageGraph) {

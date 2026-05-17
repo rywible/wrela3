@@ -1,0 +1,200 @@
+module tests.e2e.fixtures.production_substrate.main
+
+use { BackgroundWorker, ProductionSubstrateProgram } from tests.e2e.fixtures.production_substrate.program
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
+use { BootPanic } from platform.hardware.panic
+use { DelegatedHardware } from platform.uefi.transition
+use { ClaimedPciPlan, CpuPlan, DriverMemory, ExecutorSlot, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { EventSleepPolicy, HotPollPolicy, WakeStrategy } from machine.x86_64.executor_loop
+use { Bytes } from machine.x86_64.executor_memory
+use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
+use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, SharedIrqRoute } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptPayloadKind, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellTopic } from machine.x86_64.ivshmem
+use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { TimerAuthority, TimerSource } from machine.x86_64.timer
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+
+image ProductionSubstrate {
+    transitions {
+        delegated_hardware -> owned_hardware
+    }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let root = PlatformDiscoveryRoot(panic = BootPanic())
+        let discovery = root.from_uefi(hardware = hardware)
+        let root_region = discovery.memory.require_usable_region(
+            min_base = 0x200000,
+            length = 0x600000,
+            align = 4096
+        )
+        let root_arena = root_region.create_arena(
+            identity = ArenaIdentity(label = "production.root"),
+            policy = ArenaPolicy(evict_cache_by_default = true)
+        )
+        let memory_region = root_region.bytes()
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let placement = cpus.placement(panic = BootPanic())
+        placement.require_separate_physical_cores(a = ExecutorSlot(id = 0), b = ExecutorSlot(id = 1))
+        let console_memory_seed = root_arena.executor_memory(
+            owner = ExecutorSlot(id = 0),
+            length = 0x200000,
+            align = 4096
+        )
+        let worker_memory = root_arena.executor_memory_near(
+            owner = ExecutorSlot(id = 1),
+            near = placement.cpu_for(slot = ExecutorSlot(id = 1)),
+            length = 0x200000,
+            align = 4096
+        )
+        let serial_irq_queue = root_arena.interrupt_queue(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            capacity = 64,
+            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
+            overflow = InterruptOverflowPolicy(mode = 0)
+        )
+        let interrupts = discovery.interrupts
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let shared_serial_route = interrupts.route_shared_irq(
+            irq = 4,
+            vector = InterruptVector(value = 0x40)
+        )
+        let serial_irq_source = shared_serial_route.claim_source(
+            identity = InterruptSourceIdentity(label = "serial.rx")
+        )
+        let pci = discovery.pci
+        let edu = pci.require_device(vendor_id = 0x1234, device_id = 0x11E8, occurrence = 0)
+        let ivshmem_rx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 0)
+        let ivshmem_tx = pci.require_device(vendor_id = 0x1AF4, device_id = 0x1110, occurrence = 1)
+        let hardware_plan = HardwarePlan(
+            cpus = cpus,
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = shared_serial_route.route
+            ),
+            pci = ClaimedPciPlan(
+                edu_bar0 = edu.claim_mmio_bar(index = 0),
+                edu_msi = edu.claim_msi(),
+                ivshmem_rx_bar0 = ivshmem_rx.claim_mmio_bar(index = 0),
+                ivshmem_rx_msix = ivshmem_rx.claim_msix(table_bar_index = 1),
+                ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0)
+            )
+        )
+        let discovery_report = discovery.report(memory = memory_region, hardware_plan = hardware_plan)
+        if discovery_report.memory_length < 0x600000 {
+            discovery.panic.fail(code = 0xAC070001)
+        }
+        if discovery_report.pci_device_count == 0 {
+            discovery.panic.fail(code = 0xAC070002)
+        }
+        let memory_plan = MemoryPlan(
+            owned_memory = OwnedMemory(arena = memory_region),
+            executor_arena = memory_region,
+            io_ports = IoPortAuthority()
+        )
+        let cpu_plan = CpuPlan(
+            owned_stack_top = memory_region.address + memory_region.length,
+            gdt_descriptor = Bytes(address = 0, length = 0),
+            idt_descriptor = Bytes(address = 0, length = 0),
+            cr3 = memory_region.address
+        )
+        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let com1 = hardware.io_ports.claim_com1()
+        let registers = SerialWriterRegisters(port_base = com1.port_base)
+        let serial_driver = SerialDriver(
+            registers = registers,
+            memory = DriverMemory(region = hardware.memory.arena)
+            ).initialize()
+        let console_slot = hardware.executors.claim(
+            identity = SlotIdentity(label = "console")
+        )
+        let worker_slot = hardware.executors.claim(
+            identity = SlotIdentity(label = "worker")
+        )
+        let console_memory = hardware.memory.claim_executor_arena(
+            owner = console_slot,
+            length = 0x200000,
+            align = 4096
+        )
+        let serial_rx_topic = SerialRxTopic(
+            identity = TopicIdentity(label = "production.console.rx"),
+            id = 0
+        )
+        let serial_path = serial_driver.create_console_path(
+            identity = PathIdentity(label = "production.console"),
+            route = hardware.hardware_plan.interrupts.serial_irq4,
+            rx = serial_rx_topic.publisher()
+        )
+        let shared_serial_route_runtime = SharedIrqRoute(
+            route = hardware.hardware_plan.interrupts.serial_irq4,
+            vector = InterruptVector(value = 0x40)
+        )
+        let serial_irq_source = shared_serial_route_runtime.claim_source(
+            identity = InterruptSourceIdentity(label = "serial.rx")
+        )
+        let serial_irq_queue = InterruptQueue(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = console_slot,
+            storage = hardware.memory.arena,
+            capacity = 64,
+            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
+            overflow = InterruptOverflowPolicy(mode = 0),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+        serial_path.write(console_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
+        let edu_interrupt_topic = EduInterruptTopic(
+            identity = TopicIdentity(label = "production.edu.interrupt"),
+            id = 1
+        )
+        let ivshmem_topic = IvshmemDoorbellTopic(
+            identity = TopicIdentity(label = "production.ivshmem.doorbell"),
+            id = 2
+        )
+        let serial_rx = serial_rx_topic.subscribe(subscriber = console_slot)
+        let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = console_slot)
+        let ivshmem_events = ivshmem_topic.subscribe(subscriber = console_slot)
+        let timer = TimerAuthority(source = TimerSource(kind = 1), period_us = 1000, panic = BootPanic())
+        let worker_ticks = timer.subscribe(subscriber = console_slot)
+        let edu_path = EduMsiPath(
+            identity = PathIdentity(label = "production.edu"),
+            mmio = hardware.hardware_plan.pci.edu_bar0,
+            irq = edu_interrupt_topic.publisher()
+        )
+        let ivshmem_rx = IvshmemDoorbellPath(
+            identity = PathIdentity(label = "production.ivshmem.rx"),
+            registers = hardware.hardware_plan.pci.ivshmem_rx_bar0,
+            irq = ivshmem_topic.publisher()
+        )
+        let console = ProductionSubstrateProgram(
+            slot = console_slot,
+            loop = EventSleepPolicy(strategy = WakeStrategy(monitor_mwait = false, fallback_hlt = true)),
+            memory = console_memory,
+            interrupts = ApicInterruptController(local_apic = hardware.hardware_plan.interrupts.local_apic),
+            edu_msi = hardware.hardware_plan.pci.edu_msi,
+            ivshmem_msix = hardware.hardware_plan.pci.ivshmem_rx_msix,
+            serial_path = serial_path,
+            serial_rx = serial_rx,
+            edu_path = edu_path,
+            edu_interrupts = edu_interrupts,
+            ivshmem_rx = ivshmem_rx,
+            ivshmem_events = ivshmem_events,
+            ivshmem_tx = IvshmemDoorbellPeerPath(registers = hardware.hardware_plan.pci.ivshmem_tx_bar0),
+            serial_irq_source = serial_irq_source,
+            serial_irq_queue = serial_irq_queue,
+            worker_ticks = worker_ticks
+        )
+        let worker = BackgroundWorker(slot = worker_slot, loop = HotPollPolicy())
+        let worker_status = hardware.vcpu1.start(executor = worker)
+        if worker_status.started == false {
+            serial_path.write(console_memory.bytes(value = "panic: vcpu1 start failed\n"))
+        }
+        hardware.vcpu0.enter(executor = console)
+    }
+}
