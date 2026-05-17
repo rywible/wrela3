@@ -36,6 +36,10 @@ type localOrigin struct {
 	SlotLabel           string
 	LoopPolicy          string
 	MemoryOwnerLabel    string
+	ArenaLabel          string
+	ArenaBase           uint64
+	ArenaBytes          uint64
+	ArenaAlign          uint64
 	TopicLabel          string
 	TopicKind           string
 	TopicDepth          uint64
@@ -236,6 +240,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkExecutorWiring()
 	c.checkExecutorTopicGraph()
 	c.checkHardwareClaims()
+	c.validateArenaGraph()
 
 	return &CheckedProgram{
 		Modules:    modules,
@@ -1720,6 +1725,25 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	if typ == nil {
 		return origin
 	}
+	if qualifiedTypeName(typ) == "platform.hardware.memory.PhysicalRegionAuthority" {
+		origin.ArenaBase, _ = unsignedIntegerLiteral(constructorArg(expr, "base"))
+		origin.ArenaBytes, _ = unsignedIntegerLiteral(constructorArg(expr, "length"))
+		origin.ArenaAlign, _ = unsignedIntegerLiteral(constructorArg(expr, "align"))
+	}
+	if qualifiedTypeName(typ) == "platform.hardware.memory.RootArena" || qualifiedTypeName(typ) == "platform.hardware.memory.ChildArena" {
+		origin.ArenaLabel, _ = arenaIdentityForArg(constructorArg(expr, "identity"))
+		if qualifiedTypeName(typ) == "platform.hardware.memory.RootArena" {
+			regionExpr := constructorArg(expr, "region")
+			regionType := c.exprStaticType(moduleName, regionExpr, scope)
+			regionOrigin := c.originForExprValue(moduleName, regionExpr, regionType, scope)
+			origin.ArenaBase = regionOrigin.ArenaBase
+			origin.ArenaBytes = regionOrigin.ArenaBytes
+			origin.ArenaAlign = regionOrigin.ArenaAlign
+		} else {
+			origin.ArenaBase, _ = unsignedIntegerLiteral(constructorArg(expr, "base"))
+		}
+		origin.ArenaBytes, _ = unsignedIntegerLiteral(constructorArg(expr, "length"))
+	}
 	if IsTopicType(typ) {
 		origin.TopicKind = topicKindForType(typ)
 		origin.TopicDepth = 64
@@ -1766,6 +1790,50 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		return origin
 	}
 	switch {
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.PhysicalRegionAuthority" && expr.Method == "create_arena":
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
+		return localOrigin{
+			Type:       valueType,
+			ArenaLabel: label,
+			ArenaBase:  receiverOrigin.ArenaBase,
+			ArenaBytes: receiverOrigin.ArenaBytes,
+			ArenaAlign: receiverOrigin.ArenaAlign,
+		}
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.RootArena" && expr.Method == "child_at":
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
+		if offset, ok := arenaUnsignedIntArg(expr, "offset"); ok {
+			if length, hasLength := arenaUnsignedIntArg(expr, "length"); hasLength {
+				if align, hasAlign := arenaUnsignedIntArg(expr, "align"); hasAlign {
+					return localOrigin{
+						Type:       valueType,
+						ArenaLabel: label,
+						ArenaBase:  alignArenaOffset(offset, align) + receiverOrigin.ArenaBase,
+						ArenaBytes: length,
+						ArenaAlign: align,
+					}
+				}
+			}
+		}
+		return localOrigin{Type: valueType, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.ChildArena" && expr.Method == "child_at":
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
+		if offset, ok := arenaUnsignedIntArg(expr, "offset"); ok {
+			if length, hasLength := arenaUnsignedIntArg(expr, "length"); hasLength {
+				if align, hasAlign := arenaUnsignedIntArg(expr, "align"); hasAlign {
+					return localOrigin{
+						Type:       valueType,
+						ArenaLabel: label,
+						ArenaBase:  alignArenaOffset(offset, align) + receiverOrigin.ArenaBase,
+						ArenaBytes: length,
+						ArenaAlign: align,
+					}
+				}
+			}
+		}
+		return localOrigin{Type: valueType, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "ExecutorRegistry" && expr.Method == "claim":
 		identity := namedArgExpr(expr.Args, "identity")
 		if cons, ok := identity.(*ast.ConstructorExpr); ok {
@@ -2545,6 +2613,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
+	c.recordArenaGraphCall(moduleName, expr, recvType, scope, ctx)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}

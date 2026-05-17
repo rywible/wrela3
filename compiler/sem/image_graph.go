@@ -113,6 +113,33 @@ type HardwareClaimNode struct {
 	Span source.Span
 }
 
+type MemoryRootNode struct {
+	Label string
+	Base  uint64
+	Bytes uint64
+	Span  source.Span
+}
+
+type ArenaNode struct {
+	Label  string
+	Parent string
+	Base   uint64
+	Offset uint64
+	Bytes  uint64
+	Align  uint64
+	Owner  string
+	Kind   string
+	Span   source.Span
+}
+
+type DMABufferNode struct {
+	Label       string
+	OwnerDevice string
+	Base        uint64
+	Bytes       uint64
+	Span        source.Span
+}
+
 type VcpuPlacementNode struct {
 	VcpuID          int
 	ExecutorBinding string
@@ -136,6 +163,9 @@ type ImageGraph struct {
 	InterruptConfigurators  []InterruptConfiguratorNode
 	HardwareClaims          []HardwareClaimNode
 	VcpuPlacements          []VcpuPlacementNode
+	MemoryRoots             []MemoryRootNode
+	Arenas                  []ArenaNode
+	DMABuffers              []DMABufferNode
 }
 
 func (g ImageGraph) TopicByLabel(label string) TopicNode {
