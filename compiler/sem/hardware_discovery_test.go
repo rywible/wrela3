@@ -59,7 +59,11 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, moduleType(t, index, "platform.uefi.types", "UefiMemoryMap"), "require_usable_region")
 
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.panic", "BootPanic"), "fail")
-	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "BoundedBytes"), "read_u32")
+	bounded := moduleType(t, index, "platform.hardware.bytes", "BoundedBytes")
+	assertMethodExists(t, bounded, "read_u32")
+	if fieldTypeName(t, bounded, "panic") != "BootPanic" {
+		t.Fatalf("BoundedBytes.panic must be BootPanic")
+	}
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "read32")
 	assertMethodExists(t, moduleType(t, index, "platform.hardware.bytes", "MmioRegion"), "write32")
 
@@ -91,6 +95,17 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	if !strings.Contains(discoverySource, "pci = mcfg.ecam_windows().enumerate()") ||
 		!strings.Contains(discoverySource, "pci_device_count = self.pci.count") {
 		t.Fatalf("hardware discovery source must enumerate PCI and report discovered device count")
+	}
+	bytesSource := readRepoFile(t, "wrela/platform/hardware/bytes.wrela")
+	for _, want := range []string{
+		"self.panic.fail(code = 0xAC030001)",
+		"self.panic.fail(code = 0xAC030002)",
+		"BoundedBytes(address = self.address + offset, length = length, panic = self.panic)",
+		"BoundedBytes(address = self.address, length = self.length, panic = self.panic)",
+	} {
+		if !strings.Contains(bytesSource, want) {
+			t.Fatalf("hardware bytes source missing %q", want)
+		}
 	}
 	source := readRepoFile(t, "wrela/machine/x86_64/interrupts.wrela")
 	for _, want := range []string{"self.destination_apic_id << 24", "flags & 0x0003", "flags & 0x000C", "flags_for_isa_irq", "self.io_apics.count == 0", "(self.apic_id & 0xFF) << 12"} {

@@ -136,6 +136,7 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	gdt := methodByName(t, memory, "build_owned_gdt")
 	idt := methodByName(t, memory, "build_interrupt_idt")
 	fatalHandler := methodByName(t, memory, "fatal_idt_handler")
+	uefiTypesSource := readRepoFile(t, "wrela/platform/uefi/types.wrela")
 
 	if !identity.IsAsm || identity.AsmBody == nil {
 		t.Fatalf("build_identity_paging must be asm and non-empty")
@@ -145,6 +146,15 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	}
 	if !idt.IsAsm || idt.AsmBody == nil {
 		t.Fatalf("build_interrupt_idt must be asm and non-empty")
+	}
+	for _, want := range []string{
+		"self.next_offset > self.arena_length",
+		"length > self.arena_length - self.next_offset",
+		"BootPanic().fail(code = 0xAC020002)",
+	} {
+		if !strings.Contains(uefiTypesSource, want) {
+			t.Fatalf("DelegatedMemory.allocate source missing %q", want)
+		}
 	}
 
 	for _, want := range []string{

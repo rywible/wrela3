@@ -5,20 +5,21 @@ use { BootPanic } from platform.hardware.panic
 data BoundedBytes {
     address: PhysicalAddress
     length: U64
+    panic: BootPanic
 
     fn require_range(self, offset: U64, width: U64) -> U64 {
         if offset > self.length {
-            BootPanic().fail(code = 0xAC030001)
+            self.panic.fail(code = 0xAC030001)
         }
         if width > self.length - offset {
-            BootPanic().fail(code = 0xAC030002)
+            self.panic.fail(code = 0xAC030002)
         }
         return offset
     }
 
     fn slice(self, offset: U64, length: U64) -> BoundedBytes {
         self.require_range(offset = offset, width = length)
-        return BoundedBytes(address = self.address + offset, length = length)
+        return BoundedBytes(address = self.address + offset, length = length, panic = self.panic)
     }
 
     fn read_u8(self, offset: U64) -> U8 {
@@ -76,7 +77,7 @@ class PhysicalBytes {
     panic: BootPanic
 
     fn bounded(self) -> BoundedBytes {
-        return BoundedBytes(address = self.address, length = self.length)
+        return BoundedBytes(address = self.address, length = self.length, panic = self.panic)
     }
 }
 
@@ -86,7 +87,7 @@ data MmioRegion {
     panic: BootPanic
 
     fn bytes(self) -> BoundedBytes {
-        return BoundedBytes(address = self.address, length = self.length)
+        return BoundedBytes(address = self.address, length = self.length, panic = self.panic)
     }
 
     asm fn read32(self, offset: U64) -> U32 {

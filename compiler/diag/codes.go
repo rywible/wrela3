@@ -66,6 +66,7 @@ const (
 	SEM0052  = "SEM0052" // required hardware discovery call lacks boot-fatal path
 	SEM0053  = "SEM0053" // unsupported discovered hardware shape
 	SEM0054  = "SEM0054" // PCI claims must be made from discovered PciDevice values
+	SEM0055  = "SEM0055" // interrupt vectors in hardware claims must be source literals
 	ASM0001  = "ASM0001"
 	ASM0002  = "ASM0002"
 	ASM0003  = "ASM0003"

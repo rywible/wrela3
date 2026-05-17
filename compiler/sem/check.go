@@ -1921,7 +1921,7 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "isa_irq", Key: literalArgKey(call, "irq"), Span: call.SpanV})
 		vectorKey := interruptVectorArgKey(call)
 		if strings.HasPrefix(vectorKey, "<") {
-			c.error(call.SpanV, diag.SEM0053, "interrupt vectors in hardware claims must be source literals")
+			c.error(call.SpanV, diag.SEM0055, "interrupt vectors in hardware claims must be source literals")
 			return
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
@@ -1951,7 +1951,7 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 		(qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsixCapability" && call.Method == "route_entry"):
 		vectorKey := interruptVectorArgKey(call)
 		if strings.HasPrefix(vectorKey, "<") {
-			c.error(call.SpanV, diag.SEM0053, "interrupt vectors in hardware claims must be source literals")
+			c.error(call.SpanV, diag.SEM0055, "interrupt vectors in hardware claims must be source literals")
 			return
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})

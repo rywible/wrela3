@@ -219,6 +219,12 @@ class DelegatedMemory {
     last_memory_map: UefiMemoryMap
 
     fn allocate(self, length: U64) -> DelegatedMutableBytes {
+        if self.next_offset > self.arena_length {
+            BootPanic().fail(code = 0xAC020002)
+        }
+        if length > self.arena_length - self.next_offset {
+            BootPanic().fail(code = 0xAC020002)
+        }
         let address = self.arena_base + self.next_offset
         self.next_offset = self.next_offset + length
         return DelegatedMutableBytes(address = address, length = length)
