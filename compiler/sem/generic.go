@@ -96,7 +96,7 @@ func (idx *Index) lookupTypeRef(moduleName string, ref ast.TypeRef, params map[s
 	if base.Kind == KindTrait && !allowTrait {
 		return nil, []diag.Diagnostic{{
 			Phase:    "sem",
-			Code:     diag.SEM0080,
+			Code:     diag.SEM0097,
 			Severity: diag.Error,
 			Start:    ref.Span().Start,
 			End:      ref.Span().End,
@@ -161,7 +161,7 @@ func (idx *Index) registerInstantiation(base *Type, args []*Type) *Type {
 			idx.InstantiationDepthExceeded = true
 			idx.InstantiationDiags = append(idx.InstantiationDiags, diag.Diagnostic{
 				Phase:    "sem",
-				Code:     diag.SEM0080,
+				Code:     diag.SEM0098,
 				Severity: diag.Error,
 				Message:  "generic instantiation depth exceeded",
 			})
@@ -242,7 +242,7 @@ func (idx *Index) CompleteGenericInstantiations() []diag.Diagnostic {
 		if pass >= maxGenericInstantiationPasses {
 			out = append(out, diag.Diagnostic{
 				Phase:    "sem",
-				Code:     diag.SEM0080,
+				Code:     diag.SEM0098,
 				Severity: diag.Error,
 				Message:  "generic instantiation depth exceeded",
 			})

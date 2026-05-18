@@ -90,8 +90,8 @@ data Root { value: List<U64> }
 `)
 	_, ds := BuildIndex(modules)
 	ds = filterMissingImageDiagnostic(ds)
-	if !hasCode(ds, diag.SEM0080) {
-		t.Fatalf("diagnostics = %#v, want SEM0080", ds)
+	if !hasCode(ds, diag.SEM0098) {
+		t.Fatalf("diagnostics = %#v, want SEM0098", ds)
 	}
 }
 
@@ -118,6 +118,47 @@ class Worker {
 	_, ds := checkAllowingMissingImage(t, index, modules)
 	if len(ds) != 0 {
 		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
+func TestGenericMethodBodyCheckedBeforeUse(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.generics
+data Box<T> {
+    value: T
+    fn bad(self) -> T {
+        return 1
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, checkDiags := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(checkDiags, diag.CG0001) {
+		t.Fatalf("diagnostics = %#v, want CG0001", checkDiags)
+	}
+}
+
+func TestMethodGenericBodyCheckedBeforeUse(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.generics
+class Worker {
+    fn bad<T>(self, value: T) -> T {
+        return 1
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, checkDiags := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(checkDiags, diag.CG0001) {
+		t.Fatalf("diagnostics = %#v, want CG0001", checkDiags)
 	}
 }
 

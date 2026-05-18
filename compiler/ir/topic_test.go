@@ -135,6 +135,67 @@ image Img {
 	}
 }
 
+func TestLowerTopicPayloadSizeUsesIRStorageLayout(t *testing.T) {
+	checked := checkedProgramFromSourcesForTest(t, topicContractForTest(), `
+module test.topic_payload_layout
+use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic } from machine.x86_64.topic
+
+data Empty {}
+data Inner {
+    first: U64
+    second: U32
+}
+data Envelope {
+    inner: Inner
+    marker: U8
+}
+executor Worker {
+    slot: ExecutorSlot
+    start fn run(self) -> never {
+        while true {}
+    }
+}
+
+image Img {
+    transitions { delegated_hardware -> owned_hardware }
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
+        let nested = Topic<Envelope>(identity = TopicIdentity(label = "nested"), id = 0, depth = 8)
+        let empty = Topic<Empty>(identity = TopicIdentity(label = "empty"), id = 1, depth = 8)
+        let worker = Worker(slot = worker_slot)
+        hardware.vcpu0.enter(executor = worker)
+    }
+}`)
+	program, diags := Lower(checked)
+	if len(diags) != 0 {
+		t.Fatalf("Lower diagnostics: %#v", diags)
+	}
+
+	envelopeInfo := program.Types["test.topic_payload_layout.Envelope"]
+	emptyInfo := program.Types["test.topic_payload_layout.Empty"]
+	var nestedTopic, emptyTopic *TopicLayout
+	for i := range program.Topics {
+		switch program.Topics[i].Label {
+		case "nested":
+			nestedTopic = &program.Topics[i]
+		case "empty":
+			emptyTopic = &program.Topics[i]
+		}
+	}
+	if nestedTopic == nil || emptyTopic == nil {
+		t.Fatalf("program topics = %#v, want nested and empty", program.Topics)
+	}
+	if nestedTopic.PayloadSize != uint64(envelopeInfo.StorageSize) || nestedTopic.PayloadSize != 32 {
+		t.Fatalf("nested payload size = %d, want IR storage size %d", nestedTopic.PayloadSize, envelopeInfo.StorageSize)
+	}
+	if emptyTopic.PayloadSize != uint64(emptyInfo.StorageSize) || emptyTopic.PayloadSize != 8 {
+		t.Fatalf("empty payload size = %d, want IR storage size %d", emptyTopic.PayloadSize, emptyInfo.StorageSize)
+	}
+}
+
 func TestLowerSpecializesTopicOpsForSameExecutorTypePlacements(t *testing.T) {
 	checked := checkedProgramFromSourcesForTest(t, topicContractForTest(), `
 module test.same_type_topic_lower

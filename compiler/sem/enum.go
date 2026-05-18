@@ -53,6 +53,7 @@ func (c *checker) checkMatchStmt(moduleName string, scope *Scope, expectedReturn
 		c.error(stmt.Value.Span(), diag.SEM0085, "match requires enum value")
 		return false
 	}
+	valueOrigin := c.originForExprValue(moduleName, stmt.Value, valueType, scope)
 
 	seen := map[string]source.Span{}
 	wildcard := false
@@ -83,7 +84,7 @@ func (c *checker) checkMatchStmt(moduleName string, scope *Scope, expectedReturn
 			}
 			seen[variant.Name] = arm.Span
 			armScope := NewScope(scope)
-			if c.bindPatternFieldsFailed(armScope, variant, p.Bindings, arm.Span) {
+			if c.bindPatternFieldsFailed(armScope, variant, p.Bindings, valueOrigin, arm.Span) {
 				allArmsTerminate = false
 				continue
 			}
@@ -116,14 +117,15 @@ func (c *checker) checkIfLetStmt(moduleName string, scope *Scope, expectedReturn
 		return false
 	}
 	bodyScope := NewScope(scope)
-	if c.bindPatternFieldsFailed(bodyScope, variant, pattern.Bindings, stmt.SpanV) {
+	valueOrigin := c.originForExprValue(moduleName, stmt.Value, valueType, scope)
+	if c.bindPatternFieldsFailed(bodyScope, variant, pattern.Bindings, valueOrigin, stmt.SpanV) {
 		return false
 	}
 	c.checkStmtList(moduleName, stmt.Body, bodyScope, expectedReturn, ctx)
 	return false
 }
 
-func (c *checker) bindPatternFieldsFailed(scope *Scope, variant EnumVariant, bindings []ast.PatternBinding, span source.Span) bool {
+func (c *checker) bindPatternFieldsFailed(scope *Scope, variant EnumVariant, bindings []ast.PatternBinding, valueOrigin localOrigin, span source.Span) bool {
 	byName := map[string]Field{}
 	for _, field := range variant.Fields {
 		byName[field.Name] = field
@@ -155,6 +157,12 @@ func (c *checker) bindPatternFieldsFailed(scope *Scope, variant EnumVariant, bin
 		seenFields[binding.Name] = true
 		seenBinds[binding.Bind] = true
 		scope.Define(binding.Bind, field.Type)
+		fieldOrigin, ok := valueOrigin.FieldOrigins[binding.Name]
+		if !ok {
+			fieldOrigin = localOrigin{AuthorityProvenance: valueOrigin.AuthorityProvenance}
+		}
+		fieldOrigin.Type = field.Type
+		scope.DefineOrigin(binding.Bind, fieldOrigin)
 	}
 	for _, field := range variant.Fields {
 		if !seenFields[field.Name] {
@@ -234,6 +242,29 @@ func (c *checker) typeVariantConstructorExpr(moduleName string, expr *ast.Varian
 	return concreteEnum
 }
 
+func (c *checker) staticVariantConstructorType(moduleName string, expr *ast.VariantConstructorExpr, scope *Scope) *Type {
+	enumType, ok := c.index.lookupBaseType(moduleName, expr.Enum)
+	if !ok || enumType == nil || enumType.Kind != KindEnum {
+		return nil
+	}
+	variant, ok := c.enumVariant(enumType, expr.Variant)
+	if !ok {
+		return nil
+	}
+	if len(enumType.TypeParams) == 0 {
+		return enumType
+	}
+	args, inferred := c.inferEnumTypeArgs(moduleName, enumType, variant, expr.Args, nil, scope, ContextNormalMethod)
+	if !inferred {
+		return nil
+	}
+	concrete := c.index.registerInstantiation(enumType, args)
+	for _, d := range c.index.completeInstantiation(concrete.Key(), map[string]bool{}) {
+		c.diags = append(c.diags, d)
+	}
+	return concrete
+}
+
 func (c *checker) inferEnumTypeArgs(moduleName string, enum *Type, variant EnumVariant, args []ast.NamedArg, expected *Type, scope *Scope, ctx ContextKind) ([]*Type, bool) {
 	if expected != nil && expected.Kind == KindEnum && (expected == enum || expected.GenericOrigin == enum || sameEnumPatternName(expected, enum.Name)) {
 		if len(expected.TypeArgs) == len(enum.TypeParams) {
@@ -247,9 +278,6 @@ func (c *checker) inferEnumTypeArgs(moduleName string, enum *Type, variant EnumV
 
 	inferred := map[string]*Type{}
 	for _, field := range variant.Fields {
-		if field.Type == nil || field.Type.Kind != KindTypeParam || field.Type.Module != "" || len(field.Type.TypeArgs) != 0 {
-			continue
-		}
 		argExpr := namedArgExpr(args, field.Name)
 		if argExpr == nil {
 			continue
@@ -261,10 +289,9 @@ func (c *checker) inferEnumTypeArgs(moduleName string, enum *Type, variant EnumV
 		if concrete == nil || concrete.Kind == KindTypeParam {
 			continue
 		}
-		if existing := inferred[field.Type.Name]; existing != nil && existing.Key() != concrete.Key() {
+		if !inferEnumTypeArgsFromPayload(field.Type, concrete, inferred) {
 			return nil, false
 		}
-		inferred[field.Type.Name] = concrete
 	}
 
 	out := make([]*Type, 0, len(enum.TypeParams))
@@ -276,6 +303,46 @@ func (c *checker) inferEnumTypeArgs(moduleName string, enum *Type, variant EnumV
 		out = append(out, concrete)
 	}
 	return out, true
+}
+
+func inferEnumTypeArgsFromPayload(pattern *Type, concrete *Type, inferred map[string]*Type) bool {
+	if pattern == nil || concrete == nil {
+		return true
+	}
+	if pattern.Kind == KindTypeParam && pattern.Module == "" && len(pattern.TypeArgs) == 0 {
+		if existing := inferred[pattern.Name]; existing != nil && existing.Key() != concrete.Key() {
+			return false
+		}
+		inferred[pattern.Name] = concrete
+		return true
+	}
+	if len(pattern.TypeArgs) == 0 || len(pattern.TypeArgs) != len(concrete.TypeArgs) {
+		return true
+	}
+	if !sameGenericTypePattern(pattern, concrete) {
+		return true
+	}
+	for i := range pattern.TypeArgs {
+		if !inferEnumTypeArgsFromPayload(pattern.TypeArgs[i], concrete.TypeArgs[i], inferred) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameGenericTypePattern(pattern *Type, concrete *Type) bool {
+	if pattern == nil || concrete == nil {
+		return false
+	}
+	patternBase := pattern
+	if patternBase.GenericOrigin != nil {
+		patternBase = patternBase.GenericOrigin
+	}
+	concreteBase := concrete
+	if concreteBase.GenericOrigin != nil {
+		concreteBase = concreteBase.GenericOrigin
+	}
+	return patternBase.Key() == concreteBase.Key()
 }
 
 func (c *checker) staticEnumInferenceType(moduleName string, expr ast.Expr, scope *Scope) *Type {

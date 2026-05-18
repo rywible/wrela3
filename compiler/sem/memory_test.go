@@ -554,6 +554,845 @@ class Forgery {
 	}
 }
 
+func TestProtectedViewLaunderedAuthorityLocalRejectedInTrustedPrefixModule(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.uefi.fake
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry {
+    value: U8
+}
+
+class Forgery {
+    fn firmware(self) -> FirmwareSlice<Entry> {
+        let forged = FirmwareAddress(value = 0x1000)
+        return FirmwareSlice<Entry>(address = forged, length = 1)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestFirmwareSliceRejectsForgedBoundedBytesInAcpiModule(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+class Forgery {
+    fn firmware(self) -> FirmwareSlice<Entry> {
+        let forged = BoundedBytes(address = 0x1000, length = 1)
+        return FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = forged.address),
+            length = forged.length
+        )
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestFirmwareSliceRejectsBoundedBytesAfterRawReassignment(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+class Forgery {
+    fn firmware(self, trusted: BoundedBytes) -> FirmwareSlice<Entry> {
+        let bytes = trusted
+        bytes = BoundedBytes(address = 0x1000, length = 1)
+        return FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = bytes.address),
+            length = bytes.length
+        )
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestFirmwareSliceRejectsUnprovenancedBoundedBytesParameter(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+class Forgery {
+    fn firmware(self, bytes: BoundedBytes) -> FirmwareSlice<Entry> {
+        return FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = bytes.address),
+            length = bytes.length
+        )
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestDataMethodRejectsRawFirmwareSliceConstructor(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+data Forgery {
+    fn firmware(self) -> FirmwareSlice<Entry> {
+        return FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = 0x1000),
+            length = 1
+        )
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiRootTableAtRejectsRawAddressInDataMethod(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    fn bad(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = 0x1000)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestForgedAcpiRootReceiverRejected(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+`, `
+module platform.acpi.bad
+use { AcpiRoot } from platform.acpi.root
+use { AcpiTable } from platform.acpi.tables
+
+class Forgery {
+    fn forged(self) -> AcpiTable {
+        return AcpiRoot(root_address = 0x1000).root_table()
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiLocatorRejectsRawConfigurationTables(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.uefi.types
+data UefiConfigurationTables {
+    table_address: PhysicalAddress
+    count: U64
+}
+`, `
+module platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+
+data AcpiRoot { root_address: PhysicalAddress }
+data AcpiLocator {
+    fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
+        return AcpiRoot(root_address = tables.table_address)
+    }
+}
+`, `
+module platform.acpi.bad
+use { AcpiLocator, AcpiRoot } from platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+
+class Forgery {
+    fn forged(self) -> AcpiRoot {
+        let tables = UefiConfigurationTables(table_address = 0x1000, count = 1)
+        return AcpiLocator().find(tables = tables)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiLocatorRejectsRawConfigurationTablesInDataMethod(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.uefi.types
+data UefiConfigurationTables {
+    table_address: PhysicalAddress
+    count: U64
+}
+`, `
+module platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+
+data AcpiRoot { root_address: PhysicalAddress }
+data AcpiLocator {
+    fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
+        return AcpiRoot(root_address = tables.table_address)
+    }
+}
+`, `
+module platform.acpi.bad
+use { AcpiLocator, AcpiRoot } from platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+
+data Forgery {
+    fn forged(self) -> AcpiRoot {
+        let tables = UefiConfigurationTables(table_address = 0x1000, count = 1)
+        return AcpiLocator().find(tables = tables)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestForgedAcpiRootReceiverRejectedInDataMethod(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+`, `
+module platform.acpi.bad
+use { AcpiRoot } from platform.acpi.root
+use { AcpiTable } from platform.acpi.tables
+
+data Forgery {
+    fn forged(self) -> AcpiTable {
+        return AcpiRoot(root_address = 0x1000).root_table()
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestPatternBindingDoesNotLaunderAuthorityPayload(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module wrela.lang.core
+enum Option<T> {
+    None
+    Some(value: T)
+}
+`, `
+module platform.hardware.bytes
+data BoundedBytes {
+    address: PhysicalAddress
+    length: U64
+}
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { Option } from wrela.lang.core
+use { BoundedBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+class Forgery {
+    fn firmware(self) -> never {
+        let raw = BoundedBytes(address = 0x1000, length = 1)
+        let maybe = Option.Some(value = raw)
+        if let Option.Some(value = bytes) = maybe {
+            FirmwareSlice<Entry>(
+                address = FirmwareAddress(value = bytes.address),
+                length = bytes.length
+            )
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestDataMethodPatternBindingDoesNotLaunderAcpiRoot(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module wrela.lang.core
+enum Option<T> {
+    None
+    Some(value: T)
+}
+`, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+`, `
+module platform.acpi.bad
+use { Option } from wrela.lang.core
+use { AcpiRoot } from platform.acpi.root
+use { AcpiTable } from platform.acpi.tables
+
+data Forgery {
+    fn forged(self) -> never {
+        let raw = AcpiRoot(root_address = 0x1000)
+        let maybe = Option.Some(value = raw)
+        if let Option.Some(value = root) = maybe {
+            root.root_table()
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiRootMethodCallDoesNotLaunderRawAddress(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn raw_literal_address(self) -> PhysicalAddress {
+        return 0x1000
+    }
+    fn bad(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.raw_literal_address())
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiRootFieldAssignmentDoesNotLaunderRawAddress(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn bad(self) -> AcpiTable {
+        self.root_address = 0x1000
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestAcpiRootFieldAssignmentDoesNotLaunderRootTableCall(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+    fn bad(self) -> AcpiTable {
+        self.root_address = 0x1000
+        return self.root_table()
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestImagePhaseAcpiRootFieldAssignmentDoesNotLaunderRootTableCall(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.uefi.types
+data UefiConfigurationTables {
+    table_address: PhysicalAddress
+    count: U64
+}
+`, `
+module platform.uefi.transition
+use { UefiConfigurationTables } from platform.uefi.types
+
+data DelegatedHardware {
+    tables: UefiConfigurationTables
+    fn uefi_configuration_tables(self) -> UefiConfigurationTables {
+        return self.tables
+    }
+}
+`, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+data AcpiLocator {
+    fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
+        return AcpiRoot(root_address = tables.table_address)
+    }
+}
+`, `
+module app
+use { DelegatedHardware } from platform.uefi.transition
+use { AcpiLocator } from platform.acpi.root
+
+image App {
+    phase delegated_hardware(hardware: DelegatedHardware) -> never {
+        let tables = hardware.uefi_configuration_tables()
+        let root = AcpiLocator().find(tables = tables)
+        root.root_address = 0x1000
+        root.root_table()
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestEnumPayloadDoesNotLaunderPoisonedAcpiRoot(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module wrela.lang.core
+enum Option<T> {
+    None
+    Some(value: T)
+}
+`, `
+module platform.uefi.types
+data UefiConfigurationTables {
+    table_address: PhysicalAddress
+    count: U64
+}
+`, `
+module platform.uefi.transition
+use { UefiConfigurationTables } from platform.uefi.types
+
+data DelegatedHardware {
+    tables: UefiConfigurationTables
+    fn uefi_configuration_tables(self) -> UefiConfigurationTables {
+        return self.tables
+    }
+}
+`, `
+module platform.acpi.tables
+data AcpiTable { address: PhysicalAddress }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> AcpiTable {
+        return AcpiTable(address = address)
+    }
+}
+`, `
+module platform.acpi.root
+use { UefiConfigurationTables } from platform.uefi.types
+use { AcpiHelpers, AcpiTable } from platform.acpi.tables
+
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn root_table(self) -> AcpiTable {
+        return AcpiHelpers().table_at(address = self.root_address)
+    }
+}
+data AcpiLocator {
+    fn find(self, tables: UefiConfigurationTables) -> AcpiRoot {
+        return AcpiRoot(root_address = tables.table_address)
+    }
+}
+`, `
+module app
+use { Option } from wrela.lang.core
+use { DelegatedHardware } from platform.uefi.transition
+use { AcpiLocator } from platform.acpi.root
+
+image App {
+    phase delegated_hardware(hardware: DelegatedHardware) -> never {
+        let tables = hardware.uefi_configuration_tables()
+        let root = AcpiLocator().find(tables = tables)
+        root.root_address = 0x1000
+        let maybe = Option.Some(value = root)
+        if let Option.Some(value = unwrapped) = maybe {
+            unwrapped.root_table()
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestFirmwareSliceRejectsBoundedBytesAfterFieldAssignment(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+data PhysicalBytes {
+    address: PhysicalAddress
+    length: U64
+    fn bounded(self) -> BoundedBytes {
+        return BoundedBytes(address = self.address, length = self.length)
+    }
+}
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes, PhysicalBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> never {
+        let bytes = PhysicalBytes(address = address, length = 8).bounded()
+        bytes.address = 0x1000
+        FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = bytes.address),
+            length = bytes.length
+        )
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestFirmwareSliceRejectsBoundedBytesAfterNestedFieldAssignment(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+data PhysicalBytes {
+    address: PhysicalAddress
+    length: U64
+    fn bounded(self) -> BoundedBytes {
+        return BoundedBytes(address = self.address, length = self.length)
+    }
+}
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes, PhysicalBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+data TableView { bytes: BoundedBytes }
+data AcpiHelpers {
+    fn table_at(self, address: PhysicalAddress) -> never {
+        let view = TableView(bytes = PhysicalBytes(address = address, length = 8).bounded())
+        view.bytes.address = 0x1000
+        FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = view.bytes.address),
+            length = view.bytes.length
+        )
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestNestedReassignmentPoisonsOuterAuthorityProvenance(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+data PhysicalBytes {
+    address: PhysicalAddress
+    length: U64
+    fn bounded(self) -> BoundedBytes {
+        return BoundedBytes(address = self.address, length = self.length)
+    }
+}
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.root
+use { BoundedBytes, PhysicalBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+data AcpiRoot {
+    root_address: PhysicalAddress
+    fn bad(self) -> never {
+        let bytes = PhysicalBytes(address = self.root_address, length = 8).bounded()
+        if true {
+            bytes = BoundedBytes(address = 0x1000, length = 8)
+        }
+        FirmwareSlice<Entry>(
+            address = FirmwareAddress(value = bytes.address),
+            length = bytes.length
+        )
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
 func TestSlotsReturnLifetimeEscapeDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
 module sem.slots

@@ -54,6 +54,31 @@ class Worker {
 	}
 }
 
+func TestLowerEnumConstructorInfersThroughGenericPayload(t *testing.T) {
+	program := lowerSourceForTest(t, `
+module ir.enums
+data Event { kind: U64 }
+data Wrapper<T> { value: T }
+enum MaybeWrapped<T> { None Some(value: Wrapper<T>) }
+class Worker {
+    fn some(self) -> MaybeWrapped<Event> {
+        return MaybeWrapped.Some(value = Wrapper<Event>(value = Event(kind = 1)))
+    }
+}
+`)
+	fn := findFunction(program, "_wrela_method_ir_enums_Worker_some")
+	if fn == nil {
+		t.Fatal("missing Worker.some")
+	}
+	construct, ok := functionOp[*EnumConstruct](*fn)
+	if !ok {
+		t.Fatalf("missing enum construct: %#v", fn.Blocks)
+	}
+	if construct.Type.Name != "ir.enums.MaybeWrapped[ir.enums.Event]" {
+		t.Fatalf("enum construct type = %#v, want MaybeWrapped<Event>", construct.Type)
+	}
+}
+
 func containsNestedOp[T any](fn Function) bool {
 	for _, block := range fn.Blocks {
 		if containsNestedOpInOps[T](block.Ops) {

@@ -34,6 +34,31 @@ data Root { drain: Drain<EventSub, Event> }
 	}
 }
 
+func TestMethodGenericWhereBoundBodyChecked(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.traits
+trait Producer<T> {
+    fn next(self) -> T
+}
+class U64Sub {
+    fn next(self) -> U64 {
+        return 7
+    }
+}
+impl Producer<U64> for U64Sub
+class Worker {
+    fn poll<S>(self, input: S) where S: Producer<U64> -> U64 {
+        return input.next()
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
 func TestTraitRefRejectedAsValueType(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.traits
@@ -46,8 +71,8 @@ data Holder {
 `)
 	_, ds := BuildIndex(modules)
 	ds = filterMissingImageDiagnostic(ds)
-	if !hasCode(ds, diag.SEM0080) {
-		t.Fatalf("diagnostics = %#v, want SEM0080", ds)
+	if !hasCode(ds, diag.SEM0097) {
+		t.Fatalf("diagnostics = %#v, want SEM0097", ds)
 	}
 }
 

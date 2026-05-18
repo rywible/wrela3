@@ -51,6 +51,8 @@ func TestLanguageExpressivenessDiagnosticCodesExist(t *testing.T) {
 		SEM0094, // enum variant constructor is invalid
 		SEM0095, // match or if-let pattern binding is invalid
 		SEM0096, // protected view field access is not allowed here
+		SEM0097, // trait type used where a value type is required
+		SEM0098, // generic instantiation depth exceeded
 	}
 	for _, code := range codes {
 		if code == "" {

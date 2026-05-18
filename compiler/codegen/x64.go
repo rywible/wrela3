@@ -380,7 +380,7 @@ func interruptQueuePayloadRangeForBinding(e *Emitter, binding ir.InterruptBindin
 	}
 	eventType := binding.EventType
 	if eventType.Name == "" {
-		eventType = ir.Type{Name: "wrela.lang.core.Option[U8]", Module: "wrela.lang.core", Kind: ir.TypeKindEnum}
+		eventType = serialOptionU8Type()
 	}
 	eventInfo, ok := ctx.typeInfo(eventType)
 	if !ok {
@@ -393,6 +393,10 @@ func interruptQueuePayloadRangeForBinding(e *Emitter, binding ir.InterruptBindin
 		return 0, 0, false
 	}
 	return uint64(fieldStorageOffset(valueField)), uint64(fieldStorageSize(ctx, valueField)), true
+}
+
+func serialOptionU8Type() ir.Type {
+	return ir.Type{Module: "wrela.lang.core", Name: "Option[U8]", Kind: ir.TypeKindEnum}
 }
 
 func buildInterruptQueueOnlyUnit(symbol string, queue ir.InterruptQueueLayout, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
@@ -467,7 +471,7 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	if binding.TopicKind == "serial_rx" {
 		eventType := binding.EventType
 		if eventType.Name == "" {
-			eventType = ir.Type{Name: "wrela.lang.core.Option[U8]", Module: "wrela.lang.core", Kind: ir.TypeKindEnum}
+			eventType = serialOptionU8Type()
 		}
 		eventInfo, ok := ctx.typeInfo(eventType)
 		if !ok {

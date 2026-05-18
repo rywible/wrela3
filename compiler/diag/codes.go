@@ -108,6 +108,8 @@ const (
 	SEM0094  = "SEM0094" // enum variant constructor is invalid
 	SEM0095  = "SEM0095" // match or if-let pattern binding is invalid
 	SEM0096  = "SEM0096" // protected view field access is not allowed here
+	SEM0097  = "SEM0097" // trait type used where a value type is required
+	SEM0098  = "SEM0098" // generic instantiation depth exceeded
 	ASM0001  = "ASM0001"
 	ASM0002  = "ASM0002"
 	ASM0003  = "ASM0003"

@@ -75,20 +75,18 @@ data Event { kind: U64 }
 data Slice<T> {
     address: PhysicalAddress
     length: U64
-    fn get(self, index: U64) -> T {}
+    asm fn get(self, index: U64) -> T { ret }
 }
 data MutableSlice<T> {
     address: PhysicalAddress
     length: U64
-    fn get(self, index: U64) -> T {}
+    asm fn get(self, index: U64) -> T { ret }
     fn set(self, index: U64, value: T) {}
 }
 data Slots<T> {
     address: PhysicalAddress
     capacity: U64
-    fn fill(self, value: T) -> MutableSlice<T> {
-        return MutableSlice<T>(address = self.address, length = self.capacity)
-    }
+    asm fn fill(self, value: T) -> MutableSlice<T> { ret }
 }
 class ExecutorMemory {
     arena_base: PhysicalAddress

@@ -31,8 +31,10 @@ type Scope struct {
 
 type localOrigin struct {
 	Type                      *Type
+	AuthorityProvenance       bool
 	Constructor               *ast.ConstructorExpr
 	FieldBindings             map[string]string
+	FieldOrigins              map[string]localOrigin
 	SlotLabel                 string
 	RecordsExecutorSlot       bool
 	ExecutorRegistryAuthority bool
@@ -126,6 +128,21 @@ func (s *Scope) LookupLifetime(name string) (Lifetime, bool) {
 
 func (s *Scope) DefineOrigin(name string, origin localOrigin) {
 	if s == nil {
+		return
+	}
+	s.origins[name] = origin
+}
+
+func (s *Scope) AssignOrigin(name string, origin localOrigin) {
+	if s == nil {
+		return
+	}
+	if _, ok := s.origins[name]; ok {
+		s.origins[name] = origin
+		return
+	}
+	if s.parent != nil {
+		s.parent.AssignOrigin(name, origin)
 		return
 	}
 	s.origins[name] = origin
@@ -225,6 +242,8 @@ type checker struct {
 	methodLifetimeSummaries map[string]MethodLifetimeSummary
 	activeMethodSummaries   map[string]bool
 	currentMethodSummary    *MethodLifetimeSummary
+	currentMethodTypeParams map[string]*Type
+	currentMethodWhere      []TraitBound
 	seenSharedIRQSource     map[string]bool
 	// TODO: scope these discovered plan facts to constructor expression IDs if
 	// images ever allow multiple CPU or hardware plan builders.
@@ -537,46 +556,71 @@ func typeParamMapForCheck(params []ast.TypeParam) map[string]*Type {
 }
 
 func mergeTypeParamMap(base map[string]*Type, params []ast.TypeParam) map[string]*Type {
-	if len(base) == 0 && len(params) == 0 {
+	return mergeTypeParamMaps(base, typeParamMapForCheck(params))
+}
+
+func mergeTypeParamMaps(base map[string]*Type, extra map[string]*Type) map[string]*Type {
+	if len(base) == 0 && len(extra) == 0 {
 		return nil
 	}
 	out := map[string]*Type{}
 	for name, typ := range base {
 		out[name] = typ
 	}
-	methodParams, _ := buildTypeParamMap(params)
-	for name, typ := range methodParams {
+	for name, typ := range extra {
 		out[name] = typ
 	}
 	return out
 }
 
+func typeParamMapForMethod(typ *Type, params []ast.TypeParam) map[string]*Type {
+	var base map[string]*Type
+	if typ != nil {
+		if typ.GenericOrigin != nil && len(typ.GenericOrigin.TypeParams) == len(typ.TypeArgs) {
+			base = map[string]*Type{}
+			for i, param := range typ.GenericOrigin.TypeParams {
+				base[param.Name] = typ.TypeArgs[i]
+			}
+		} else if len(typ.TypeParams) != 0 {
+			base = map[string]*Type{}
+			for _, param := range typ.TypeParams {
+				base[param.Name] = &Type{Name: param.Name, Kind: KindTypeParam}
+			}
+		}
+	}
+	return mergeTypeParamMap(base, params)
+}
+
 func (c *checker) currentTypeParamMap() map[string]*Type {
-	if c == nil || c.currentType == nil {
+	if c == nil {
 		return nil
 	}
-	if cached, ok := c.typeParamMaps[c.currentType]; ok {
-		return cached
+	if c.currentType == nil {
+		return mergeTypeParamMaps(nil, c.currentMethodTypeParams)
 	}
-	var out map[string]*Type
+	var base map[string]*Type
+	if cached, ok := c.typeParamMaps[c.currentType]; ok {
+		base = cached
+		return mergeTypeParamMaps(base, c.currentMethodTypeParams)
+	}
 	if c.currentType.GenericOrigin != nil && len(c.currentType.GenericOrigin.TypeParams) == len(c.currentType.TypeArgs) {
-		out = map[string]*Type{}
+		out := map[string]*Type{}
 		for i, param := range c.currentType.GenericOrigin.TypeParams {
 			out[param.Name] = c.currentType.TypeArgs[i]
 		}
 		c.typeParamMaps[c.currentType] = out
-		return out
+		return mergeTypeParamMaps(out, c.currentMethodTypeParams)
 	}
 	if len(c.currentType.TypeParams) == 0 {
 		c.typeParamMaps[c.currentType] = nil
-		return nil
+		return mergeTypeParamMaps(nil, c.currentMethodTypeParams)
 	}
-	out = map[string]*Type{}
+	out := map[string]*Type{}
 	for _, param := range c.currentType.TypeParams {
 		out[param.Name] = &Type{Name: param.Name, Kind: KindTypeParam}
 	}
 	c.typeParamMaps[c.currentType] = out
-	return out
+	return mergeTypeParamMaps(out, c.currentMethodTypeParams)
 }
 
 func (c *checker) checkTypeRefResolved(moduleName string, ref ast.TypeRef, params map[string]*Type, span source.Span) {
@@ -641,6 +685,7 @@ func (c *checker) checkDeclBodiesAndConstructors() {
 			case *ast.DataDecl:
 				typ := c.index.resolveInScope(mod.Name, d.Name)
 				c.checkMethods(mod.Name, typ, d.Methods)
+				c.checkAcpiTableAtCallsInMethods(mod.Name, typ, d.Methods)
 			case *ast.ClassDecl:
 				typ := c.index.resolveInScope(mod.Name, d.Name)
 				c.checkMethods(mod.Name, typ, d.Methods)
@@ -745,7 +790,12 @@ func (c *checker) checkImageDecl(moduleName string, image *ast.ImageDecl) {
 			if p.Name == "" {
 				continue
 			}
-			scope.Define(p.Name, c.mustType(moduleName, legacyTypeName(p.Type)))
+			paramType := c.mustType(moduleName, legacyTypeName(p.Type))
+			scope.Define(p.Name, paramType)
+			scope.DefineOrigin(p.Name, localOrigin{
+				Type:                paramType,
+				AuthorityProvenance: phaseParamHasAuthorityProvenance(phase.Name, paramType),
+			})
 		}
 		prevPhase := c.currentPhase
 		c.currentPhase = phase.Name
@@ -770,14 +820,8 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		if isCanonicalFrameIntrinsic(moduleName, typ, method) {
 			continue
 		}
-		if typ != nil && len(typ.TypeParams) != 0 {
-			continue
-		}
-		if len(method.TypeParams) != 0 {
-			continue
-		}
 
-		returnType, _ := c.index.LookupTypeRef(moduleName, method.Return, typeParamMapForCheck(method.TypeParams))
+		returnType, _ := c.index.LookupTypeRef(moduleName, method.Return, typeParamMapForMethod(typ, method.TypeParams))
 		if method.IsAsm {
 			continue
 		}
@@ -790,6 +834,195 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 		}
 	}
 	c.currentType = nil
+}
+
+func (c *checker) checkAcpiTableAtCallsInMethods(moduleName string, typ *Type, methods []ast.MethodDecl) {
+	if len(methods) == 0 {
+		return
+	}
+	prevType := c.currentType
+	c.currentType = typ
+	for _, method := range methods {
+		if method.IsAsm {
+			continue
+		}
+		scope := c.newMethodLifetimeScope(moduleName, typ, method)
+		c.checkAcpiTableAtCallsInStmts(moduleName, method.Body, scope)
+	}
+	c.currentType = prevType
+}
+
+func (c *checker) checkAcpiTableAtCallsInStmts(moduleName string, stmts []ast.Stmt, scope *Scope) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Expr, scope)
+			valueType := c.exprStaticType(moduleName, s.Expr, scope)
+			scope.Define(s.Name, valueType)
+			scope.DefineOrigin(s.Name, c.originForExprValue(moduleName, s.Expr, valueType, scope))
+		case *ast.AssignStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Value, scope)
+			c.assignOriginForTarget(moduleName, s.Target, s.Value, scope)
+		case *ast.ReturnStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Value, scope)
+		case *ast.ExprStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Expr, scope)
+		case *ast.IfStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Cond, scope)
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Then, NewScope(scope))
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Else, NewScope(scope))
+		case *ast.IfLetStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Value, scope)
+			child := NewScope(scope)
+			c.bindAuthorityScanPattern(moduleName, child, s.Pattern, s.Value, scope, s.SpanV)
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Body, child)
+		case *ast.MatchStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Value, scope)
+			for _, arm := range s.Arms {
+				child := NewScope(scope)
+				c.bindAuthorityScanPattern(moduleName, child, arm.Pattern, s.Value, scope, arm.Span)
+				c.checkAcpiTableAtCallsInStmts(moduleName, arm.Body, child)
+			}
+		case *ast.WhileStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Cond, scope)
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Body, NewScope(scope))
+		case *ast.WithStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.Expr, scope)
+			child := NewScope(scope)
+			frameType := c.exprStaticType(moduleName, s.Expr, scope)
+			child.Define(s.Name, frameType)
+			child.DefineOrigin(s.Name, c.originForExprValue(moduleName, s.Expr, frameType, scope))
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Body, child)
+		case *ast.ForStmt:
+			c.checkAcpiTableAtCallsInExpr(moduleName, s.InExpr, scope)
+			c.checkAcpiTableAtCallsInStmts(moduleName, s.Body, NewScope(scope))
+		}
+	}
+}
+
+func (c *checker) assignOriginForTarget(moduleName string, target ast.Expr, value ast.Expr, scope *Scope) {
+	valueType := c.exprStaticType(moduleName, value, scope)
+	switch t := target.(type) {
+	case *ast.NameExpr:
+		scope.AssignOrigin(t.Name, c.originForExprValue(moduleName, value, valueType, scope))
+	case *ast.FieldExpr:
+		c.assignFieldOrigin(moduleName, t, value, valueType, scope)
+	}
+}
+
+func (c *checker) assignFieldOrigin(moduleName string, target *ast.FieldExpr, value ast.Expr, valueType *Type, scope *Scope) {
+	if scope == nil {
+		return
+	}
+	c.assignFieldOriginValue(moduleName, target, c.originForExprValue(moduleName, value, valueType, scope), scope)
+}
+
+func (c *checker) assignFieldOriginValue(moduleName string, target *ast.FieldExpr, assigned localOrigin, scope *Scope) {
+	base, ok := target.Base.(*ast.NameExpr)
+	if !ok {
+		if parent, ok := target.Base.(*ast.FieldExpr); ok {
+			parentType := c.exprStaticType(moduleName, parent, scope)
+			parentOrigin := c.originForExprValue(moduleName, parent, parentType, scope)
+			if parentOrigin.FieldOrigins == nil {
+				parentOrigin.FieldOrigins = map[string]localOrigin{}
+			}
+			parentOrigin.FieldOrigins[target.Field] = assigned
+			c.assignFieldOriginValue(moduleName, parent, parentOrigin, scope)
+		}
+		return
+	}
+	baseOrigin, _ := scope.LookupOrigin(base.Name)
+	if baseOrigin.Type == nil {
+		baseOrigin.Type = c.exprStaticType(moduleName, target.Base, scope)
+	}
+	if baseOrigin.FieldOrigins == nil {
+		baseOrigin.FieldOrigins = map[string]localOrigin{}
+	}
+	baseOrigin.FieldOrigins[target.Field] = assigned
+	scope.AssignOrigin(base.Name, baseOrigin)
+}
+
+func (c *checker) bindAuthorityScanPattern(moduleName string, child *Scope, pattern ast.Pattern, value ast.Expr, parent *Scope, span source.Span) {
+	variantPattern, ok := pattern.(ast.VariantPattern)
+	if !ok {
+		return
+	}
+	valueType := c.exprStaticType(moduleName, value, parent)
+	if valueType == nil || valueType.Kind != KindEnum {
+		return
+	}
+	variant, ok := c.enumVariant(valueType, variantPattern.Variant)
+	if !ok || !sameEnumPatternName(valueType, variantPattern.Enum) {
+		return
+	}
+	valueOrigin := c.originForExprValue(moduleName, value, valueType, parent)
+	c.bindPatternFieldsFailed(child, variant, variantPattern.Bindings, valueOrigin, span)
+}
+
+func (c *checker) checkAcpiTableAtCallsInExpr(moduleName string, expr ast.Expr, scope *Scope) {
+	switch e := expr.(type) {
+	case nil, *ast.IntLiteral, *ast.BoolLiteral, *ast.StringLiteral, *ast.SizeOfExpr, *ast.AlignOfExpr, *ast.NameExpr:
+		return
+	case *ast.FieldExpr:
+		c.checkAcpiTableAtCallsInExpr(moduleName, e.Base, scope)
+	case *ast.BinaryExpr:
+		c.checkAcpiTableAtCallsInExpr(moduleName, e.Left, scope)
+		c.checkAcpiTableAtCallsInExpr(moduleName, e.Right, scope)
+	case *ast.ConstructorExpr:
+		for _, arg := range e.Args {
+			c.checkAcpiTableAtCallsInExpr(moduleName, arg.Value, scope)
+		}
+		constructed, ds := c.index.LookupTypeRef(moduleName, e.Type, c.currentTypeParamMap())
+		if len(ds) == 0 && isProtectedViewType(constructed) &&
+			(!isTrustedAuthorityModule(moduleName) || !c.protectedViewConstructorHasProvenance(moduleName, e, constructed, scope)) {
+			c.error(e.SpanV, diag.SEM0092, "protected memory-region view construction is not allowed here")
+		}
+	case *ast.VariantConstructorExpr:
+		for _, arg := range e.Args {
+			c.checkAcpiTableAtCallsInExpr(moduleName, arg.Value, scope)
+		}
+	case *ast.CallExpr:
+		c.checkAcpiTableAtCallsInExpr(moduleName, e.Receiver, scope)
+		for _, arg := range e.Args {
+			c.checkAcpiTableAtCallsInExpr(moduleName, arg.Value, scope)
+		}
+		receiverType := c.exprStaticType(moduleName, e.Receiver, scope)
+		method, _ := c.lookupMethod(receiverType, e.Method, e.SpanV)
+		if qualifiedTypeName(receiverType) == "platform.acpi.root.AcpiRoot" {
+			callOrigin := c.originForCall(moduleName, e, c.exprStaticType(moduleName, e, scope), scope)
+			if !callOrigin.AuthorityProvenance {
+				c.error(e.SpanV, diag.SEM0092, "ACPI root methods require firmware table authority")
+			}
+		}
+		if qualifiedTypeName(receiverType) == "platform.acpi.root.AcpiLocator" && e.Method == "find" {
+			tablesArg := namedArgExpr(e.Args, "tables")
+			if method != nil {
+				tablesArg = callArgForParam(method, e.Args, explicitParamIndex(method, "tables"))
+			}
+			if !c.exprHasAuthorityProvenance(moduleName, tablesArg, scope) {
+				c.error(e.SpanV, diag.SEM0092, "ACPI root discovery requires firmware table authority")
+			}
+		}
+		if qualifiedTypeName(receiverType) == "platform.hardware.discovery.PlatformDiscoveryRoot" && e.Method == "from_uefi" {
+			hardwareArg := namedArgExpr(e.Args, "hardware")
+			if method != nil {
+				hardwareArg = callArgForParam(method, e.Args, explicitParamIndex(method, "hardware"))
+			}
+			if !c.exprHasAuthorityProvenance(moduleName, hardwareArg, scope) {
+				c.error(e.SpanV, diag.SEM0092, "hardware discovery requires delegated hardware authority")
+			}
+		}
+		if qualifiedTypeName(receiverType) != "platform.acpi.tables.AcpiHelpers" || e.Method != "table_at" {
+			return
+		}
+		addressArg := namedArgExpr(e.Args, "address")
+		if method != nil {
+			addressArg = callArgForParam(method, e.Args, explicitParamIndex(method, "address"))
+		}
+		if !c.exprHasAuthorityProvenance(moduleName, addressArg, scope) {
+			c.error(e.SpanV, diag.SEM0092, "ACPI table lookup address must originate from firmware table authority")
+		}
+	}
 }
 
 func explicitParamCount(params []ast.Param) int {
@@ -962,6 +1195,11 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		targetType := c.typeExpr(moduleName, s.Target, scope, ctx)
 		valueType := c.typeExprExpected(moduleName, s.Value, scope, ctx, targetType)
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
+		if target, ok := s.Target.(*ast.NameExpr); ok {
+			scope.AssignOrigin(target.Name, c.originForExprValue(moduleName, s.Value, valueType, scope))
+		} else if target, ok := s.Target.(*ast.FieldExpr); ok {
+			c.assignFieldOrigin(moduleName, target, s.Value, valueType, scope)
+		}
 		sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
 		targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
 		if c.rejectViewLifetimeEscape(s.Value.Span(), valueType, sourceLifetime, targetLifetime) {
@@ -1745,8 +1983,10 @@ func isHardwareAuthorityType(typ *Type) bool {
 		"platform.hardware.bytes.PhysicalBytes",
 		"platform.hardware.bytes.MmioRegion",
 		"platform.hardware.bytes.IoPortRegion",
+		"platform.uefi.transition.DelegatedHardware",
 		"platform.acpi.root.AcpiRoot",
 		"platform.acpi.tables.AcpiTable",
+		"platform.uefi.types.UefiConfigurationTables",
 		"platform.acpi.madt.MadtTable",
 		"platform.acpi.mcfg.McfgTable",
 		"machine.x86_64.interrupts.LocalApic",
@@ -1775,6 +2015,10 @@ func isHardwareAuthorityType(typ *Type) bool {
 		return true
 	}
 	return false
+}
+
+func phaseParamHasAuthorityProvenance(phaseName string, typ *Type) bool {
+	return phaseName == "delegated_hardware" && qualifiedTypeName(typ) == "platform.uefi.transition.DelegatedHardware"
 }
 
 func secondDriverPathOwnerSpan(owners map[string]driverPathOwner, fallback source.Span) source.Span {
@@ -1907,6 +2151,8 @@ func (c *checker) exprStaticType(moduleName string, expr ast.Expr, scope *Scope)
 		if method != nil {
 			return method.Return
 		}
+	case *ast.VariantConstructorExpr:
+		return c.staticVariantConstructorType(moduleName, e, scope)
 	}
 	return nil
 }
@@ -2112,27 +2358,40 @@ func (c *checker) originForExprValue(moduleName string, expr ast.Expr, valueType
 		if valueType == nil {
 			valueType = c.exprStaticType(moduleName, expr, scope)
 		}
-		return c.originForConstructor(moduleName, e, valueType, scope)
+		return c.withAuthorityProvenance(moduleName, expr, c.originForConstructor(moduleName, e, valueType, scope), valueType, scope)
 	case *ast.CallExpr:
 		if valueType == nil {
 			valueType = c.exprStaticType(moduleName, expr, scope)
 		}
-		return c.originForCall(moduleName, e, valueType, scope)
+		return c.withAuthorityProvenance(moduleName, expr, c.originForCall(moduleName, e, valueType, scope), valueType, scope)
+	case *ast.VariantConstructorExpr:
+		if valueType == nil {
+			valueType = c.exprStaticType(moduleName, expr, scope)
+		}
+		return c.withAuthorityProvenance(moduleName, expr, c.originForVariantConstructor(moduleName, e, valueType, scope), valueType, scope)
 	case *ast.FieldExpr:
 		if valueType == nil {
 			valueType = c.exprStaticType(moduleName, expr, scope)
 		}
-		return c.originForField(moduleName, e, valueType, scope)
+		return c.withAuthorityProvenance(moduleName, expr, c.originForField(moduleName, e, valueType, scope), valueType, scope)
 	case *ast.NameExpr:
 		if origin, ok := scope.LookupOrigin(e.Name); ok {
 			return origin
 		}
 	}
-	return localOrigin{Type: valueType}
+	return c.withAuthorityProvenance(moduleName, expr, localOrigin{Type: valueType}, valueType, scope)
 }
 
 func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType *Type, scope *Scope) localOrigin {
 	return c.originForExprValue(moduleName, expr, valueType, scope)
+}
+
+func (c *checker) withAuthorityProvenance(moduleName string, expr ast.Expr, origin localOrigin, valueType *Type, scope *Scope) localOrigin {
+	if origin.Type == nil {
+		origin.Type = valueType
+	}
+	origin.AuthorityProvenance = origin.AuthorityProvenance || c.exprHasAuthorityProvenance(moduleName, expr, scope)
+	return origin
 }
 
 func (c *checker) recordTopicTypeOrigin(origin *localOrigin, topicType *Type, payloadType *Type) {
@@ -2157,11 +2416,14 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		Type:          typ,
 		Constructor:   expr,
 		FieldBindings: map[string]string{},
+		FieldOrigins:  map[string]localOrigin{},
 	}
 	for _, arg := range expr.Args {
 		if named, ok := arg.Value.(*ast.NameExpr); ok {
 			origin.FieldBindings[arg.Name] = named.Name
 		}
+		argType := c.exprStaticType(moduleName, arg.Value, scope)
+		origin.FieldOrigins[arg.Name] = c.originForExprValue(moduleName, arg.Value, argType, scope)
 	}
 	if typ == nil {
 		return origin
@@ -2214,6 +2476,13 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		origin.ArenaBase, _ = unsignedIntegerLiteral(constructorArg(expr, "base"))
 		origin.ArenaBytes, _ = unsignedIntegerLiteral(constructorArg(expr, "length"))
 		origin.ArenaAlign, _ = unsignedIntegerLiteral(constructorArg(expr, "align"))
+	}
+	if qualifiedTypeName(typ) == "platform.hardware.bytes.PhysicalBytes" ||
+		qualifiedTypeName(typ) == "platform.hardware.bytes.BoundedBytes" {
+		origin.AuthorityProvenance = c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope)
+	}
+	if qualifiedTypeName(typ) == "platform.acpi.root.AcpiRoot" {
+		origin.AuthorityProvenance = c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "root_address"), scope)
 	}
 	if qualifiedTypeName(typ) == "platform.hardware.memory.RootArena" || qualifiedTypeName(typ) == "platform.hardware.memory.ChildArena" {
 		origin.ArenaLabel, _ = arenaIdentityForArg(constructorArg(expr, "identity"))
@@ -2294,6 +2563,18 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	return origin
 }
 
+func (c *checker) originForVariantConstructor(moduleName string, expr *ast.VariantConstructorExpr, typ *Type, scope *Scope) localOrigin {
+	origin := localOrigin{
+		Type:         typ,
+		FieldOrigins: map[string]localOrigin{},
+	}
+	for _, arg := range expr.Args {
+		argType := c.exprStaticType(moduleName, arg.Value, scope)
+		origin.FieldOrigins[arg.Name] = c.originForExprValue(moduleName, arg.Value, argType, scope)
+	}
+	return origin
+}
+
 func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType *Type, scope *Scope) localOrigin {
 	origin := localOrigin{Type: valueType}
 	receiverType := c.exprStaticType(moduleName, expr.Receiver, scope)
@@ -2301,6 +2582,21 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		return origin
 	}
 	switch {
+	case qualifiedTypeName(receiverType) == "platform.uefi.transition.DelegatedHardware" && expr.Method == "uefi_configuration_tables":
+		origin.AuthorityProvenance = c.originForExprValue(moduleName, expr.Receiver, receiverType, scope).AuthorityProvenance
+	case qualifiedTypeName(receiverType) == "platform.acpi.root.AcpiLocator" && expr.Method == "find":
+		origin.AuthorityProvenance = c.exprHasAuthorityProvenance(moduleName, namedArgExpr(expr.Args, "tables"), scope)
+	case qualifiedTypeName(receiverType) == "platform.acpi.root.AcpiRoot" &&
+		(expr.Method == "root_table" || expr.Method == "require_table" || expr.Method == "require_madt" || expr.Method == "require_mcfg"):
+		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
+		origin.AuthorityProvenance = receiverOrigin.AuthorityProvenance && fieldOriginAllowsAuthority(receiverOrigin, "root_address")
+	case qualifiedTypeName(receiverType) == "platform.hardware.discovery.PlatformDiscoveryRoot" && expr.Method == "from_uefi":
+		origin.AuthorityProvenance = c.exprHasAuthorityProvenance(moduleName, namedArgExpr(expr.Args, "hardware"), scope)
+	case qualifiedTypeName(receiverType) == "platform.hardware.bytes.PhysicalBytes" && expr.Method == "bounded":
+		origin.AuthorityProvenance = c.originForExprValue(moduleName, expr.Receiver, receiverType, scope).AuthorityProvenance
+	case qualifiedTypeName(receiverType) == "platform.hardware.bytes.BoundedBytes" &&
+		(expr.Method == "slice" || expr.Method == "read_u8" || expr.Method == "read_u16" || expr.Method == "read_u32" || expr.Method == "read_u64"):
+		origin.AuthorityProvenance = c.originForExprValue(moduleName, expr.Receiver, receiverType, scope).AuthorityProvenance
 	case qualifiedTypeName(receiverType) == "platform.uefi.types.UefiMemoryMap" && expr.Method == "require_usable_region":
 		args := callConstArgs(expr)
 		base, _ := args["min_base"].asUint()
@@ -2316,46 +2612,57 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
 		return localOrigin{
-			Type:       valueType,
-			ArenaLabel: label,
-			ArenaBase:  receiverOrigin.ArenaBase,
-			ArenaBytes: receiverOrigin.ArenaBytes,
-			ArenaAlign: receiverOrigin.ArenaAlign,
+			Type:                valueType,
+			AuthorityProvenance: receiverOrigin.AuthorityProvenance,
+			ArenaLabel:          label,
+			ArenaBase:           receiverOrigin.ArenaBase,
+			ArenaBytes:          receiverOrigin.ArenaBytes,
+			ArenaAlign:          receiverOrigin.ArenaAlign,
 		}
-	case qualifiedTypeName(receiverType) == "platform.hardware.memory.RootArena" && expr.Method == "child_at":
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.RootArena" && (expr.Method == "child" || expr.Method == "child_at"):
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
-		if offset, ok := arenaUnsignedIntArg(expr, "offset"); ok {
+		offset, hasOffset := arenaUnsignedIntArg(expr, "offset")
+		if !hasOffset {
+			offset = 0
+		}
+		if hasOffset || expr.Method == "child" {
 			if length, hasLength := arenaUnsignedIntArg(expr, "length"); hasLength {
 				if align, hasAlign := arenaUnsignedIntArg(expr, "align"); hasAlign {
 					return localOrigin{
-						Type:       valueType,
-						ArenaLabel: label,
-						ArenaBase:  alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
-						ArenaBytes: length,
-						ArenaAlign: align,
+						Type:                valueType,
+						AuthorityProvenance: receiverOrigin.AuthorityProvenance,
+						ArenaLabel:          label,
+						ArenaBase:           alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
+						ArenaBytes:          length,
+						ArenaAlign:          align,
 					}
 				}
 			}
 		}
-		return localOrigin{Type: valueType, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
-	case qualifiedTypeName(receiverType) == "platform.hardware.memory.ChildArena" && expr.Method == "child_at":
+		return localOrigin{Type: valueType, AuthorityProvenance: receiverOrigin.AuthorityProvenance, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
+	case qualifiedTypeName(receiverType) == "platform.hardware.memory.ChildArena" && (expr.Method == "child" || expr.Method == "child_at"):
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		label, _ := arenaIdentityForArg(namedArgExpr(expr.Args, "identity"))
-		if offset, ok := arenaUnsignedIntArg(expr, "offset"); ok {
+		offset, hasOffset := arenaUnsignedIntArg(expr, "offset")
+		if !hasOffset {
+			offset = 0
+		}
+		if hasOffset || expr.Method == "child" {
 			if length, hasLength := arenaUnsignedIntArg(expr, "length"); hasLength {
 				if align, hasAlign := arenaUnsignedIntArg(expr, "align"); hasAlign {
 					return localOrigin{
-						Type:       valueType,
-						ArenaLabel: label,
-						ArenaBase:  alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
-						ArenaBytes: length,
-						ArenaAlign: align,
+						Type:                valueType,
+						AuthorityProvenance: receiverOrigin.AuthorityProvenance,
+						ArenaLabel:          label,
+						ArenaBase:           alignArenaOffset(receiverOrigin.ArenaBase+offset, align),
+						ArenaBytes:          length,
+						ArenaAlign:          align,
 					}
 				}
 			}
 		}
-		return localOrigin{Type: valueType, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
+		return localOrigin{Type: valueType, AuthorityProvenance: receiverOrigin.AuthorityProvenance, ArenaLabel: label, ArenaBase: receiverOrigin.ArenaBase}
 	case receiverType.Module == "machine.x86_64.cpu_state" && receiverType.Name == "ExecutorRegistry" && expr.Method == "claim":
 		identity := namedArgExpr(expr.Args, "identity")
 		if cons, ok := identity.(*ast.ConstructorExpr); ok {
@@ -2488,11 +2795,18 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueType *Type, scope *Scope) localOrigin {
 	origin := localOrigin{Type: valueType}
 	baseType := c.exprStaticType(moduleName, expr.Base, scope)
+	baseOrigin := c.originForExprValue(moduleName, expr.Base, baseType, scope)
+	if fieldOrigin, ok := baseOrigin.FieldOrigins[expr.Field]; ok {
+		fieldOrigin.Type = valueType
+		return fieldOrigin
+	}
+	if authorityFieldCarriesProvenance(baseType, expr.Field) {
+		origin.AuthorityProvenance = baseOrigin.AuthorityProvenance
+	}
 	switch {
 	case qualifiedTypeName(valueType) == "machine.x86_64.cpu_state.CpuFeatureFacts" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.CpuDiscovery" &&
 		expr.Field == "features":
-		baseOrigin := c.originForExprValue(moduleName, expr.Base, baseType, scope)
 		origin.LoopStrategy = baseOrigin.LoopStrategy
 		origin.LoopFallback = baseOrigin.LoopFallback
 		if origin.LoopStrategy == "" {
@@ -2525,7 +2839,6 @@ func (c *checker) originForField(moduleName string, expr *ast.FieldExpr, valueTy
 	case qualifiedTypeName(valueType) == "machine.x86_64.executor_loop.WakeStrategy" &&
 		qualifiedTypeName(baseType) == "machine.x86_64.cpu_state.HardwarePlan" &&
 		expr.Field == "wake_strategy":
-		baseOrigin := c.originForExprValue(moduleName, expr.Base, baseType, scope)
 		origin.LoopStrategy = baseOrigin.LoopStrategy
 		origin.LoopFallback = baseOrigin.LoopFallback
 		if origin.LoopStrategy == "" {
@@ -3472,8 +3785,11 @@ func (c *checker) protectedViewConstructorHasProvenance(moduleName string, expr 
 	case "platform.hardware.bytes.Mmio", "platform.hardware.bytes.Volatile":
 		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope)
 	case "platform.uefi.types.FirmwareSlice":
-		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope) &&
-			c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "length"), scope)
+		if c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope) &&
+			c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "length"), scope) {
+			return true
+		}
+		return c.acpiFirmwareSliceHasBoundedBytesSource(moduleName, expr, scope)
 	case "platform.hardware.memory.DmaBuffer":
 		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "owner"), scope) &&
 			c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "slots"), scope)
@@ -3490,6 +3806,42 @@ func (c *checker) protectedViewConstructorHasProvenance(moduleName string, expr 
 	}
 }
 
+func (c *checker) acpiFirmwareSliceHasBoundedBytesSource(moduleName string, expr *ast.ConstructorExpr, scope *Scope) bool {
+	if moduleName != "platform.acpi.tables" {
+		return false
+	}
+	addressCons, ok := constructorArg(expr, "address").(*ast.ConstructorExpr)
+	if !ok {
+		return false
+	}
+	addressType, ds := c.index.LookupTypeRef(moduleName, addressCons.Type, c.currentTypeParamMap())
+	if len(ds) != 0 || qualifiedTypeName(addressType) != "platform.uefi.types.FirmwareAddress" {
+		return false
+	}
+	addressValue, ok := constructorArg(addressCons, "value").(*ast.FieldExpr)
+	if !ok || addressValue.Field != "address" {
+		return false
+	}
+	lengthValue, ok := constructorArg(expr, "length").(*ast.FieldExpr)
+	if !ok || lengthValue.Field != "length" {
+		return false
+	}
+	addressBase, ok := addressValue.Base.(*ast.NameExpr)
+	if !ok {
+		return false
+	}
+	lengthBase, ok := lengthValue.Base.(*ast.NameExpr)
+	if !ok || lengthBase.Name != addressBase.Name {
+		return false
+	}
+	baseType := c.exprStaticType(moduleName, addressValue.Base, scope)
+	if qualifiedTypeName(baseType) != "platform.hardware.bytes.BoundedBytes" {
+		return false
+	}
+	return c.exprHasAuthorityProvenance(moduleName, addressValue, scope) &&
+		c.exprHasAuthorityProvenance(moduleName, lengthValue, scope)
+}
+
 func (c *checker) exprHasAuthorityProvenance(moduleName string, expr ast.Expr, scope *Scope) bool {
 	if expr == nil {
 		return false
@@ -3501,18 +3853,32 @@ func (c *checker) exprHasAuthorityProvenance(moduleName string, expr ast.Expr, s
 		if scope == nil {
 			return false
 		}
-		if origin, ok := scope.LookupOrigin(e.Name); ok && isAuthorityProvenanceType(origin.Type) {
-			return true
+		if origin, ok := scope.LookupOrigin(e.Name); ok {
+			return origin.AuthorityProvenance
 		}
 		typ, ok := scope.Lookup(e.Name)
 		return ok && isAuthorityProvenanceType(typ)
 	case *ast.FieldExpr:
 		baseType := c.exprStaticType(moduleName, e.Base, scope)
-		return isAuthorityProvenanceType(baseType) || c.exprHasAuthorityProvenance(moduleName, e.Base, scope)
+		baseOrigin := c.originForExprValue(moduleName, e.Base, baseType, scope)
+		if fieldOrigin, ok := baseOrigin.FieldOrigins[e.Field]; ok {
+			return fieldOrigin.AuthorityProvenance
+		}
+		return authorityFieldCarriesProvenance(baseType, e.Field) && baseOrigin.AuthorityProvenance
 	case *ast.CallExpr:
-		receiverType := c.exprStaticType(moduleName, e.Receiver, scope)
-		return isAuthorityProvenanceType(receiverType)
+		valueType := c.exprStaticType(moduleName, e, scope)
+		return c.originForCall(moduleName, e, valueType, scope).AuthorityProvenance
 	case *ast.ConstructorExpr:
+		if len(e.Args) == 0 {
+			return false
+		}
+		for _, arg := range e.Args {
+			if !c.exprHasAuthorityProvenance(moduleName, arg.Value, scope) {
+				return false
+			}
+		}
+		return true
+	case *ast.VariantConstructorExpr:
 		if len(e.Args) == 0 {
 			return false
 		}
@@ -3537,6 +3903,40 @@ func isAuthorityProvenanceType(typ *Type) bool {
 		IsDMABufferAuthorityType(typ) ||
 		isHardwareAuthorityType(typ) ||
 		qualifiedTypeName(typ) == "platform.uefi.types.FirmwareAddress"
+}
+
+func authorityFieldCarriesProvenance(baseType *Type, field string) bool {
+	switch qualifiedTypeName(baseType) {
+	case "platform.hardware.bytes.BoundedBytes",
+		"platform.hardware.bytes.PhysicalBytes":
+		return field == "address" || field == "length"
+	case "platform.acpi.root.AcpiRoot":
+		return field == "root_address"
+	case "platform.acpi.tables.AcpiTable":
+		return field == "address" || field == "length" || field == "view"
+	case "platform.acpi.tables.AcpiTableView":
+		return field == "bytes" || field == "typed"
+	case "platform.uefi.types.AcpiRsdpSearchResult":
+		return field == "address"
+	case "platform.hardware.memory.RootArena":
+		return field == "region"
+	case "platform.hardware.memory.ChildArena":
+		return field == "root" || field == "base" || field == "length"
+	case "platform.hardware.discovery.DiscoveredHardware":
+		switch field {
+		case "memory", "acpi", "interrupts", "cpus", "timers", "pci":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func fieldOriginAllowsAuthority(origin localOrigin, field string) bool {
+	fieldOrigin, ok := origin.FieldOrigins[field]
+	return !ok || fieldOrigin.AuthorityProvenance
 }
 
 func (c *checker) topicCapabilityFactoryAllowed(method string) bool {
@@ -3635,6 +4035,30 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 		return method.Return
 	}
 
+	if qualifiedTypeName(recvType) == "platform.acpi.root.AcpiRoot" {
+		callOrigin := c.originForCall(moduleName, expr, method.Return, scope)
+		if !callOrigin.AuthorityProvenance {
+			c.error(expr.SpanV, diag.SEM0092, "ACPI root methods require firmware table authority")
+		}
+	}
+	if qualifiedTypeName(recvType) == "platform.acpi.root.AcpiLocator" && expr.Method == "find" {
+		tablesArg := callArgForParam(method, expr.Args, explicitParamIndex(method, "tables"))
+		if !c.exprHasAuthorityProvenance(moduleName, tablesArg, scope) {
+			c.error(expr.SpanV, diag.SEM0092, "ACPI root discovery requires firmware table authority")
+		}
+	}
+	if qualifiedTypeName(recvType) == "platform.hardware.discovery.PlatformDiscoveryRoot" && expr.Method == "from_uefi" {
+		hardwareArg := callArgForParam(method, expr.Args, explicitParamIndex(method, "hardware"))
+		if !c.exprHasAuthorityProvenance(moduleName, hardwareArg, scope) {
+			c.error(expr.SpanV, diag.SEM0092, "hardware discovery requires delegated hardware authority")
+		}
+	}
+	if qualifiedTypeName(recvType) == "platform.acpi.tables.AcpiHelpers" && expr.Method == "table_at" {
+		addressArg := callArgForParam(method, expr.Args, explicitParamIndex(method, "address"))
+		if !c.exprHasAuthorityProvenance(moduleName, addressArg, scope) {
+			c.error(expr.SpanV, diag.SEM0092, "ACPI table lookup address must originate from firmware table authority")
+		}
+	}
 	c.typeAndVerifyCallArgs(moduleName, method, expr.Args, scope, ctx)
 	c.recordDiscoveryFactFromCall(expr, recvType, callConstArgs(expr))
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
@@ -3849,6 +4273,40 @@ func (c *checker) lookupMethod(typ *Type, name string, span source.Span) (*Metho
 		method := &typ.Methods[i]
 		if method.Name == name {
 			return method, method.Span
+		}
+	}
+	if typ.Kind == KindTypeParam {
+		if method, methodSpan := c.lookupTraitBoundMethod(typ.Name, name, span); method != nil {
+			return method, methodSpan
+		}
+	}
+	return nil, span
+}
+
+func (c *checker) lookupTraitBoundMethod(paramName string, methodName string, span source.Span) (*Method, source.Span) {
+	if c == nil || c.currentType == nil {
+		return nil, span
+	}
+	for _, bound := range c.currentType.Where {
+		if bound.Param != paramName || bound.Trait == nil {
+			continue
+		}
+		for i := range bound.Trait.Methods {
+			method := &bound.Trait.Methods[i]
+			if method.Name == methodName {
+				return method, method.Span
+			}
+		}
+	}
+	for _, bound := range c.currentMethodWhere {
+		if bound.Param != paramName || bound.Trait == nil {
+			continue
+		}
+		for i := range bound.Trait.Methods {
+			method := &bound.Trait.Methods[i]
+			if method.Name == methodName {
+				return method, method.Span
+			}
 		}
 	}
 	return nil, span

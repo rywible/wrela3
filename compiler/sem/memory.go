@@ -179,6 +179,11 @@ func (c *checker) registerMethodLifetimeTargets() {
 			var typeName string
 			var methods []ast.MethodDecl
 			switch d := decl.(type) {
+			case *ast.DataDecl:
+				if len(d.TypeParams) == 0 && !hasGenericMethodDecl(d.Methods) {
+					continue
+				}
+				typeName, methods = d.Name, d.Methods
 			case *ast.ClassDecl:
 				typeName, methods = d.Name, d.Methods
 			case *ast.DriverDecl:
@@ -195,16 +200,10 @@ func (c *checker) registerMethodLifetimeTargets() {
 				if method.IsAsm || isCanonicalFrameIntrinsic(mod.Name, typ, method) {
 					continue
 				}
-				if typ != nil && len(typ.TypeParams) != 0 {
-					continue
-				}
-				if len(method.TypeParams) != 0 {
-					continue
-				}
 				marker := ContextNormalMethod
 				var returnType *Type
 				if method.Return.Name != "" {
-					returnType, _ = c.index.LookupTypeRef(mod.Name, method.Return, typeParamMapForCheck(method.TypeParams))
+					returnType, _ = c.index.LookupTypeRef(mod.Name, method.Return, typeParamMapForMethod(typ, method.TypeParams))
 				}
 				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
 					marker = ContextOwnershipTransferAuthorityMethod
@@ -259,14 +258,16 @@ func (c *checker) ensureMethodLifetimeSummary(key string, span source.Span) Meth
 func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifetimeTarget, span source.Span) MethodLifetimeSummary {
 	moduleName := target.ModuleName
 	typ := target.Type
+	checkType := methodReceiverTypeForCheck(typ)
 	method := target.Method
 	methodName := method.Name
 	body := method.Body
-	scope := c.newMethodLifetimeScope(moduleName, typ, method)
+	scope := c.newMethodLifetimeScope(moduleName, checkType, method)
 	if target.SemanticMethod != nil {
 		methodName = target.SemanticMethod.Name
 		body = target.SemanticMethod.Body
-		scope = c.newSemanticMethodLifetimeScope(typ, target.SemanticMethod)
+		checkType = methodReceiverTypeForCheck(typ)
+		scope = c.newSemanticMethodLifetimeScope(checkType, target.SemanticMethod)
 	}
 	summary := MethodLifetimeSummary{ReturnFromParam: -1}
 
@@ -286,18 +287,52 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 	prev := c.currentMethodSummary
 	prevPhase := c.currentPhase
 	prevType := c.currentType
+	prevMethodTypeParams := c.currentMethodTypeParams
+	prevMethodWhere := c.currentMethodWhere
 	c.currentMethodSummary = &summary
 	c.currentPhase = methodName
-	c.currentType = typ
+	c.currentType = checkType
+	c.currentMethodTypeParams = typeParamMapForCheck(method.TypeParams)
+	c.currentMethodWhere = c.methodWhereBounds(moduleName, checkType, method)
+	if target.SemanticMethod != nil {
+		c.currentMethodWhere = target.SemanticMethod.Where
+	}
 	c.activeMethodSummaries[key] = true
 	terminates := c.checkStmtList(moduleName, body, scope, target.ReturnType, target.Context)
 	summary.Terminates = terminates
 	delete(c.activeMethodSummaries, key)
+	c.currentMethodWhere = prevMethodWhere
+	c.currentMethodTypeParams = prevMethodTypeParams
 	c.currentType = prevType
 	c.currentPhase = prevPhase
 	c.currentMethodSummary = prev
 	c.methodLifetimeSummaries[key] = summary
 	return summary
+}
+
+func (c *checker) methodWhereBounds(moduleName string, typ *Type, method ast.MethodDecl) []TraitBound {
+	if len(method.Where) == 0 || c == nil || c.index == nil {
+		return nil
+	}
+	where, ds := buildWhereBounds(c.index, moduleName, method.Where, typeParamMapForMethod(typ, method.TypeParams))
+	c.diags = append(c.diags, ds...)
+	return where
+}
+
+func methodReceiverTypeForCheck(typ *Type) *Type {
+	if typ == nil || len(typ.TypeArgs) != 0 || len(typ.TypeParams) == 0 {
+		return typ
+	}
+	args := make([]*Type, 0, len(typ.TypeParams))
+	for _, param := range typ.TypeParams {
+		args = append(args, &Type{Name: param.Name, Kind: KindTypeParam})
+	}
+	receiver := *typ
+	receiver.TypeArgs = args
+	receiver.GenericOrigin = typ
+	receiver.TypeParams = nil
+	receiver.keyCache = ""
+	return &receiver
 }
 
 func methodLifetimeKey(typ *Type, methodName string) string {
@@ -311,6 +346,10 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 	scope := NewScope(nil)
 	if len(method.Params) > 0 && method.Params[0].Name == "self" {
 		scope.Define("self", typ)
+		scope.DefineOrigin("self", localOrigin{
+			Type:                typ,
+			AuthorityProvenance: c.methodReceiverHasAuthorityProvenance(moduleName, typ, method.Name),
+		})
 		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
 	}
 	explicitIndex := 0
@@ -318,11 +357,15 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		if p.Name == "self" {
 			continue
 		}
-		paramType, _ := c.index.LookupTypeRef(moduleName, p.Type, typeParamMapForCheck(method.TypeParams))
+		paramType, _ := c.index.LookupTypeRef(moduleName, p.Type, typeParamMapForMethod(typ, method.TypeParams))
 		if paramType == nil {
 			paramType = c.mustType(moduleName, legacyTypeName(p.Type))
 		}
 		scope.Define(p.Name, paramType)
+		scope.DefineOrigin(p.Name, localOrigin{
+			Type:                paramType,
+			AuthorityProvenance: c.methodParamHasAuthorityProvenance(moduleName, typ, method, p),
+		})
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else if parameterCanCarryHiddenLifetime(paramType) {
@@ -342,6 +385,10 @@ func (c *checker) newSemanticMethodLifetimeScope(typ *Type, method *Method) *Sco
 	}
 	if len(method.Params) > 0 && method.Params[0].Name == "self" {
 		scope.Define("self", typ)
+		scope.DefineOrigin("self", localOrigin{
+			Type:                typ,
+			AuthorityProvenance: c.methodReceiverHasAuthorityProvenance(typ.Module, typ, method.Name),
+		})
 		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
 	}
 	explicitIndex := 0
@@ -350,6 +397,7 @@ func (c *checker) newSemanticMethodLifetimeScope(typ *Type, method *Method) *Sco
 			continue
 		}
 		scope.Define(p.Name, p.Type)
+		scope.DefineOrigin(p.Name, localOrigin{Type: p.Type})
 		if ClassifyMemoryType(p.Type) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else if parameterCanCarryHiddenLifetime(p.Type) {
@@ -360,6 +408,55 @@ func (c *checker) newSemanticMethodLifetimeScope(typ *Type, method *Method) *Sco
 		explicitIndex++
 	}
 	return scope
+}
+
+func (c *checker) methodParamHasAuthorityProvenance(moduleName string, typ *Type, method ast.MethodDecl, param ast.Param) bool {
+	if c == nil || param.Name == "" {
+		return false
+	}
+	switch {
+	case qualifiedTypeName(typ) == "platform.acpi.tables.AcpiHelpers" &&
+		method.Name == "table_at" &&
+		param.Name == "address":
+		return true
+	case qualifiedTypeName(typ) == "platform.acpi.root.AcpiLocator" &&
+		method.Name == "find" &&
+		param.Name == "tables":
+		return true
+	case qualifiedTypeName(typ) == "platform.hardware.discovery.PlatformDiscoveryRoot" &&
+		method.Name == "from_uefi" &&
+		param.Name == "hardware":
+		return true
+	case qualifiedTypeName(typ) == "platform.hardware.memory.RootArena" &&
+		method.Name == "dma_buffer" &&
+		param.Name == "owner":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasGenericMethodDecl(methods []ast.MethodDecl) bool {
+	for _, method := range methods {
+		if len(method.TypeParams) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *checker) methodReceiverHasAuthorityProvenance(moduleName string, typ *Type, methodName string) bool {
+	if IsPhysicalRegionAuthorityType(typ) || IsArenaAuthorityType(typ) || IsDMABufferAuthorityType(typ) {
+		return true
+	}
+	switch qualifiedTypeName(typ) {
+	case "platform.uefi.transition.DelegatedHardware",
+		"platform.uefi.types.UefiConfigurationTables",
+		"platform.acpi.root.AcpiRoot":
+		return true
+	default:
+		return false
+	}
 }
 
 func parameterCanCarryHiddenLifetime(typ *Type) bool {

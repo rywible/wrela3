@@ -100,6 +100,25 @@ class Worker {
 	}
 }
 
+func TestVariantConstructorInfersThroughGenericPayload(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.enums
+data Event { kind: U64 }
+data Wrapper<T> { value: T }
+enum MaybeWrapped<T> { None Some(value: Wrapper<T>) }
+class Worker {
+    fn some(self) -> MaybeWrapped<Event> {
+        return MaybeWrapped.Some(value = Wrapper<Event>(value = Event(kind = 1)))
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
 func TestVariantConstructorMissingInferenceDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.enums

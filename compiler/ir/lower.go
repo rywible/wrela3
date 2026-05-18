@@ -1247,6 +1247,7 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		return
 	}
 	for _, topic := range ctx.checked.ImageGraph.Topics {
+		payloadType := ctx.topicPayloadType(topic)
 		layout := TopicLayout{
 			Label:        topic.Label,
 			Kind:         topic.Kind,
@@ -1254,6 +1255,18 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 			PayloadType:  irTypeFromQualifiedName(topic.PayloadType),
 			PayloadSize:  topic.PayloadSize,
 			PayloadAlign: topic.PayloadAlign,
+		}
+		if payloadType != nil {
+			info := ctx.ensureTypeInfo(payloadType, map[string]bool{})
+			layout.PayloadType = ctx.irType(payloadType)
+			if info.StorageSize > 0 {
+				layout.PayloadSize = uint64(info.StorageSize)
+			} else if info.Size > 0 {
+				layout.PayloadSize = uint64(info.Size)
+			}
+			if info.Align > 0 {
+				layout.PayloadAlign = uint64(info.Align)
+			}
 		}
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
 			if sub.TopicLabel == topic.Label {
@@ -1263,6 +1276,42 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		layout.Producers = ctx.publisherSlotsForTopic(topic.Label)
 		ctx.program.Topics = append(ctx.program.Topics, layout)
 	}
+}
+
+func (ctx *lowerContext) topicPayloadType(topic sem.TopicNode) *sem.Type {
+	if ctx == nil || ctx.checked == nil || ctx.checked.Index == nil {
+		return nil
+	}
+	if typ := ctx.typeForTopicPayloadName(topic.PayloadKey); typ != nil {
+		return typ
+	}
+	return ctx.typeForTopicPayloadName(topic.PayloadType)
+}
+
+func (ctx *lowerContext) typeForTopicPayloadName(name string) *sem.Type {
+	if name == "" {
+		return nil
+	}
+	if typ := ctx.checked.Index.Instantiations[name]; typ != nil {
+		return typ
+	}
+	if typ := ctx.checked.Index.MustType(name); typ != nil {
+		return typ
+	}
+	moduleName, typeName, ok := splitQualifiedTypeName(name)
+	if !ok {
+		return nil
+	}
+	typ, _ := ctx.checked.Index.Lookup(moduleName, typeName)
+	return typ
+}
+
+func splitQualifiedTypeName(name string) (string, string, bool) {
+	at := strings.LastIndex(name, ".")
+	if at <= 0 || at == len(name)-1 {
+		return "", "", false
+	}
+	return name[:at], name[at+1:], true
 }
 
 func (ctx *lowerContext) lowerTimerRoutes() {
@@ -2286,9 +2335,6 @@ func (ctx *lowerContext) enumTypeForConstructor(moduleName string, scope *lowerS
 	}
 	inferred := map[string]*sem.Type{}
 	for _, field := range variant.Fields {
-		if field.Type == nil || field.Type.Kind != sem.KindTypeParam || len(field.Type.TypeArgs) != 0 {
-			continue
-		}
 		arg := namedArgExpr(expr.Args, field.Name)
 		if arg == nil {
 			continue
@@ -2297,11 +2343,10 @@ func (ctx *lowerContext) enumTypeForConstructor(moduleName string, scope *lowerS
 		if argType == nil {
 			continue
 		}
-		if existing := inferred[field.Type.Name]; existing != nil && existing.Key() != argType.Key() {
-			ctx.errorf("conflicting inferred type for %s in %s.%s", field.Type.Name, expr.Enum, expr.Variant)
+		if conflict, ok := inferEnumConstructorTypeArgs(field.Type, argType, inferred); !ok {
+			ctx.errorf("conflicting inferred type for %s in %s.%s", conflict, expr.Enum, expr.Variant)
 			return nil
 		}
-		inferred[field.Type.Name] = argType
 	}
 	args := make([]*sem.Type, 0, len(base.TypeParams))
 	for _, param := range base.TypeParams {
@@ -2315,6 +2360,46 @@ func (ctx *lowerContext) enumTypeForConstructor(moduleName string, scope *lowerS
 		return concrete
 	}
 	return nil
+}
+
+func inferEnumConstructorTypeArgs(pattern *sem.Type, concrete *sem.Type, inferred map[string]*sem.Type) (string, bool) {
+	if pattern == nil || concrete == nil {
+		return "", true
+	}
+	if pattern.Kind == sem.KindTypeParam && pattern.Module == "" && len(pattern.TypeArgs) == 0 {
+		if existing := inferred[pattern.Name]; existing != nil && existing.Key() != concrete.Key() {
+			return pattern.Name, false
+		}
+		inferred[pattern.Name] = concrete
+		return "", true
+	}
+	if len(pattern.TypeArgs) == 0 || len(pattern.TypeArgs) != len(concrete.TypeArgs) {
+		return "", true
+	}
+	if !sameGenericSemTypePattern(pattern, concrete) {
+		return "", true
+	}
+	for i := range pattern.TypeArgs {
+		if conflict, ok := inferEnumConstructorTypeArgs(pattern.TypeArgs[i], concrete.TypeArgs[i], inferred); !ok {
+			return conflict, false
+		}
+	}
+	return "", true
+}
+
+func sameGenericSemTypePattern(pattern *sem.Type, concrete *sem.Type) bool {
+	if pattern == nil || concrete == nil {
+		return false
+	}
+	patternBase := pattern
+	if patternBase.GenericOrigin != nil {
+		patternBase = patternBase.GenericOrigin
+	}
+	concreteBase := concrete
+	if concreteBase.GenericOrigin != nil {
+		concreteBase = concreteBase.GenericOrigin
+	}
+	return qualifiedSemTypeName(patternBase) == qualifiedSemTypeName(concreteBase)
 }
 
 func (ctx *lowerContext) staticTypeForExpr(moduleName string, scope *lowerScope, expr ast.Expr) *sem.Type {
