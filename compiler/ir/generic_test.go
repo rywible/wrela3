@@ -60,3 +60,39 @@ executor Worker {
 		t.Fatalf("enum variants = %#v", info.EnumVariants)
 	}
 }
+
+func TestTraitConstrainedGenericCallLowersToDirectConcreteCall(t *testing.T) {
+	src := `
+module ir.traits
+enum Option<T> { None Some(value: T) }
+trait Subscription<T> { fn try_next(self) -> Option<T> }
+data Event { kind: U64 }
+class EventSub {
+    fn try_next(self) -> Option<Event> {
+        return Option.None()
+    }
+}
+impl Subscription<Event> for EventSub
+class Drain<S, T> where S: Subscription<T> {
+    input: S
+    fn poll(self) -> Option<T> {
+        return self.input.try_next()
+    }
+}
+executor Worker {
+    drain: Drain<EventSub, Event>
+    start fn run(self) -> never {
+        let next = self.drain.poll()
+        while true {}
+    }
+}
+`
+	program := lowerSourceForTest(t, src)
+	fn := findFunction(program, "_wrela_method_ir_traits_Drain_EventSub_Event_poll")
+	if fn == nil {
+		t.Fatal("missing Drain<EventSub, Event>.poll")
+	}
+	if !functionCalls(*fn, "_wrela_method_ir_traits_EventSub_try_next") {
+		t.Fatalf("poll did not lower to direct EventSub.try_next call: %#v", fn.Blocks)
+	}
+}
