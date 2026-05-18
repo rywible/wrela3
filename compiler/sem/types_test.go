@@ -991,6 +991,24 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "subscribe")
 }
 
+func TestCoreLanguageModuleTypes(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index := mustBuildIndex(t, modules)
+	_ = mustCheck(t, index, modules)
+	option, ok := index.Lookup("wrela.lang.core", "Option")
+	if !ok || option.Kind != KindEnum || len(option.TypeParams) != 1 {
+		t.Fatalf("Option = %#v", option)
+	}
+	result, ok := index.Lookup("wrela.lang.core", "Result")
+	if !ok || result.Kind != KindEnum || len(result.TypeParams) != 2 {
+		t.Fatalf("Result = %#v", result)
+	}
+	publisher, ok := index.Lookup("wrela.lang.core", "Publisher")
+	if !ok || publisher.Kind != KindTrait {
+		t.Fatalf("Publisher = %#v", publisher)
+	}
+}
+
 func assertMethodExists(t *testing.T, typ *Type, name string) {
 	t.Helper()
 	if typ == nil {

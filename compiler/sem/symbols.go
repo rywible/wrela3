@@ -226,8 +226,16 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 			switch d := decl.(type) {
 			case *ast.ClassDecl:
 				typ.Unique = d.Unique
+				typ.TypeParams = toTypeParams(d.TypeParams)
 			case *ast.DriverDecl:
 				typ.Unique = d.Unique
+				typ.TypeParams = toTypeParams(d.TypeParams)
+			case *ast.DataDecl:
+				typ.TypeParams = toTypeParams(d.TypeParams)
+			case *ast.EnumDecl:
+				typ.TypeParams = toTypeParams(d.TypeParams)
+			case *ast.TraitDecl:
+				typ.TypeParams = toTypeParams(d.TypeParams)
 			}
 			idx.ByModule[mod.Name][name] = typ
 		}

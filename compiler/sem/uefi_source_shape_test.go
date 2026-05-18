@@ -352,6 +352,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 	}
 	repoRoot := filepath.Clean(filepath.Join(workdir, "..", ".."))
 	paths := []string{
+		filepath.Join(repoRoot, "wrela/lang/core.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/boot_services.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
