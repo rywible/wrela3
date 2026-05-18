@@ -5,3 +5,8 @@ data TimerTickPayload {
     monotonic_us: U64
     source_id: U32
 }
+
+data SerialPathInterrupt {
+    has_byte: Bool
+    byte: U8
+}

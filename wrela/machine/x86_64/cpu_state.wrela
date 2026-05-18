@@ -8,6 +8,7 @@ use { InterruptQueue } from machine.x86_64.interrupt_queue
 use { PlacementPreferenceResult, PlacementTarget } from machine.x86_64.placement
 use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
 use { TimerAuthority } from machine.x86_64.timer
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 
@@ -265,7 +266,7 @@ data HardwarePlan {
     interrupts: InterruptRoutingPlan
     pci: ClaimedPciPlan
     timer: TimerAuthority
-    serial_irq_queue: InterruptQueue<U8>
+    serial_irq_queue: InterruptQueue<SerialPathInterrupt>
     console_memory: ExecutorMemory
     worker_memory: ExecutorMemory
     wake_strategy: WakeStrategy

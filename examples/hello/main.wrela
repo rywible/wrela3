@@ -10,9 +10,10 @@ use { Bytes } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { SerialDriver, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -54,12 +55,16 @@ image HelloSerial {
             length = 0x200000,
             align = 4096
         )
-        let serial_irq_queue = root_arena.interrupt_queue(
+        let serial_irq_slots = console_memory_seed.reserve_array(SerialPathInterrupt, count = 64)
+        let serial_irq_queue = InterruptQueue<SerialPathInterrupt>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = console_slot_seed,
+            slots = serial_irq_slots,
             capacity = 64,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 0)
+            overflow = InterruptOverflowPolicy(mode = 0),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
         let interrupts = discovery.interrupts
         let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()

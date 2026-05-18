@@ -12,7 +12,7 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	t.Helper()
 	boolType := ir.Type{Name: "Bool", Module: "builtin", Kind: ir.TypeKindPrimitive}
 	u8 := ir.Type{Name: "U8", Module: "builtin", Kind: ir.TypeKindPrimitive}
-	eventType := ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.serial", Kind: ir.TypeKindData}
+	eventType := ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.topic_payload", Kind: ir.TypeKindData}
 	executorType := ir.Type{Name: "HelloWorld", Module: "examples.hello.program", Kind: ir.TypeKindExecutor}
 
 	eventHasByte := &ir.ConstInt{Symbol: "event_has_byte", Value: 1, Type: boolType}
@@ -41,9 +41,9 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	return &ir.Program{
 		Functions: []ir.Function{eventFn, handlerFn},
 		Types: map[string]ir.TypeInfo{
-			"SerialPathInterrupt": {
+			"machine.x86_64.topic_payload.SerialPathInterrupt": {
 				Name:        "SerialPathInterrupt",
-				Module:      "machine.x86_64.serial",
+				Module:      "machine.x86_64.topic_payload",
 				Kind:        ir.TypeKindData,
 				Size:        8,
 				Align:       8,
@@ -476,7 +476,7 @@ func TestInterruptTopicDispatchResolvesConditionalJumps(t *testing.T) {
 
 func TestSerialRxInterruptTopicDispatchChecksHasByteField(t *testing.T) {
 	program := interruptTopicProgramForCodegenTest(t)
-	info := program.Types["SerialPathInterrupt"]
+	info := program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"]
 	hasByte := info.Fields["has_byte"]
 	hasByte.Offset = 1
 	hasByte.StorageOffset = 1
@@ -486,7 +486,7 @@ func TestSerialRxInterruptTopicDispatchChecksHasByteField(t *testing.T) {
 	eventByte.StorageOffset = 0
 	info.Fields["byte"] = eventByte
 	info.FieldOrder = []string{"byte", "has_byte"}
-	program.Types["SerialPathInterrupt"] = info
+	program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"] = info
 
 	img, diags := Compile(program)
 	if len(diags) != 0 {

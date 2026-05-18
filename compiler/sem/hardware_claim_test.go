@@ -74,8 +74,9 @@ use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 image BadDuplicatePciClaim {
     transitions { delegated_hardware -> owned_hardware }
@@ -106,7 +107,8 @@ image BadDuplicatePciClaim {
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let serial_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+        let serial_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let hardware_plan = HardwarePlan(
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
@@ -143,8 +145,9 @@ use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 image BadInterruptClaim {
     transitions { delegated_hardware -> owned_hardware }
@@ -175,7 +178,8 @@ image BadInterruptClaim {
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let serial_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+        let serial_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let hardware_plan = HardwarePlan(
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
@@ -211,8 +215,9 @@ use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 image BadDuplicateBar {
     transitions { delegated_hardware -> owned_hardware }
@@ -243,7 +248,8 @@ image BadDuplicateBar {
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let serial_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+        let serial_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let hardware_plan = HardwarePlan(
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
@@ -278,8 +284,9 @@ use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 image BadDuplicateVector {
     transitions { delegated_hardware -> owned_hardware }
@@ -310,7 +317,8 @@ image BadDuplicateVector {
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let serial_route = plan_interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+        let serial_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let hardware_plan = HardwarePlan(
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(

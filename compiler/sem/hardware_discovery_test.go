@@ -209,8 +209,9 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, 
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 image DiscoveryFactsImage {
     transitions { delegated_hardware -> owned_hardware }
@@ -231,7 +232,8 @@ image DiscoveryFactsImage {
         let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let shared = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
-        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+        let queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let arena = MutableBytes(address = 0, length = 0)
         let hardware_plan = HardwarePlan(
             cpus = discovery.cpus.require_min_count(count = 2),

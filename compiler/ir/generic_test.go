@@ -2,6 +2,10 @@ package ir
 
 import (
 	"testing"
+
+	"github.com/ryanwible/wrela3/compiler/parse"
+	"github.com/ryanwible/wrela3/compiler/sem"
+	"github.com/ryanwible/wrela3/compiler/source"
 )
 
 func TestGenericMethodBodyIsLoweredForConcreteInstantiation(t *testing.T) {
@@ -59,6 +63,69 @@ executor Worker {
 	if len(info.EnumVariants) != 2 || info.EnumVariants[0].Name != "None" || info.EnumVariants[1].Discriminant != 1 {
 		t.Fatalf("enum variants = %#v", info.EnumVariants)
 	}
+}
+
+func TestGenericIRTypeKeepsQualifiedTypeArgs(t *testing.T) {
+	program := lowerSourcesForGenericIdentityTest(t, []genericIdentitySource{
+		{path: "common.wrela", text: `
+module common
+data Slots<T> { value: T }
+`},
+		{path: "a.wrela", text: `
+module a
+use { Slots } from common
+data Event { small: U64 }
+data Root { slots: Slots<Event> }
+`},
+		{path: "b.wrela", text: `
+module b
+use { Slots } from common
+data Event {
+    first: U64
+    second: U64
+}
+data Root { slots: Slots<Event> }
+`},
+	})
+	aSlots := program.Types["a.Root"].Fields["slots"].Type
+	bSlots := program.Types["b.Root"].Fields["slots"].Type
+	if aSlots == bSlots {
+		t.Fatalf("generic IR types conflated: a=%#v b=%#v", aSlots, bSlots)
+	}
+	if aSlots.Name != "common.Slots[a.Event]" || bSlots.Name != "common.Slots[b.Event]" {
+		t.Fatalf("generic IR type names = %q and %q, want canonical type arguments", aSlots.Name, bSlots.Name)
+	}
+}
+
+type genericIdentitySource struct {
+	path string
+	text string
+}
+
+func lowerSourcesForGenericIdentityTest(t *testing.T, files []genericIdentitySource) *Program {
+	t.Helper()
+	graph := source.Graph{}
+	for i, file := range files {
+		graph.Files = append(graph.Files, source.NewFile(source.FileID(i+1), file.path, file.text))
+	}
+	modules, ds := parse.ParseGraph(graph)
+	if len(ds) != 0 {
+		t.Fatalf("parse diagnostics: %#v", ds)
+	}
+	index, ds := sem.BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	checked, ds := sem.Check(index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+	program, ds := Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("lower diagnostics: %#v", ds)
+	}
+	return program
 }
 
 func TestTraitConstrainedGenericCallLowersToDirectConcreteCall(t *testing.T) {

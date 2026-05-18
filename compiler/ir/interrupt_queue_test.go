@@ -16,8 +16,8 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, 
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity, InterruptQueue } from machine.x86_64.interrupt_queue
-use { SerialPathInterrupt } from machine.x86_64.serial
+use { InterruptOverflowPolicy, QueueIdentity, InterruptQueue } from machine.x86_64.interrupt_queue
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 image QueueBounds {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
@@ -27,7 +27,7 @@ image QueueBounds {
         let root = root_region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = true))
         let console_memory = root.executor_memory(owner = ExecutorSlot(id = 0), length = 0x100000, align = 4096)
         let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
-        let q = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = sizeof(SerialPathInterrupt), align = alignof(SerialPathInterrupt)), overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let q = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let worker_memory = root.executor_memory(owner = ExecutorSlot(id = 1), length = 0x100000, align = 4096)
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
         let arena = MutableBytes(address = 0, length = 0)

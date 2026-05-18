@@ -22,7 +22,7 @@ func topicKindFromPayload(payload *Type, reliable bool) string {
 		return "gap_u64"
 	case "machine.x86_64.topic_payload.TimerTickPayload":
 		return "timer_tick"
-	case "machine.x86_64.serial.SerialPathInterrupt":
+	case "machine.x86_64.topic_payload.SerialPathInterrupt":
 		return "serial_rx"
 	case "machine.x86_64.edu.EduInterrupt":
 		return "edu_interrupt"

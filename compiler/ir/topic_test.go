@@ -215,7 +215,7 @@ image Img {
 	}
 }
 
-func TestLowerSerialReceiveResultMessageFieldUsesIRHandleOffset(t *testing.T) {
+func TestLowerNestedPayloadFieldUsesIRHandleOffset(t *testing.T) {
 	checked := checkedProgramFromSourcesForTest(t, `
 module machine.x86_64.serial
 data SerialPathInterrupt {
@@ -223,18 +223,18 @@ data SerialPathInterrupt {
     byte: U8
 }
 
-data SerialReceiveResult {
-    has_message: Bool
-    message: SerialPathInterrupt
+data SerialEnvelope {
+    present: Bool
+    payload: SerialPathInterrupt
 }
 
 module test.serial_next
-use { SerialReceiveResult } from machine.x86_64.serial
+use { SerialEnvelope } from machine.x86_64.serial
 
 executor Worker {
-    start fn run(self, next: SerialReceiveResult) -> never {
-        if next.has_message {
-            let byte = next.message.byte
+    start fn run(self, next: SerialEnvelope) -> never {
+        if next.present {
+            let byte = next.payload.byte
         }
         while true {}
     }
@@ -245,22 +245,22 @@ executor Worker {
 		t.Fatalf("Lower diagnostics: %#v", diags)
 	}
 
-	nextInfo := program.Types["machine.x86_64.serial.SerialReceiveResult"]
-	messageOffset := nextInfo.Fields["message"].Offset
-	if messageOffset != 8 {
-		t.Fatalf("SerialReceiveResult.message IR offset = %d, want 8", messageOffset)
+	nextInfo := program.Types["machine.x86_64.serial.SerialEnvelope"]
+	payloadOffset := nextInfo.Fields["payload"].Offset
+	if payloadOffset != 8 {
+		t.Fatalf("SerialEnvelope.payload IR offset = %d, want 8", payloadOffset)
 	}
 
 	worker := findFunction(program, "_wrela_method_test_serial_next_Worker_run")
 	if worker == nil {
 		t.Fatalf("missing worker run function")
 	}
-	messageLoad := fieldLoadByName(worker.Blocks[0].Ops, "message")
-	if messageLoad == nil {
-		t.Fatalf("worker missing next.message FieldLoad: %#v", worker.Blocks)
+	payloadLoad := fieldLoadByName(worker.Blocks[0].Ops, "payload")
+	if payloadLoad == nil {
+		t.Fatalf("worker missing next.payload FieldLoad: %#v", worker.Blocks)
 	}
-	if messageLoad.Offset != messageOffset {
-		t.Fatalf("next.message FieldLoad offset = %d, want IR offset %d", messageLoad.Offset, messageOffset)
+	if payloadLoad.Offset != payloadOffset {
+		t.Fatalf("next.payload FieldLoad offset = %d, want IR offset %d", payloadLoad.Offset, payloadOffset)
 	}
 }
 

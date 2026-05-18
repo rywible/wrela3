@@ -451,7 +451,7 @@ func TestHelloUsesGenericTopicResultNames(t *testing.T) {
 			t.Fatalf("report still contains concrete next type %s", forbidden)
 		}
 	}
-	for _, want := range []string{"Topic<TimerTickPayload>", "Option<TimerTickPayload>", "FixedBuffer<RunEvent>"} {
+	for _, want := range []string{"machine.x86_64.topic.Topic[machine.x86_64.topic_payload.TimerTickPayload]", "wrela.lang.core.Option[machine.x86_64.topic_payload.TimerTickPayload]", "FixedBuffer<RunEvent>"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("report missing %s", want)
 		}
@@ -552,6 +552,17 @@ func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 	}
 }
 
+func TestProductionSourcesUseTypedInterruptQueues(t *testing.T) {
+	forbidden := []string{
+		".interrupt_queue(",
+		"serial_irq_queue: InterruptQueue<U8>",
+		"payload = InterruptPayloadKind(",
+	}
+	for _, root := range []string{"examples", filepath.Join("tests", "e2e", "fixtures"), "wrela"} {
+		scanRepoSourceTree(t, root, forbidden)
+	}
+}
+
 func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 	source := readRepoFile(t, "wrela/platform/hardware/memory.wrela")
 	if !strings.Contains(source, "data RootArena") || !strings.Contains(source, "data ChildArena") {
@@ -581,18 +592,12 @@ func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 	}
 
 	for _, typeName := range []string{"RootArena", "ChildArena"} {
-		methodSource := methodSourceForTypeFromDataDecl(source, typeName, "interrupt_queue")
-		if methodSource == "" {
-			t.Fatalf("missing %s.interrupt_queue method", typeName)
+		if methodSourceForTypeFromDataDecl(source, typeName, "interrupt_queue") != "" {
+			t.Fatalf("%s.interrupt_queue should not keep the old manual payload queue helper", typeName)
 		}
-		overflowGuard := "if capacity > (0 - 1) / payload.size"
-		multiply := "let bytes = capacity * payload.size"
-		if !strings.Contains(methodSource, overflowGuard) {
-			t.Fatalf("%s.interrupt_queue must reject backing-size overflow before multiplying capacity by payload.size", typeName)
-		}
-		if strings.Index(methodSource, overflowGuard) > strings.Index(methodSource, multiply) {
-			t.Fatalf("%s.interrupt_queue must check backing-size overflow before computing backing bytes", typeName)
-		}
+	}
+	if strings.Contains(source, "InterruptPayloadKind") || strings.Contains(source, "InterruptQueue<U8>") {
+		t.Fatal("memory source should not expose manual interrupt queue payload metadata")
 	}
 }
 

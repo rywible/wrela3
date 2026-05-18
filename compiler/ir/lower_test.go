@@ -368,9 +368,12 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 
 func TestLowerInterruptTopicBindingMetadata(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.serial
+module machine.x86_64.topic_payload
 
 data SerialPathInterrupt { byte: U8 }
+
+module machine.x86_64.serial
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 driver path SerialConsolePath {
     interrupt receiver -> SerialPathInterrupt {
@@ -386,7 +389,7 @@ driver path SerialConsolePath {
 		PathFieldOffset:     24,
 		TopicLabel:          "console.com1.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 		SubscriberSlots:     []string{"console"},
 	}}
@@ -432,7 +435,7 @@ driver path SerialConsolePath {
 	if binding.PathFieldOffset != 24 {
 		t.Fatalf("binding path offset = %d, want route offset 24", binding.PathFieldOffset)
 	}
-	wantEventStorageSize := program.Types["machine.x86_64.serial.SerialPathInterrupt"].StorageSize
+	wantEventStorageSize := program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"].StorageSize
 	if binding.EventStorageSize != wantEventStorageSize {
 		t.Fatalf("binding event storage size = %d, want %d", binding.EventStorageSize, wantEventStorageSize)
 	}
@@ -455,9 +458,12 @@ driver path SerialConsolePath {
 
 func TestLowerInterruptTopicRouteMissingVectorDiagnostic(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.serial
+module machine.x86_64.topic_payload
 
 data SerialPathInterrupt { byte: U8 }
+
+module machine.x86_64.serial
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 driver path SerialConsolePath {
     interrupt receiver -> SerialPathInterrupt {
@@ -468,7 +474,7 @@ driver path SerialConsolePath {
 	checked.ImageGraph.InterruptTopicRoutes = []sem.InterruptTopicRouteNode{{
 		TopicLabel:          "console.com1.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}}
 
@@ -483,9 +489,12 @@ driver path SerialConsolePath {
 
 func TestLowerInterruptTopicRouteAmbiguousVectorDiagnostic(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.serial
+module machine.x86_64.topic_payload
 
 data SerialPathInterrupt { byte: U8 }
+
+module machine.x86_64.serial
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 driver path SerialConsolePath {
     interrupt receiver -> SerialPathInterrupt {
@@ -499,7 +508,7 @@ driver path SerialConsolePath {
 		PathBinding:         "serial_a",
 		TopicLabel:          "console.a.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}, {
 		Vector:              0x40,
@@ -507,7 +516,7 @@ driver path SerialConsolePath {
 		PathBinding:         "serial_b",
 		TopicLabel:          "console.b.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.serial.SerialPathInterrupt",
+		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}}
 

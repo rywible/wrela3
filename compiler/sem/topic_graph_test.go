@@ -832,9 +832,10 @@ use { ExecutorSlot } from machine.x86_64.executor_slot
 use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { HotPollPolicy } from machine.x86_64.executor_loop
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { SerialConsolePath, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { SerialConsolePath, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic, TopicSubscription } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -875,7 +876,8 @@ image ExplicitInterruptConfigurator {
 	        let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
 	        let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
 	        let shared = discovery.interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
-	        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+	        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
+	        let queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
 	        let hardware_plan = HardwarePlan(
 	            cpus = discovery.cpus.require_min_count(count = 2),
 	            interrupts = InterruptRoutingPlan(
@@ -957,8 +959,7 @@ class TopicPublisher<T> {
 module machine.x86_64.serial
 use { PathIdentity } from machine.x86_64.cpu_state
 use { TopicPublisher } from machine.x86_64.topic
-
-data SerialPathInterrupt { has_byte: Bool; byte: U8 }
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -974,10 +975,15 @@ driver path SerialConsolePath {
     }
 }
 `, `
+module machine.x86_64.topic_payload
+
+data SerialPathInterrupt { has_byte: Bool; byte: U8 }
+`, `
 module test.path_topic_identity
 use { PathIdentity } from machine.x86_64.cpu_state
-use { SerialConsolePath, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialConsolePath, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 unique class OwnedHardware {}
 unique class DelegatedHardware {

@@ -9,8 +9,9 @@ use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, SharedI
 use { InterruptQueue } from machine.x86_64.interrupt_queue
 use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } from machine.x86_64.ivshmem
 use { MsiCapability, MsixCapability } from machine.x86_64.pci
-use { SerialConsolePath, SerialPathInterrupt } from machine.x86_64.serial
+use { SerialConsolePath } from machine.x86_64.serial
 use { TopicSubscription } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { TimerTickPayload } from machine.x86_64.topic_payload
 
 data RunScratch {
@@ -45,7 +46,7 @@ executor ProductionSubstrateProgram {
     ivshmem_events: TopicSubscription<IvshmemDoorbellInterrupt>
     ivshmem_tx: IvshmemDoorbellPeerPath
     serial_irq_source: SharedInterruptSource
-    serial_irq_queue: InterruptQueue<U8>
+    serial_irq_queue: InterruptQueue<SerialPathInterrupt>
     console_ticks: TopicSubscription<TimerTickPayload>
 
     start fn run(self) -> never {

@@ -7,8 +7,9 @@ use { Bytes, ExecutorMemory, FixedBuffer } from machine.x86_64.executor_memory
 use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
 use { MsiCapability } from machine.x86_64.pci
-use { SerialConsolePath, SerialPathInterrupt } from machine.x86_64.serial
+use { SerialConsolePath } from machine.x86_64.serial
 use { TopicSubscription } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { TimerTickPayload } from machine.x86_64.topic_payload
 
 const EVENT_CAPACITY: U64 = 16

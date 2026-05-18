@@ -444,7 +444,7 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
 	emitRegRegMove(e, src, asm.MustLookup("rax"))
 	if binding.TopicKind == "serial_rx" {
-		eventInfo, ok := ctx.typeInfo(ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.serial", Kind: ir.TypeKindData})
+		eventInfo, ok := ctx.typeInfo(ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.topic_payload", Kind: ir.TypeKindData})
 		if !ok {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt event type"})
 			return
@@ -1866,9 +1866,13 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing constructor object slot"})
 		return
 	}
-	size := e.ctx.storageSize(op.Type.Name)
+	size := e.ctx.storageSizeForType(op.Type)
 	emitZeroSlotRange(e, objectSlot, size)
-	info := e.ctx.types[op.Type.Name]
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown constructor type: " + op.Type.Name})
+		return
+	}
 	for _, field := range op.Fields {
 		fieldInfo, ok := info.Fields[field.Name]
 		if !ok {
@@ -2688,31 +2692,29 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	if !ok {
 		return
 	}
-	publishedOffset := outSlot
-	fullOffset := outSlot + 1
-	resultTagOffset := -1
-	okDiscriminant := int64(0)
-	errDiscriminant := int64(1)
-	if info, ok := e.ctx.typeInfo(publish.Type); ok {
-		if info.Kind == ir.TypeKindEnum {
-			if field, ok := info.Fields["$tag"]; ok {
-				resultTagOffset = outSlot + fieldStorageOffset(field)
-			}
-			if variant, ok := enumVariantInfo(info, "Ok"); ok {
-				okDiscriminant = int64(variant.Discriminant)
-			}
-			if variant, ok := enumVariantInfo(info, "Err"); ok {
-				errDiscriminant = int64(variant.Discriminant)
-			}
-		} else {
-			if field, ok := info.Fields["published"]; ok {
-				publishedOffset = outSlot + field.Offset
-			}
-			if field, ok := info.Fields["full"]; ok {
-				fullOffset = outSlot + field.Offset
-			}
-		}
+	resultInfo, ok := e.ctx.typeInfo(publish.Type)
+	if !ok || resultInfo.Kind != ir.TypeKindEnum {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish requires enum result type: " + publish.Type.Name})
+		return
 	}
+	tagField, ok := resultInfo.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing tag field: " + publish.Type.Name})
+		return
+	}
+	okVariant, ok := enumVariantInfo(resultInfo, "Ok")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing Ok variant: " + publish.Type.Name})
+		return
+	}
+	errVariant, ok := enumVariantInfo(resultInfo, "Err")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing Err variant: " + publish.Type.Name})
+		return
+	}
+	resultTagOffset := outSlot + fieldStorageOffset(tagField)
+	okDiscriminant := int64(okVariant.Discriminant)
+	errDiscriminant := int64(errVariant.Discriminant)
 
 	base := asm.MustLookup("rax")
 	producer := asm.MustLookup("r10")
@@ -2726,9 +2728,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitSlotFromBase(e, asm.MustLookup("r8"), asm.MustLookup("rbp"), outSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("r8"), valueSlot, 64)
 	emitZeroSlotRange(e, outSlot, e.ctx.storageSizeForType(publish.Type))
-	if resultTagOffset >= 0 {
-		emitStoreSlotImm(e, resultTagOffset, okDiscriminant, 64)
-	}
+	emitStoreSlotImm(e, resultTagOffset, okDiscriminant, 64)
 	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitLoadMemToReg(e, producer, base, int64(layout.HeadOffset), 64)
 	emitReliableTopicMinCursor(e, layout, base, minCursor, candidate)
@@ -2757,17 +2757,10 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 		wakeSlots = append(wakeSlots, subscriber.Label)
 	}
 	emitTouchSubscriberWaitlinesAndWake(e, layout, base, producer, wakeSlots, e.ctx)
-	if resultTagOffset < 0 {
-		emitStoreSlotBool(e, publishedOffset, 1)
-	}
 	e.emitJmp(done)
 
 	e.bindLabel(full)
-	if resultTagOffset >= 0 {
-		emitStoreSlotImm(e, resultTagOffset, errDiscriminant, 64)
-	} else {
-		emitStoreSlotBool(e, fullOffset, 1)
-	}
+	emitStoreSlotImm(e, resultTagOffset, errDiscriminant, 64)
 	e.bindLabel(done)
 }
 
@@ -2932,45 +2925,38 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	noMessage := e.newLabel("topic_try_next_empty")
 	gap := e.newLabel("topic_try_next_gap")
 	resultInfo, hasResultInfo := e.ctx.typeInfo(next.Type)
-	messageField, hasMessageField := resultInfo.Fields["message"]
-	hasMessageField = hasResultInfo && hasMessageField && messageField.StorageOffset >= 0
+	if !hasResultInfo || resultInfo.Kind != ir.TypeKindEnum {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next requires enum option type: " + next.Type.Name})
+		return
+	}
 	optionPayloadField, hasOptionPayload := resultInfo.Fields["Some.value"]
-	isOptionResult := hasResultInfo && resultInfo.Kind == ir.TypeKindEnum && hasOptionPayload
-	optionTagOffset := outSlot
-	optionSomeDiscriminant := int64(1)
-	if isOptionResult {
-		if tagField, ok := resultInfo.Fields["$tag"]; ok {
-			optionTagOffset = outSlot + fieldStorageOffset(tagField)
-		}
-		if variant, ok := enumVariantInfo(resultInfo, "Some"); ok {
-			optionSomeDiscriminant = int64(variant.Discriminant)
-		}
+	if !hasOptionPayload {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing Some.value field: " + next.Type.Name})
+		return
 	}
-	hasMessageOffset := outSlot
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["has_message"]; ok {
-			hasMessageOffset = outSlot + field.Offset
-		}
+	tagField, ok := resultInfo.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing tag field: " + next.Type.Name})
+		return
 	}
-	gapOffset := outSlot + 1
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["gap"]; ok {
-			gapOffset = outSlot + field.Offset
-		}
+	someVariant, ok := enumVariantInfo(resultInfo, "Some")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing Some variant: " + next.Type.Name})
+		return
 	}
-	missedOffset := outSlot + 8
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["missed"]; ok {
-			missedOffset = outSlot + field.Offset
-		}
+	noneVariant, ok := enumVariantInfo(resultInfo, "None")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing None variant: " + next.Type.Name})
+		return
 	}
+	optionTagOffset := outSlot + fieldStorageOffset(tagField)
+	optionSomeDiscriminant := int64(someVariant.Discriminant)
+	optionNoneDiscriminant := int64(noneVariant.Discriminant)
 
 	emitSlotFromBase(e, asm.MustLookup("r8"), asm.MustLookup("rbp"), outSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("r8"), valueSlot, 64)
 	emitZeroSlotRange(e, outSlot, e.ctx.storageSizeForType(next.Type))
-	if hasMessageField {
-		emitStoreNestedDestinationHandle(e, asm.MustLookup("rbp"), int64(outSlot+messageField.Offset), int64(outSlot+messageField.StorageOffset))
-	}
+	emitStoreSlotImm(e, optionTagOffset, optionNoneDiscriminant, 64)
 	emitMovDataAddressToReg(e, base, topicDataSymbol(next.TopicLabel))
 	emitLoadSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
 	emitLoadMemToReg(e, head, base, int64(layout.HeadOffset), 64)
@@ -2987,36 +2973,8 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitCmpRegReg(e, tmp, cursor)
 	e.emitJcc(0x85, gap)
 	emitMfence(e)
-	if isOptionResult {
-		emitStoreSlotImm(e, optionTagOffset, optionSomeDiscriminant, 64)
-		emitMovImmToReg(e, asm.MustLookup("rdi"), int64(fieldStorageOffset(optionPayloadField)))
-		emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+fieldStorageOffset(optionPayloadField)), slot, 8, fieldStorageSize(e.ctx, optionPayloadField))
-	} else if hasMessageField {
-		emitMovImmToReg(e, tmp, 1)
-		emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
-		if messageField.Type.Name == "U64TopicMessage" {
-			messageInfo, _ := e.ctx.typeInfo(messageField.Type)
-			sequenceOffset := messageField.StorageOffset
-			if field, ok := messageInfo.Fields["sequence"]; ok {
-				sequenceOffset += field.Offset
-			}
-			valueOffset := messageField.StorageOffset + 8
-			if field, ok := messageInfo.Fields["value"]; ok {
-				valueOffset = messageField.StorageOffset + field.Offset
-			}
-			emitStoreSlotFromReg(e, cursor, outSlot+sequenceOffset, 64)
-			emitLoadMemToReg(e, tmp, slot, 8, 64)
-			emitStoreSlotFromReg(e, tmp, outSlot+valueOffset, 64)
-		} else {
-			emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+messageField.StorageOffset), slot, 8, messageField.StorageSize)
-		}
-	} else {
-		emitMovImmToReg(e, tmp, 1)
-		emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
-		emitStoreSlotFromReg(e, tmp, outSlot+16, 64)
-		emitLoadMemToReg(e, tmp, slot, 8, 64)
-		emitStoreSlotFromReg(e, tmp, outSlot+24, 64)
-	}
+	emitStoreSlotImm(e, optionTagOffset, optionSomeDiscriminant, 64)
+	emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+fieldStorageOffset(optionPayloadField)), slot, 8, fieldStorageSize(e.ctx, optionPayloadField))
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
 	if layout.Kind == "reliable_u64" {
@@ -3024,12 +2982,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	}
 	e.emitJmp(done)
 	e.bindLabel(gap)
-	emitRegRegMove(e, tmp, head)
-	emitRegRegOp(e, 0x29, tmp, cursor)
-	emitAddImm(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, missedOffset, 64)
-	emitMovImmToReg(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, gapOffset, 8)
+	emitStoreSlotImm(e, optionTagOffset, optionNoneDiscriminant, 64)
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, head, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
 	if layout.Kind == "reliable_u64" {

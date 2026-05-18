@@ -194,6 +194,32 @@ func TestReliableTopicPublishChecksSlowestSubscriber(t *testing.T) {
 	}
 }
 
+func TestReliableTopicPublishRejectsLegacyDataResultLayout(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Topics[0].Kind = "reliable_u64"
+	program.Types["LegacyPublishResult"] = ir.TypeInfo{
+		Name: "LegacyPublishResult", Kind: ir.TypeKindData, Size: 2, Align: 1, StorageSize: 2,
+		Fields: map[string]ir.FieldInfo{
+			"published": {Name: "published", Type: ir.Type{Name: "Bool"}, Offset: 0, Size: 1, Align: 1, StorageOffset: 0, StorageSize: 1},
+			"full":      {Name: "full", Type: ir.Type{Name: "Bool"}, Offset: 1, Size: 1, Align: 1, StorageOffset: 1, StorageSize: 1},
+		},
+	}
+	value := &ir.ConstInt{Symbol: "value", Value: 42, Type: ir.Type{Name: "U64"}}
+	program.Functions = []ir.Function{{
+		Symbol: "publish_counter_legacy_result",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			value,
+			&ir.ReliableTopicTryPublish{TopicLabel: "counter", Value: value, Type: ir.Type{Name: "LegacyPublishResult", Kind: ir.TypeKindData}},
+			&ir.Return{},
+		}}},
+	}}
+
+	_, ds := Compile(program)
+	if !hasCode(ds, diag.CG0001) {
+		t.Fatalf("legacy reliable publish data result diagnostics = %#v, want CG0001", ds)
+	}
+}
+
 func TestReliableTopicWaitRechecksCapacityAfterArmingWaitline(t *testing.T) {
 	program := topicProgramForCodegenTest()
 	program.Topics[0].Kind = "reliable_u64"
@@ -417,8 +443,41 @@ func TestTopicTryNextWritesOptionLayout(t *testing.T) {
 		t.Fatalf("Compile diagnostics: %#v", ds)
 	}
 	code := symbolBytes(t, image, "try_counter_option")
-	if !containsBytes(code, []byte{0x01, 0x00, 0x00, 0x00}) || !containsBytes(code, []byte{0x08, 0x00, 0x00, 0x00}) {
-		t.Fatalf("try_next must write Option.Some tag and payload offset 8, got %x", code)
+	if !containsBytes(code, []byte{0x01, 0x00, 0x00, 0x00}) || !containsBytes(code, []byte{0x48, 0x8B, 0x41, 0x08}) {
+		t.Fatalf("try_next must write Option.Some tag and copy payload from ring slot offset 8, got %x", code)
+	}
+}
+
+func TestTopicTryNextRejectsLegacyDataResultLayout(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Types["LegacyNextResult"] = ir.TypeInfo{
+		Name: "LegacyNextResult", Kind: ir.TypeKindData, Size: 32, Align: 8, StorageSize: 32,
+		Fields: map[string]ir.FieldInfo{
+			"has_message": {Name: "has_message", Type: ir.Type{Name: "Bool"}, Offset: 0, Size: 1, Align: 1, StorageOffset: 0, StorageSize: 1},
+			"gap":         {Name: "gap", Type: ir.Type{Name: "Bool"}, Offset: 1, Size: 1, Align: 1, StorageOffset: 1, StorageSize: 1},
+			"missed":      {Name: "missed", Type: ir.Type{Name: "U64"}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+			"message":     {Name: "message", Type: ir.Type{Name: "U64"}, Offset: 16, Size: 8, Align: 8, StorageOffset: 16, StorageSize: 8},
+		},
+	}
+	sub := &ir.Local{Symbol: "sub", Type: ir.Type{Name: "TopicSubscription<U64>"}}
+	next := &ir.TopicTryNext{
+		TopicLabel:     "counter",
+		SubscriberSlot: "worker",
+		Subscription:   sub,
+		Type:           ir.Type{Name: "LegacyNextResult", Kind: ir.TypeKindData},
+	}
+	program.Functions = []ir.Function{{
+		Symbol: "try_counter_legacy_result",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			sub,
+			next,
+			&ir.Return{},
+		}}},
+	}}
+
+	_, ds := Compile(program)
+	if !hasCode(ds, diag.CG0001) {
+		t.Fatalf("legacy try_next data result diagnostics = %#v, want CG0001", ds)
 	}
 }
 

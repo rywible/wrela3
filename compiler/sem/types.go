@@ -133,7 +133,19 @@ func (t *Type) Display() string {
 }
 
 func (t *Type) MangledName() string {
-	return strings.NewReplacer("<", "_", ">", "", ", ", "_", ".", "_", "[", "_", "]", "").Replace(t.Display())
+	name := t.Name
+	if len(t.TypeArgs) > 0 {
+		parts := make([]string, 0, len(t.TypeArgs))
+		for _, arg := range t.TypeArgs {
+			if arg != nil && len(arg.TypeArgs) == 0 && (arg.Module == "" || arg.Module == t.Module) {
+				parts = append(parts, arg.Name)
+				continue
+			}
+			parts = append(parts, arg.Key())
+		}
+		name += "[" + strings.Join(parts, ",") + "]"
+	}
+	return strings.NewReplacer("<", "_", ">", "", ", ", "_", ",", "_", ".", "_", "[", "_", "]", "").Replace(name)
 }
 
 type CheckedProgram struct {

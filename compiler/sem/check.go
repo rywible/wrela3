@@ -3083,7 +3083,7 @@ func topicKindForType(typ *Type) string {
 func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) {
 	switch qualifiedTypeName(typ) {
 	case "machine.x86_64.serial.SerialConsolePath":
-		return "serial_rx", "machine.x86_64.serial.SerialPathInterrupt", "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt"
+		return "serial_rx", "machine.x86_64.topic_payload.SerialPathInterrupt", "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt"
 	case "machine.x86_64.edu.EduMsiPath":
 		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_fn_machine_x86_64_edu_EduMsiPath_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
@@ -3819,9 +3819,6 @@ func typesCompatible(target, value *Type) bool {
 		return true
 	}
 	if target.Key() != "" && target.Key() == value.Key() {
-		return true
-	}
-	if isInterruptQueueType(target) && isInterruptQueueType(value) {
 		return true
 	}
 	if isIntegerType(target) && isIntegerType(value) {

@@ -2583,7 +2583,7 @@ func (ctx *lowerContext) irTypeName(typ *sem.Type) string {
 	if len(typ.TypeArgs) == 0 {
 		return typ.Name
 	}
-	return typ.Display()
+	return typ.Key()
 }
 
 func (ctx *lowerContext) typeInfoKey(typ *sem.Type) string {

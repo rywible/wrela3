@@ -4,6 +4,7 @@ use { Bytes } from machine.x86_64.executor_memory
 use { DriverMemory, PathIdentity } from machine.x86_64.cpu_state
 use { IoApicRoute } from machine.x86_64.interrupts
 use { TopicPublisher } from machine.x86_64.topic
+use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -44,11 +45,6 @@ unique driver SerialDriver {
         console_path.enable_receive_interrupts()
         return console_path
     }
-}
-
-data SerialPathInterrupt {
-    has_byte: Bool
-    byte: U8
 }
 
 driver path SerialConsolePath {

@@ -381,7 +381,6 @@ func isValueOnlyAuthorityRecord(typ *Type) bool {
 	case "machine.x86_64.executor_slot.ExecutorSlot",
 		"machine.x86_64.cpu_state.ExecutorSlot",
 		"machine.x86_64.interrupt_queue.QueueIdentity",
-		"machine.x86_64.interrupt_queue.InterruptPayloadKind",
 		"machine.x86_64.interrupt_queue.InterruptOverflowPolicy",
 		"machine.x86_64.interrupts.InterruptSourceIdentity",
 		"machine.x86_64.interrupts.InterruptVector":

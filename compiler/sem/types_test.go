@@ -974,7 +974,7 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
 		"label": "StringLiteral",
 	})
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.serial", "SerialPathInterrupt"), map[string]string{
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_payload", "SerialPathInterrupt"), map[string]string{
 		"has_byte": "Bool",
 		"byte":     "U8",
 	})
