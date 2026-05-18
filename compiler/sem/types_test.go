@@ -953,38 +953,38 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "TopicIdentity"), map[string]string{
 		"label": "StringLiteral",
 	})
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "publisher")
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), map[string]string{
-		"identity": "TopicIdentity",
-		"depth":    "U64",
-	})
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64GapTopic"), "subscribe")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), "publisher")
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableTopic"), map[string]string{
-		"identity": "TopicIdentity",
-		"depth":    "U64",
-	})
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "try_publish")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliablePublisher"), "publish_or_wait")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic_u64", "U64ReliableSubscription"), "try_next")
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
-		"label": "StringLiteral",
-	})
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), map[string]string{
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic", "Topic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic", "Topic"), "publisher")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic", "Topic"), map[string]string{
 		"identity": "TopicIdentity",
 		"id":       "U64",
+		"depth":    "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic", "Topic"), "subscribe")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic", "Topic"), "subscribe")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic", "ReliableTopic"), "publisher")
+	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.topic", "ReliableTopic"), "publisher")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic", "ReliableTopic"), map[string]string{
+		"identity": "TopicIdentity",
+		"id":       "U64",
+		"depth":    "U64",
+	})
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic", "ReliablePublisher"), "try_publish")
+	assertMethodExists(t, moduleType(t, index, "machine.x86_64.topic", "ReliableSubscription"), "try_next")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
+		"label": "StringLiteral",
 	})
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.serial", "SerialPathInterrupt"), map[string]string{
 		"has_byte": "Bool",
 		"byte":     "U8",
 	})
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxTopic"), "subscribe")
-	assertMethodExists(t, moduleType(t, index, "machine.x86_64.serial", "SerialRxSubscription"), "try_next")
+	serialPath := moduleType(t, index, "machine.x86_64.serial", "SerialConsolePath")
+	assertTypeFields(t, serialPath, map[string]string{
+		"identity":  "PathIdentity",
+		"registers": "SerialWriterRegisters",
+		"route":     "IoApicRoute",
+		"rx":        "TopicPublisher<SerialPathInterrupt>",
+	})
 	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "publisher")
 	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "subscribe")
 	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "publisher")
@@ -1046,7 +1046,7 @@ func assertTypeFields(t *testing.T, typ *Type, want map[string]string) {
 	got := map[string]string{}
 	for _, field := range typ.Fields {
 		if field.Type != nil {
-			got[field.Name] = field.Type.Name
+			got[field.Name] = field.Type.Display()
 		}
 	}
 	for name, wantType := range want {
