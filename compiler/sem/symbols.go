@@ -15,24 +15,24 @@ type Index struct {
 	ByImport map[string]map[string]*Type
 	Images   []*ast.ImageDecl
 
-	InterruptEvents map[string]map[string]*ast.InterruptEventDecl
-	OnHandlers      map[string]map[string]map[string]*ast.OnHandlerDecl
-	primitives      map[string]*Type
+	InterruptEvents    map[string]map[string]*ast.InterruptEventDecl
+	OnHandlers         map[string]map[string]map[string]*ast.OnHandlerDecl
+	Instantiations     map[string]*Type
+	InstantiationOrder []string
+	primitives         map[string]*Type
 }
 
 func NewIndex() *Index {
 	return &Index{
-		Modules:         map[string]*ast.Module{},
-		ByModule:        map[string]map[string]*Type{},
-		ByImport:        map[string]map[string]*Type{},
-		InterruptEvents: map[string]map[string]*ast.InterruptEventDecl{},
-		OnHandlers:      map[string]map[string]map[string]*ast.OnHandlerDecl{},
-		primitives:      map[string]*Type{},
+		Modules:            map[string]*ast.Module{},
+		ByModule:           map[string]map[string]*Type{},
+		ByImport:           map[string]map[string]*Type{},
+		InterruptEvents:    map[string]map[string]*ast.InterruptEventDecl{},
+		OnHandlers:         map[string]map[string]map[string]*ast.OnHandlerDecl{},
+		Instantiations:     map[string]*Type{},
+		InstantiationOrder: []string{},
+		primitives:         map[string]*Type{},
 	}
-}
-
-func legacyTypeName(ref ast.TypeRef) string {
-	return ref.Name
 }
 
 func (idx *Index) Lookup(moduleName, name string) (*Type, bool) {
@@ -235,19 +235,44 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 			if typ == nil {
 				continue
 			}
+			var params map[string]*Type
+			var localDiags []diag.Diagnostic
 			switch d := decl.(type) {
 			case *ast.DataDecl:
-				typ.Fields = buildFields(idx, mod.Name, d.Fields)
-				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				params, localDiags = buildTypeParamMap(d.TypeParams)
+				diagOut = append(diagOut, localDiags...)
+				typ.TypeParams = toTypeParams(d.TypeParams)
+				typ.Where, localDiags = buildWhereBounds(idx, mod.Name, d.Where, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
+				diagOut = append(diagOut, localDiags...)
 			case *ast.ClassDecl:
-				typ.Fields = buildFields(idx, mod.Name, d.Fields)
-				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				params, localDiags = buildTypeParamMap(d.TypeParams)
+				diagOut = append(diagOut, localDiags...)
+				typ.TypeParams = toTypeParams(d.TypeParams)
+				typ.Where, localDiags = buildWhereBounds(idx, mod.Name, d.Where, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
+				diagOut = append(diagOut, localDiags...)
 			case *ast.DriverDecl:
-				typ.Fields = buildFields(idx, mod.Name, d.Fields)
-				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				params, localDiags = buildTypeParamMap(d.TypeParams)
+				diagOut = append(diagOut, localDiags...)
+				typ.TypeParams = toTypeParams(d.TypeParams)
+				typ.Where, localDiags = buildWhereBounds(idx, mod.Name, d.Where, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, params)
+				diagOut = append(diagOut, localDiags...)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
+				diagOut = append(diagOut, localDiags...)
 			case *ast.DriverPathDecl:
-				typ.Fields = buildFields(idx, mod.Name, d.Fields)
-				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, nil)
+				diagOut = append(diagOut, localDiags...)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, nil)
+				diagOut = append(diagOut, localDiags...)
 				if idx.InterruptEvents[mod.Name] == nil {
 					idx.InterruptEvents[mod.Name] = map[string]*ast.InterruptEventDecl{}
 				}
@@ -267,8 +292,10 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 					idx.InterruptEvents[mod.Name][d.Name] = event
 				}
 			case *ast.ExecutorDecl:
-				typ.Fields = buildFields(idx, mod.Name, d.Fields)
-				typ.Methods = buildMethods(idx, mod.Name, d.Methods)
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, nil)
+				diagOut = append(diagOut, localDiags...)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, nil)
+				diagOut = append(diagOut, localDiags...)
 				if idx.OnHandlers[mod.Name] == nil {
 					idx.OnHandlers[mod.Name] = map[string]map[string]*ast.OnHandlerDecl{}
 				}
@@ -445,39 +472,114 @@ func buildPrimitives(idx *Index) {
 	}
 }
 
-func buildFields(idx *Index, moduleName string, fields []ast.Field) []Field {
+func buildFields(idx *Index, moduleName string, fields []ast.Field, params map[string]*Type) ([]Field, []diag.Diagnostic) {
 	out := make([]Field, 0, len(fields))
+	var diags []diag.Diagnostic
 	for _, field := range fields {
+		typ, fieldDiags := idx.LookupTypeRef(moduleName, field.Type, params)
+		diags = append(diags, fieldDiags...)
+		if typ == nil {
+			continue
+		}
 		out = append(out, Field{
 			Name: field.Name,
-			Type: idx.lookupType(moduleName, legacyTypeName(field.Type)),
+			Type: typ,
 			Span: field.Span,
 		})
 	}
-	return out
+	return out, diags
 }
 
-func buildMethods(idx *Index, moduleName string, methods []ast.MethodDecl) []Method {
+func buildMethods(idx *Index, moduleName string, methods []ast.MethodDecl, params map[string]*Type) ([]Method, []diag.Diagnostic) {
 	out := make([]Method, 0, len(methods))
+	var diags []diag.Diagnostic
 	for _, m := range methods {
+		methodParams, methodDiags := buildTypeParamMap(m.TypeParams)
+		diags = append(diags, methodDiags...)
+		methodScope := map[string]*Type{}
+		for k, v := range params {
+			methodScope[k] = v
+		}
+		for k, v := range methodParams {
+			methodScope[k] = v
+		}
+		where, whereDiags := buildWhereBounds(idx, moduleName, m.Where, methodScope)
+		diags = append(diags, whereDiags...)
+
 		out = append(out, Method{
-			Name:    m.Name,
-			Params:  buildFields(idx, moduleName, convertParams(m.Params)),
-			Return:  idx.lookupType(moduleName, legacyTypeName(m.Return)),
-			IsAsm:   m.IsAsm,
-			IsStart: m.IsStart,
-			Span:    m.SpanV,
-			Body:    m.Body,
-			AsmBody: m.Asm,
+			Name:       m.Name,
+			TypeParams: toTypeParams(m.TypeParams),
+			Where:      where,
+			IsAsm:      m.IsAsm,
+			IsStart:    m.IsStart,
+			Span:       m.SpanV,
+			Body:       m.Body,
+			AsmBody:    m.Asm,
 		})
+		method := &out[len(out)-1]
+		methodParamsOut, methodParamDiags := buildParams(idx, moduleName, convertParams(m.Params), methodScope)
+		diags = append(diags, methodParamDiags...)
+		method.Params = methodParamsOut
+		if m.Return.Name == "" {
+			method.Return = idx.MustType("void")
+		} else {
+			returnType, returnDiags := idx.LookupTypeRef(moduleName, m.Return, methodScope)
+			diags = append(diags, returnDiags...)
+			method.Return = returnType
+		}
 	}
-	return out
+	return out, diags
 }
 
 func convertParams(params []ast.Param) []ast.Field {
 	out := make([]ast.Field, 0, len(params))
 	for _, p := range params {
 		out = append(out, ast.Field{Name: p.Name, Type: p.Type, Span: p.Span})
+	}
+	return out
+}
+
+func legacyTypeName(ref ast.TypeRef) string {
+	return ref.Name
+}
+
+func buildParams(idx *Index, moduleName string, params []ast.Field, typeParams map[string]*Type) ([]Field, []diag.Diagnostic) {
+	out := make([]Field, 0, len(params))
+	var diags []diag.Diagnostic
+	for _, param := range params {
+		if param.Name == "self" && param.Type.Name == "" {
+			out = append(out, Field{Name: "self", Type: nil, Span: param.Span})
+			continue
+		}
+		typ, paramDiags := idx.LookupTypeRef(moduleName, param.Type, typeParams)
+		diags = append(diags, paramDiags...)
+		if typ == nil {
+			continue
+		}
+		out = append(out, Field{Name: param.Name, Type: typ, Span: param.Span})
+	}
+	return out, diags
+}
+
+func buildWhereBounds(idx *Index, moduleName string, where []ast.TraitBound, typeParams map[string]*Type) ([]TraitBound, []diag.Diagnostic) {
+	out := make([]TraitBound, 0, len(where))
+	var diags []diag.Diagnostic
+	for _, bound := range where {
+		trait, traitDiags := idx.LookupTypeRef(moduleName, bound.Trait, typeParams)
+		diags = append(diags, traitDiags...)
+		out = append(out, TraitBound{
+			Param: bound.Param,
+			Trait: trait,
+			Span:  bound.Span,
+		})
+	}
+	return out, diags
+}
+
+func toTypeParams(params []ast.TypeParam) []TypeParam {
+	out := make([]TypeParam, 0, len(params))
+	for _, param := range params {
+		out = append(out, TypeParam{Name: param.Name, Span: param.Span})
 	}
 	return out
 }

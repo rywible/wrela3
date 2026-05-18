@@ -1,6 +1,8 @@
 package sem
 
 import (
+	"strings"
+
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/source"
 )
@@ -15,6 +17,7 @@ const (
 	KindDriverPath
 	KindExecutor
 	KindImage
+	KindTypeParam
 )
 
 func (k Kind) String() string {
@@ -33,9 +36,22 @@ func (k Kind) String() string {
 		return "executor"
 	case KindImage:
 		return "image"
+	case KindTypeParam:
+		return "type param"
 	default:
 		return "type"
 	}
+}
+
+type TypeParam struct {
+	Name string
+	Span source.Span
+}
+
+type TraitBound struct {
+	Param string
+	Trait *Type
+	Span  source.Span
 }
 
 type Field struct {
@@ -45,24 +61,60 @@ type Field struct {
 }
 
 type Method struct {
-	Name    string
-	Params  []Field
-	Return  *Type
-	IsAsm   bool
-	IsStart bool
-	Span    source.Span
-	Body    []ast.Stmt
-	AsmBody *ast.AsmBody
+	Name       string
+	TypeParams []TypeParam
+	Where      []TraitBound
+	Params     []Field
+	Return     *Type
+	IsAsm      bool
+	IsStart    bool
+	Span       source.Span
+	Body       []ast.Stmt
+	AsmBody    *ast.AsmBody
 }
 
 type Type struct {
-	Module        string
-	Name          string
-	Kind          Kind
-	Unique        bool
-	DelegatedOnly bool
-	Fields        []Field
-	Methods       []Method
+	Module                string
+	Name                  string
+	Kind                  Kind
+	Unique                bool
+	DelegatedOnly         bool
+	Fields                []Field
+	Methods               []Method
+	TypeParams            []TypeParam
+	TypeArgs              []*Type
+	Where                 []TraitBound
+	GenericOrigin         *Type
+	InstantiationComplete bool
+}
+
+func (t *Type) Key() string {
+	if t == nil {
+		return ""
+	}
+	base := qualifiedTypeName(t)
+	if len(t.TypeArgs) == 0 {
+		return base
+	}
+	parts := make([]string, 0, len(t.TypeArgs))
+	for _, arg := range t.TypeArgs {
+		parts = append(parts, arg.Key())
+	}
+	return base + "[" + strings.Join(parts, ",") + "]"
+}
+
+func (t *Type) Display() string {
+	if t == nil {
+		return ""
+	}
+	if len(t.TypeArgs) == 0 {
+		return t.Name
+	}
+	parts := make([]string, 0, len(t.TypeArgs))
+	for _, arg := range t.TypeArgs {
+		parts = append(parts, arg.Display())
+	}
+	return t.Name + "<" + strings.Join(parts, ", ") + ">"
 }
 
 type CheckedProgram struct {
