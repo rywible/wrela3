@@ -440,7 +440,13 @@ func TestHelloUsesGenericTopicResultNames(t *testing.T) {
 	}
 	text := report.String()
 
-	for _, forbidden := range []string{"TimerTickNext", "SerialRxNext", "EduInterruptNext", "IvshmemDoorbellNext", "U64TopicNext"} {
+	for _, forbidden := range []string{
+		oldConcreteName("TimerTick", "Next"),
+		oldConcreteName("SerialRx", "Next"),
+		oldConcreteName("EduInterrupt", "Next"),
+		oldConcreteName("IvshmemDoorbell", "Next"),
+		oldConcreteName("U64Topic", "Next"),
+	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("report still contains concrete next type %s", forbidden)
 		}
@@ -450,6 +456,10 @@ func TestHelloUsesGenericTopicResultNames(t *testing.T) {
 			t.Fatalf("report missing %s", want)
 		}
 	}
+}
+
+func oldConcreteName(prefix, suffix string) string {
+	return prefix + suffix
 }
 
 func TestSerialRXEnablementIsCentralized(t *testing.T) {

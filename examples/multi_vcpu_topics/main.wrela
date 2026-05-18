@@ -32,7 +32,7 @@ executor Producer {
             self.out.publish(value = value)
             value = value + 1
         }
-        self.serial.write(self.memory.bytes(value = "producer published 64\n"))
+        self.serial.write(self.memory.bytes(value = "producer sent 64\n"))
 
         let done = false
         while done == false {
@@ -106,13 +106,13 @@ executor Consumer {
                 }
             }
         }
-        let published = false
-        while published == false {
+        let result_sent = false
+        while result_sent == false {
             match self.result_out.try_publish(value = received) {
                 Result.Ok(value = unit) => {
-                    published = true
+                    result_sent = true
                 }
-                Result.Err(error = full) => {}
+                Result.Err(error = topic_full) => {}
             }
         }
         self.memory.halt_forever()

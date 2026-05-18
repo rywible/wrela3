@@ -1830,6 +1830,10 @@ func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.
 		if binding, ok := scope.lookup(e.Name); ok {
 			return binding.value, nil, binding.typ
 		}
+		if value, ok := ctx.checked.Index.LookupConst(moduleName, e.Name); ok && value.Type != nil {
+			c := &ConstInt{Symbol: e.Name, Value: value.Value, Type: ctx.irType(value.Type)}
+			return c, []Operation{c}, value.Type
+		}
 		typ := ctx.resolveType(moduleName, e.Name)
 		if typ != nil {
 			value := &Local{Symbol: e.Name, Type: ctx.irType(typ)}
