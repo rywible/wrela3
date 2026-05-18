@@ -416,6 +416,19 @@ executor Worker {
 	}
 }
 
+func TestFixedBufferPushUsesSlotsAndResult(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index := mustBuildIndex(t, modules)
+	fixed, ok := index.Lookup("machine.x86_64.executor_memory", "FixedBuffer")
+	if !ok || len(fixed.TypeParams) != 1 {
+		t.Fatalf("FixedBuffer = %#v", fixed)
+	}
+	push := methodByName(t, fixed, "push")
+	if push.Return == nil || push.Return.Display() != "Result<Unit, BufferFull>" {
+		t.Fatalf("FixedBuffer.push return = %#v, want Result<Unit, BufferFull>", push.Return)
+	}
+}
+
 func TestRawSlotsReadRejected(t *testing.T) {
 	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
 module sem.slots

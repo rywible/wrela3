@@ -1,5 +1,7 @@
 module machine.x86_64.executor_memory
 
+use { Unit, Result } from wrela.lang.core
+
 data Bytes {
     address: PhysicalAddress
     length: U64
@@ -8,6 +10,64 @@ data Bytes {
 data MutableBytes {
     address: PhysicalAddress
     length: U64
+}
+
+data BufferFull {}
+
+data Slice<T> {
+    address: PhysicalAddress
+    length: U64
+
+    asm fn get(self, index: U64) -> T {
+        ret
+    }
+}
+
+data MutableSlice<T> {
+    address: PhysicalAddress
+    length: U64
+
+    asm fn get(self, index: U64) -> T {
+        ret
+    }
+
+    asm fn set(self, index: U64, value: T) {
+        ret
+    }
+}
+
+data Slots<T> {
+    address: PhysicalAddress
+    capacity: U64
+
+    asm fn write(self, index: U64, value: T) {
+        ret
+    }
+
+    asm fn fill(self, value: T) -> MutableSlice<T> {
+        ret
+    }
+}
+
+data FixedBuffer<T> {
+    slots: Slots<T>
+    length: U64
+
+    fn push(self, value: T) -> Result<Unit, BufferFull> {
+        if self.length == self.slots.capacity {
+            return Result.Err(error = BufferFull())
+        }
+        self.slots.write(index = self.length, value = value)
+        self.length = self.length + 1
+        return Result.Ok(value = Unit())
+    }
+}
+
+data Ring<T> {
+    slots: Slots<T>
+    head: U64
+    tail: U64
+    len: U64
 }
 
 data ExecutorMemory {
@@ -23,6 +83,9 @@ data ExecutorMemory {
     fn frame(self, length: U64) -> ArenaFrame {
         return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
     }
+
+    // Compiler intrinsic receiver. The parser accepts the first argument as a type operand.
+    // tick.reserve_array(Event, count = 64) returns Slots<Event>.
 
     asm fn halt_forever(self) -> never {
     loop:
@@ -40,4 +103,7 @@ data ArenaFrame {
     fn frame(self, length: U64) -> ArenaFrame {
         return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
     }
+
+    // Compiler intrinsic receiver. The parser accepts the first argument as a type operand.
+    // tick.reserve_array(Event, count = 64) returns Slots<Event>.
 }
