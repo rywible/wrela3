@@ -281,6 +281,43 @@ func TestSliceGetSetBounds(t *testing.T) {
 	}
 }
 
+func testProgramWithSlotFill(t *testing.T) *ir.Program {
+	t.Helper()
+	slots := &ir.Local{Symbol: "slots", Type: ir.Type{Name: "Slots<Event>"}}
+	value := &ir.Local{Symbol: "event", Type: ir.Type{Name: "Event"}}
+	return &ir.Program{Types: genericMemoryTypeInfos(), Functions: []ir.Function{{
+		Symbol: "_wrela_test_slot_fill",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			slots,
+			value,
+			&ir.SlotFill{Slots: slots, Value: value, Element: ir.Type{Name: "Event"}, Type: ir.Type{Name: "MutableSlice<Event>"}},
+		}}},
+	}}}
+}
+
+func TestSlotFillEmitsInitializationLoop(t *testing.T) {
+	program := testProgramWithSlotFill(t)
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "_wrela_test_slot_fill")
+	if !bytes.Contains(code, []byte{0x48, 0x39}) {
+		t.Fatalf("slot fill must compare loop index against capacity, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x89}) && !bytes.Contains(code, []byte{0x88}) {
+		t.Fatalf("slot fill must store the payload value inside the loop, got %#x", code)
+	}
+	for name, want := range map[string][]byte{
+		"Slots.capacity offset": {0x08, 0x00, 0x00, 0x00},
+		"Event storage size":    {0x08, 0x00, 0x00, 0x00},
+	} {
+		if !containsBytes(code, want) {
+			t.Fatalf("slot fill missing %s constant %x in %x", name, want, code)
+		}
+	}
+}
+
 func testProgramWithArenaReserve(t *testing.T) *ir.Program {
 	t.Helper()
 	memoryType := ir.Type{Name: "ExecutorMemory", Module: "machine.x86_64.executor_memory", Kind: ir.TypeKindClass}

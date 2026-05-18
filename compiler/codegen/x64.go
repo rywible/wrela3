@@ -716,6 +716,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitArenaPlace(e, v, frame)
 			case *ir.SlotWrite:
 				emitSlotWrite(e, v, frame)
+			case *ir.SlotFill:
+				emitSlotFill(e, v, frame)
 			case *ir.SliceGet:
 				emitSliceGet(e, v, frame)
 			case *ir.SliceSet:
@@ -962,6 +964,8 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 		return ctx.isHandleTypeKind(valueType(v).Kind) || ctx.isHandleType(valueType(v).Name)
 	case *ir.SliceGet:
 		return ctx.isDataType(v.Type)
+	case *ir.SlotFill:
+		return true
 	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaReserveArray, *ir.ArenaPlace:
 		return true
 	case *ir.Call:
@@ -1081,6 +1085,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.ArenaPlace:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.SliceGet:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.SlotFill:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ReliableTopicTryPublish:
 		return ctx.representationSize(v.Type.Name)
@@ -1709,6 +1715,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitArenaPlace(e, v, frame)
 		case *ir.SlotWrite:
 			emitSlotWrite(e, v, frame)
+		case *ir.SlotFill:
+			emitSlotFill(e, v, frame)
 		case *ir.SliceGet:
 			emitSliceGet(e, v, frame)
 		case *ir.SliceSet:
@@ -2285,6 +2293,102 @@ func emitSliceSet(e *Emitter, op *ir.SliceSet, frame Frame) {
 		return
 	}
 	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
+func emitSlotFill(e *Emitter, op *ir.SlotFill, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing slot fill object slot"})
+		return
+	}
+	slotsInfo, ok := e.ctx.typeInfo(valueType(op.Slots))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slots type: " + valueTypeName(op.Slots)})
+		return
+	}
+	addressField, ok := slotsInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing address field: " + slotsInfo.Name})
+		return
+	}
+	capacityField, ok := slotsInfo.Fields["capacity"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing capacity field: " + slotsInfo.Name})
+		return
+	}
+	sliceInfo, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slot fill return type: " + op.Type.Name})
+		return
+	}
+	returnAddressOffset := 0
+	if field, ok := sliceInfo.Fields["address"]; ok {
+		returnAddressOffset = fieldStorageOffset(field)
+	}
+	returnLengthOffset := 8
+	if field, ok := sliceInfo.Fields["length"]; ok {
+		returnLengthOffset = fieldStorageOffset(field)
+	}
+
+	slotsBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	capacity := asm.MustLookup("r11")
+	scaled := asm.MustLookup("r8")
+	elementReg := asm.MustLookup("rcx")
+	elementAddress := asm.MustLookup("rsi")
+
+	if !emitValueAddressToReg(e, frame, op.Slots, slotsBase) {
+		return
+	}
+	emitLoadMemToReg(e, address, slotsBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, capacity, slotsBase, int64(fieldStorageOffset(capacityField)), 64)
+	emitMovImmToReg(e, index, 0)
+
+	elementSize := e.ctx.storageSizeForType(op.Element)
+	if elementSize <= 0 {
+		elementSize = e.ctx.storageSizeForType(valueType(op.Value))
+	}
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+
+	start := e.newLabel("slot_fill_start")
+	done := e.newLabel("slot_fill_done")
+	e.bindLabel(start)
+	emitRegRegMove(e, asm.MustLookup("rax"), index)
+	emitRegRegMove(e, asm.MustLookup("rdx"), capacity)
+	emitCmpRegReg(e, asm.MustLookup("rax"), asm.MustLookup("rdx"))
+	e.emitJcc(0x83, done)
+	emitRegRegMove(e, scaled, index)
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, scaled, elementReg)
+	emitRegRegMove(e, elementAddress, address)
+	emitRegRegOp(e, 0x01, elementAddress, scaled)
+
+	emitPushReg(e, address)
+	emitPushReg(e, index)
+	emitPushReg(e, capacity)
+	if e.ctx.isDataType(op.Element) || e.ctx.isDataType(valueType(op.Value)) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, op.Element, elementAddress, 0)
+	} else {
+		emitCopyValueToMemoryRange(e, frame, op.Value, elementAddress, 0, elementSize)
+	}
+	emitPopReg(e, capacity)
+	emitPopReg(e, index)
+	emitPopReg(e, address)
+	emitAddImm(e, index, 1)
+	e.emitJmp(start)
+	e.bindLabel(done)
+
+	emitStoreSlotFromReg(e, address, objectSlot+returnAddressOffset, 64)
+	emitStoreSlotFromReg(e, capacity, objectSlot+returnLengthOffset, 64)
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
 }
 
 func emitSliceElementAddress(e *Emitter, frame Frame, slice ir.Value, indexValue ir.Value, elementSize int) (asm.Reg, bool) {
@@ -3394,6 +3498,8 @@ func valueType(value ir.Value) ir.Type {
 	case *ir.ArenaPlace:
 		return v.Type
 	case *ir.SliceGet:
+		return v.Type
+	case *ir.SlotFill:
 		return v.Type
 	case *ir.ReliableTopicTryPublish:
 		return v.Type
