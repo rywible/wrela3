@@ -129,3 +129,40 @@ func TestLexInvalidUnicodeCharacterAdvancesByRune(t *testing.T) {
 		t.Fatalf("EOF start = %d, want %d", got, want)
 	}
 }
+
+func TestLanguageExpressivenessKeywords(t *testing.T) {
+	src := "enum trait impl for where const static_assert match sizeof alignof"
+	toks, ds := All(src)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	want := []Kind{
+		KeywordEnum,
+		KeywordTrait,
+		KeywordImpl,
+		KeywordFor,
+		KeywordWhere,
+		KeywordConst,
+		KeywordStaticAssert,
+		KeywordMatch,
+		KeywordSizeof,
+		KeywordAlignof,
+	}
+	for i, want := range want {
+		if toks[i].Kind != want {
+			t.Fatalf("token %d = %#v, want %v", i, toks[i], want)
+		}
+	}
+}
+
+func TestFatArrowToken(t *testing.T) {
+	toks, ds := All("Option.None => { }")
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	got := []Kind{toks[0].Kind, toks[1].Kind, toks[2].Kind, toks[3].Kind}
+	want := []Kind{Identifier, Dot, Identifier, FatArrow}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("kinds = %#v, want %#v", got, want)
+	}
+}

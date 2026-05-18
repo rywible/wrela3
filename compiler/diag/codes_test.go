@@ -27,3 +27,34 @@ func TestExecutorTopicDiagnosticCodesExist(t *testing.T) {
 		}
 	}
 }
+
+func TestLanguageExpressivenessDiagnosticCodesExist(t *testing.T) {
+	codes := []string{
+		SEM0076, // generic declaration has duplicate type parameter
+		SEM0077, // generic type arity mismatch
+		SEM0078, // unknown type parameter or type argument
+		SEM0079, // generic or enum type arguments cannot be inferred
+		SEM0080, // unsized type used where layout is required
+		SEM0081, // missing trait implementation
+		SEM0082, // trait method signature mismatch
+		SEM0083, // ambiguous or overlapping impl
+		SEM0084, // non-exhaustive match
+		SEM0085, // impossible enum variant pattern
+		SEM0086, // const expression overflow
+		SEM0087, // non-const operand in const expression
+		SEM0088, // invalid sizeof or alignof operand
+		SEM0089, // static assertion failed
+		SEM0090, // slot count or reservation size overflow
+		SEM0091, // slots or slice lifetime escape
+		SEM0092, // protected memory-region view construction is not allowed here
+		SEM0093, // raw Slots memory cannot be read directly
+		SEM0094, // enum variant constructor is invalid
+		SEM0095, // match or if-let pattern binding is invalid
+		SEM0096, // protected view field access is not allowed here
+	}
+	for _, code := range codes {
+		if code == "" {
+			t.Fatal("empty diagnostic code")
+		}
+	}
+}
