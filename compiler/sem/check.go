@@ -364,6 +364,11 @@ func (c *checker) checkUnresolvedTypes() {
 				params := typeParamMapForCheck(d.TypeParams)
 				c.checkFieldsResolved(mod.Name, d.Fields, params)
 				c.checkMethodTypesResolved(mod.Name, d.Methods, params)
+			case *ast.EnumDecl:
+				params := typeParamMapForCheck(d.TypeParams)
+				for _, variant := range d.Variants {
+					c.checkFieldsResolved(mod.Name, variant.Fields, params)
+				}
 			case *ast.ClassDecl:
 				params := typeParamMapForCheck(d.TypeParams)
 				c.checkFieldsResolved(mod.Name, d.Fields, params)
@@ -718,7 +723,7 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 			continue
 		}
 
-		returnType := c.mustType(moduleName, legacyTypeName(method.Return))
+		returnType, _ := c.index.LookupTypeRef(moduleName, method.Return, typeParamMapForCheck(method.TypeParams))
 		if method.IsAsm {
 			continue
 		}
@@ -901,7 +906,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		return isNeverType(valueType)
 	case *ast.AssignStmt:
 		targetType := c.typeExpr(moduleName, s.Target, scope, ctx)
-		valueType := c.typeExpr(moduleName, s.Value, scope, ctx)
+		valueType := c.typeExprExpected(moduleName, s.Value, scope, ctx, targetType)
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
 		sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
 		targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
@@ -918,6 +923,10 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			elseTerminates := c.checkStmtList(moduleName, s.Else, NewScope(scope), expectedReturn, ctx)
 			return thenTerminates && elseTerminates
 		}
+	case *ast.IfLetStmt:
+		return c.checkIfLetStmt(moduleName, scope, expectedReturn, ctx, s)
+	case *ast.MatchStmt:
+		return c.checkMatchStmt(moduleName, scope, expectedReturn, ctx, s)
 	case *ast.WhileStmt:
 		if ctx == ContextOnHandler {
 			c.error(s.SpanV, diag.SEM0016, "on handler cannot contain loops")
@@ -985,7 +994,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			}
 			return true
 		}
-		got := c.typeExpr(moduleName, s.Value, scope, ctx)
+		got := c.typeExprExpected(moduleName, s.Value, scope, ctx, expectedReturn)
 		if ctx == ContextInterruptEvent {
 			if got != nil && expectedReturn != nil && (got.Module != expectedReturn.Module || got.Name != expectedReturn.Name) {
 				c.error(s.Value.Span(), diag.SEM0015, "interrupt event return type mismatch")
@@ -3049,6 +3058,20 @@ func (c *checker) checkOwnedDelegatedCrossing(span source.Span, valueType *Type)
 }
 
 func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx ContextKind) *Type {
+	return c.typeExprExpected(moduleName, expr, scope, ctx, nil)
+}
+
+func (c *checker) typeExprExpected(moduleName string, expr ast.Expr, scope *Scope, ctx ContextKind, expected *Type) *Type {
+	if expr == nil {
+		return nil
+	}
+	if e, ok := expr.(*ast.VariantConstructorExpr); ok {
+		return c.typeVariantConstructorExpr(moduleName, e, scope, ctx, expected)
+	}
+	return c.typeExprNoExpected(moduleName, expr, scope, ctx)
+}
+
+func (c *checker) typeExprNoExpected(moduleName string, expr ast.Expr, scope *Scope, ctx ContextKind) *Type {
 	switch e := expr.(type) {
 	case *ast.NameExpr:
 		if scope != nil {
@@ -3105,8 +3128,11 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 }
 
 func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorExpr, scope *Scope, ctx ContextKind) *Type {
-	typeName := legacyTypeName(expr.Type)
-	constructed := c.resolveType(moduleName, typeName)
+	typeName := expr.Type.String()
+	constructed, typeDiags := c.index.LookupTypeRef(moduleName, expr.Type, nil)
+	for _, d := range typeDiags {
+		c.diags = append(c.diags, d)
+	}
 	if constructed == nil {
 		c.error(expr.SpanV, diag.SEM0002, "unknown constructor type "+typeName)
 		return nil
@@ -3137,7 +3163,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		} else {
 			seenFields[arg.Name] = arg.SpanV
 		}
-		argType := c.typeExpr(moduleName, arg.Value, scope, ctx)
+		argType := c.typeExprExpected(moduleName, arg.Value, scope, ctx, field.Type)
 		fieldSpans[arg.Name] = arg.SpanV
 		c.checkTypeAssign(arg.SpanV, field.Type, argType)
 		argLifetime := c.lifetimeOfExpr(arg.Value, scope)
@@ -3541,7 +3567,7 @@ func (c *checker) typeAndVerifyCallArgs(moduleName string, method *Method, args 
 						break
 					}
 					used[p.Name] = true
-					c.checkTypeAssign(arg.SpanV, p.Type, c.typeExpr(moduleName, arg.Value, scope, ctx))
+					c.checkTypeAssign(arg.SpanV, p.Type, c.typeExprExpected(moduleName, arg.Value, scope, ctx, p.Type))
 					break
 				}
 			}
@@ -3562,7 +3588,7 @@ func (c *checker) typeAndVerifyCallArgs(moduleName string, method *Method, args 
 		pos++
 		if p.Name != "" {
 			used[p.Name] = true
-			c.checkTypeAssign(arg.SpanV, p.Type, c.typeExpr(moduleName, arg.Value, scope, ctx))
+			c.checkTypeAssign(arg.SpanV, p.Type, c.typeExprExpected(moduleName, arg.Value, scope, ctx, p.Type))
 		}
 	}
 	for _, p := range params {
@@ -3698,6 +3724,9 @@ func typesCompatible(target, value *Type) bool {
 		return false
 	}
 	if target == value {
+		return true
+	}
+	if target.Key() != "" && target.Key() == value.Key() {
 		return true
 	}
 	if isIntegerType(target) && isIntegerType(value) {

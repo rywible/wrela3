@@ -358,6 +358,12 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				diagOut = append(diagOut, localDiags...)
 				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
 				diagOut = append(diagOut, localDiags...)
+			case *ast.EnumDecl:
+				params, localDiags = buildTypeParamMap(d.TypeParams)
+				diagOut = append(diagOut, localDiags...)
+				typ.TypeParams = toTypeParams(d.TypeParams)
+				typ.EnumVariants, localDiags = buildEnumVariants(idx, mod.Name, d.Variants, params)
+				diagOut = append(diagOut, localDiags...)
 			case *ast.TraitDecl:
 				params, localDiags = buildTypeParamMap(d.TypeParams)
 				diagOut = append(diagOut, localDiags...)
@@ -552,6 +558,8 @@ func typeKind(decl ast.Decl) Kind {
 		return KindDriver
 	case *ast.DriverPathDecl:
 		return KindDriverPath
+	case *ast.EnumDecl:
+		return KindEnum
 	case *ast.TraitDecl:
 		return KindTrait
 	case *ast.ExecutorDecl:
@@ -574,6 +582,8 @@ func declarationName(decl ast.Decl) string {
 	case *ast.DriverDecl:
 		return d.Name
 	case *ast.DriverPathDecl:
+		return d.Name
+	case *ast.EnumDecl:
 		return d.Name
 	case *ast.TraitDecl:
 		return d.Name
@@ -616,6 +626,17 @@ func buildFields(idx *Index, moduleName string, fields []ast.Field, params map[s
 			Type: typ,
 			Span: field.Span,
 		})
+	}
+	return out, diags
+}
+
+func buildEnumVariants(idx *Index, moduleName string, variants []ast.EnumVariant, params map[string]*Type) ([]EnumVariant, []diag.Diagnostic) {
+	out := make([]EnumVariant, 0, len(variants))
+	var diags []diag.Diagnostic
+	for _, variant := range variants {
+		fields, fieldDiags := buildFields(idx, moduleName, variant.Fields, params)
+		diags = append(diags, fieldDiags...)
+		out = append(out, EnumVariant{Name: variant.Name, Fields: fields, Span: variant.Span})
 	}
 	return out, diags
 }

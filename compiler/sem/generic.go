@@ -204,6 +204,9 @@ func (idx *Index) completeInstantiation(key string, visiting map[string]bool) []
 	base := concrete.GenericOrigin
 	subst := substitutionFor(base, concrete.TypeArgs)
 	concrete.Fields = substituteFields(idx, base.Fields, subst)
+	if base.Kind == KindEnum {
+		concrete.EnumVariants = substituteEnumVariants(idx, base.EnumVariants, subst)
+	}
 	concrete.Methods = substituteMethods(idx, base.Methods, subst, concrete)
 	concrete.Where = substituteBounds(idx, base.Where, subst)
 	for _, field := range concrete.Fields {
@@ -211,8 +214,23 @@ func (idx *Index) completeInstantiation(key string, visiting map[string]bool) []
 			out = append(out, idx.completeInstantiation(field.Type.Key(), visiting)...)
 		}
 	}
+	for _, variant := range concrete.EnumVariants {
+		for _, field := range variant.Fields {
+			if field.Type != nil && field.Type.GenericOrigin != nil {
+				out = append(out, idx.completeInstantiation(field.Type.Key(), visiting)...)
+			}
+		}
+	}
 	out = append(out, idx.checkConcreteBounds(concrete)...)
 	concrete.InstantiationComplete = true
+	return out
+}
+
+func substituteEnumVariants(idx *Index, variants []EnumVariant, subst substitution) []EnumVariant {
+	out := make([]EnumVariant, 0, len(variants))
+	for _, variant := range variants {
+		out = append(out, EnumVariant{Name: variant.Name, Fields: substituteFields(idx, variant.Fields, subst), Span: variant.Span})
+	}
 	return out
 }
 

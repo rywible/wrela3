@@ -159,7 +159,10 @@ func (c *checker) registerMethodLifetimeTargets() {
 					continue
 				}
 				marker := ContextNormalMethod
-				returnType := c.mustType(mod.Name, legacyTypeName(method.Return))
+				var returnType *Type
+				if method.Return.Name != "" {
+					returnType, _ = c.index.LookupTypeRef(mod.Name, method.Return, typeParamMapForCheck(method.TypeParams))
+				}
 				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
 					marker = ContextOwnershipTransferAuthorityMethod
 				}
@@ -272,7 +275,10 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		if p.Name == "self" {
 			continue
 		}
-		paramType := c.mustType(moduleName, legacyTypeName(p.Type))
+		paramType, _ := c.index.LookupTypeRef(moduleName, p.Type, typeParamMapForCheck(method.TypeParams))
+		if paramType == nil {
+			paramType = c.mustType(moduleName, legacyTypeName(p.Type))
+		}
 		scope.Define(p.Name, paramType)
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})

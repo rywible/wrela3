@@ -41,6 +41,32 @@ func payloadLayoutFromType(t *Type) (size uint64, align uint64, ok bool) {
 	if t.Kind == KindPrimitive {
 		return primitivePayloadLayout(t.Name)
 	}
+	if t.Kind == KindEnum {
+		enumSize, enumAlign := uint64(8), uint64(8)
+		for _, variant := range t.EnumVariants {
+			var offset uint64
+			var maxAlign uint64 = 1
+			for _, field := range variant.Fields {
+				fieldSize, fieldAlign, ok := semanticSizeAlign(field.Type)
+				if !ok {
+					return 0, 0, false
+				}
+				offset = alignPayloadOffset(offset, fieldAlign)
+				offset += fieldSize
+				if fieldAlign > maxAlign {
+					maxAlign = fieldAlign
+				}
+			}
+			payload := alignPayloadOffset(offset, maxAlign)
+			if 8+payload > enumSize {
+				enumSize = 8 + payload
+			}
+			if maxAlign > enumAlign {
+				enumAlign = maxAlign
+			}
+		}
+		return alignPayloadOffset(enumSize, enumAlign), enumAlign, true
+	}
 	if t.Kind != KindData && t.Kind != KindClass {
 		return 0, 0, false
 	}

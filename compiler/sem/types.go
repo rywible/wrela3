@@ -17,6 +17,7 @@ const (
 	KindDriverPath
 	KindExecutor
 	KindImage
+	KindEnum
 	KindTrait
 	KindTypeParam
 )
@@ -37,6 +38,8 @@ func (k Kind) String() string {
 		return "executor"
 	case KindImage:
 		return "image"
+	case KindEnum:
+		return "enum"
 	case KindTrait:
 		return "trait"
 	case KindTypeParam:
@@ -63,6 +66,12 @@ type Field struct {
 	Span source.Span
 }
 
+type EnumVariant struct {
+	Name   string
+	Fields []Field
+	Span   source.Span
+}
+
 type Method struct {
 	Name               string
 	TypeParams         []TypeParam
@@ -85,6 +94,7 @@ type Type struct {
 	Unique                bool
 	DelegatedOnly         bool
 	Fields                []Field
+	EnumVariants          []EnumVariant
 	Methods               []Method
 	TypeParams            []TypeParam
 	TypeArgs              []*Type
