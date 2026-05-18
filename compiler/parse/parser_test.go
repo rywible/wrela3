@@ -36,6 +36,16 @@ func TestParseDecls(t *testing.T) {
 		t.Fatalf("driver diagnostics = %#v", ds)
 	}
 
+	_, ds = parseModuleForTest(t, "module m\nunique trait Bad {}\n")
+	if len(ds) != 1 || ds[0].Code != diag.PAR0002 {
+		t.Fatalf("unique trait diagnostics = %#v, want PAR0002", ds)
+	}
+
+	_, ds = parseModuleForTest(t, "module m\nunique impl Publisher<U64> for TopicPublisher<U64>\n")
+	if len(ds) != 1 || ds[0].Code != diag.PAR0002 {
+		t.Fatalf("unique impl diagnostics = %#v, want PAR0002", ds)
+	}
+
 	mod, ds := parseModuleForTest(t, "module m\nfn bad() {}")
 	if len(ds) != 1 || ds[0].Code != diag.PAR0002 {
 		t.Fatalf("module-scope fn diagnostics = %#v, want PAR0002", ds)
@@ -325,6 +335,63 @@ class C {
 }`)
 	if len(ds) == 0 {
 		t.Fatalf("expected parse diagnostic")
+	}
+}
+
+func TestParseGenericDeclsAndTypes(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module parser.generics
+
+data FixedBuffer<T> where T: Copyable {
+    slots: Slots<T>
+    length: U64
+}
+
+trait Subscription<T> {
+    fn try_next(self) -> Option<T>
+}
+
+trait Publisher<T> {
+    fn publish(self, value: T)
+}
+
+class DrainLoop<S, T> where S: Subscription<T> {
+    input: S
+    field: Topic<TimerTickPayload>
+    fn poll(self, topic: Topic<TimerTickPayload>) -> Topic<TimerTickPayload> {
+        return self.input.try_next()
+    }
+}
+
+impl Publisher<T> for TopicPublisher<T>
+`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	data := mod.Decls[0].(*ast.DataDecl)
+	if data.TypeParams[0].Name != "T" || data.Fields[0].Type.String() != "Slots<T>" {
+		t.Fatalf("generic data parsed incorrectly: %#v", data)
+	}
+	trait := mod.Decls[1].(*ast.TraitDecl)
+	if trait.Name != "Subscription" || trait.Methods[0].Return.String() != "Option<T>" {
+		t.Fatalf("trait parsed incorrectly: %#v", trait)
+	}
+	class := mod.Decls[3].(*ast.ClassDecl)
+	if len(class.Where) != 1 || class.Where[0].Trait.String() != "Subscription<T>" {
+		t.Fatalf("where bounds = %#v", class.Where)
+	}
+	if class.Methods[0].Params[1].Type.String() != "Topic<TimerTickPayload>" {
+		t.Fatalf("method parameter type = %#v", class.Methods[0].Params[1].Type)
+	}
+	if class.Methods[0].Return.String() != "Topic<TimerTickPayload>" {
+		t.Fatalf("method return type = %q", class.Methods[0].Return)
+	}
+	if class.Fields[1].Type.String() != "Topic<TimerTickPayload>" {
+		t.Fatalf("class field = %#v", class.Fields[1])
+	}
+	impl := mod.Decls[4].(*ast.ImplDecl)
+	if impl.Trait.String() != "Publisher<T>" || impl.For.String() != "TopicPublisher<T>" {
+		t.Fatalf("impl = %#v", impl)
 	}
 }
 

@@ -93,6 +93,17 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 	tok := p.next()
 	switch tok.Kind {
 	case lex.Identifier, lex.KeywordNever:
+		if tok.Kind == lex.Identifier && p.peek().Kind == lex.Less && (!startsUpper(tok.Text) || !p.looksLikeGenericConstructor()) {
+			return &ast.NameExpr{Name: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
+		}
+		if tok.Kind == lex.Identifier && p.peek().Kind != lex.LParen && p.peek().Kind != lex.Less {
+			return &ast.NameExpr{Name: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
+		}
+		p.idx--
+		typ, ds := p.parseTypeRef()
+		if len(ds) != 0 {
+			return nil, ds
+		}
 		if p.match(lex.LParen) {
 			args, ds := p.parseNamedArgs()
 			if len(ds) != 0 {
@@ -103,12 +114,15 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 				return nil, ds
 			}
 			return &ast.ConstructorExpr{
-				Type:  ast.TypeRef{Name: tok.Text},
+				Type:  typ,
 				Args:  args,
 				SpanV: p.span(tok.Start, close.End),
 			}, nil
 		}
-		return &ast.NameExpr{Name: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
+		if len(typ.Args) != 0 {
+			return nil, p.err(tok, diag.PAR0001, "generic type arguments are only valid in constructor or type positions")
+		}
+		return &ast.NameExpr{Name: typ.Name, SpanV: p.span(tok.Start, tok.End)}, nil
 	case lex.Integer:
 		return &ast.IntLiteral{Value: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
 	case lex.String:
@@ -131,6 +145,39 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 	}
 }
 
+func (p *Parser) looksLikeGenericConstructor() bool {
+	if p.peek().Kind != lex.Less {
+		return false
+	}
+	depth := 0
+	for i := p.idx; i < len(p.toks); i++ {
+		switch p.toks[i].Kind {
+		case lex.Less:
+			depth++
+		case lex.Greater:
+			depth--
+			if depth == 0 {
+				return i+1 < len(p.toks) && p.toks[i+1].Kind == lex.LParen
+			}
+		case lex.ShiftRight:
+			depth--
+			if depth == 0 {
+				return i+1 < len(p.toks) && p.toks[i+1].Kind == lex.LParen
+			}
+			depth--
+			if depth == 0 {
+				return i+1 < len(p.toks) && p.toks[i+1].Kind == lex.LParen
+			}
+			if depth < 0 {
+				return false
+			}
+		case lex.EOF, lex.Newline, lex.Semicolon, lex.RBrace:
+			return false
+		}
+	}
+	return false
+}
+
 func (p *Parser) expectSelectorName(msg string) (lex.Token, []diag.Diagnostic) {
 	tok := p.peek()
 	if isSelectorNameToken(tok) {
@@ -145,4 +192,12 @@ func isSelectorNameToken(tok lex.Token) bool {
 
 func isExpressionNameToken(tok lex.Token) bool {
 	return isNameToken(tok) || tok.Kind == lex.KeywordInterrupt || tok.Kind == lex.KeywordStart || tok.Kind == lex.KeywordExecutor
+}
+
+func startsUpper(s string) bool {
+	if s == "" {
+		return false
+	}
+	r := rune(s[0])
+	return r >= 'A' && r <= 'Z'
 }
