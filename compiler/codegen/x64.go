@@ -716,6 +716,10 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitArenaPlace(e, v, frame)
 			case *ir.SlotWrite:
 				emitSlotWrite(e, v, frame)
+			case *ir.SliceGet:
+				emitSliceGet(e, v, frame)
+			case *ir.SliceSet:
+				emitSliceSet(e, v, frame)
 			case *ir.FrameEnd:
 				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
@@ -956,6 +960,8 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 		return true
 	case *ir.EnumPayloadExtract:
 		return ctx.isHandleTypeKind(valueType(v).Kind) || ctx.isHandleType(valueType(v).Name)
+	case *ir.SliceGet:
+		return ctx.isDataType(v.Type)
 	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaReserveArray, *ir.ArenaPlace:
 		return true
 	case *ir.Call:
@@ -1073,6 +1079,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.ArenaReserveArray:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaPlace:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.SliceGet:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ReliableTopicTryPublish:
 		return ctx.representationSize(v.Type.Name)
@@ -1701,6 +1709,10 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitArenaPlace(e, v, frame)
 		case *ir.SlotWrite:
 			emitSlotWrite(e, v, frame)
+		case *ir.SliceGet:
+			emitSliceGet(e, v, frame)
+		case *ir.SliceSet:
+			emitSliceSet(e, v, frame)
 		case *ir.FrameEnd:
 			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
@@ -2229,6 +2241,85 @@ func emitSlotWrite(e *Emitter, op *ir.SlotWrite, frame Frame) {
 		return
 	}
 	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
+func emitSliceGet(e *Emitter, op *ir.SliceGet, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	elementSize := e.ctx.storageSizeForType(op.Type)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	address, ok := emitSliceElementAddress(e, frame, op.Slice, op.Index, elementSize)
+	if !ok {
+		return
+	}
+	if e.ctx.isDataType(op.Type) {
+		objectSlot, ok := frame.ObjectSlots[op]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing slice get object slot"})
+			return
+		}
+		emitDeepCopyObjectToAddressAsType(e, op.Type, address, 0, asm.MustLookup("rbp"), int64(objectSlot))
+		emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+		emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+		return
+	}
+	emitCopyMemoryToStackRange(e, address, 0, outSlot, elementSize)
+}
+
+func emitSliceSet(e *Emitter, op *ir.SliceSet, frame Frame) {
+	valueType := valueType(op.Value)
+	elementSize := e.ctx.storageSizeForType(valueType)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	address, ok := emitSliceElementAddress(e, frame, op.Slice, op.Index, elementSize)
+	if !ok {
+		return
+	}
+	if e.ctx.isDataType(valueType) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, valueType, address, 0)
+		return
+	}
+	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
+func emitSliceElementAddress(e *Emitter, frame Frame, slice ir.Value, indexValue ir.Value, elementSize int) (asm.Reg, bool) {
+	sliceBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	length := asm.MustLookup("r11")
+	elementReg := asm.MustLookup("rcx")
+
+	if !emitValueAddressToReg(e, frame, slice, sliceBase) {
+		return asm.Reg{}, false
+	}
+	sliceInfo, ok := e.ctx.typeInfo(valueType(slice))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slice type: " + valueTypeName(slice)})
+		return asm.Reg{}, false
+	}
+	addressField, ok := sliceInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slice type missing address field: " + sliceInfo.Name})
+		return asm.Reg{}, false
+	}
+	lengthField, ok := sliceInfo.Fields["length"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slice type missing length field: " + sliceInfo.Name})
+		return asm.Reg{}, false
+	}
+	emitLoadMemToReg(e, address, sliceBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, length, sliceBase, int64(fieldStorageOffset(lengthField)), 64)
+	emitLoadValue(e, frame, indexValue, index)
+	emitIndexBoundsCheck(e, index, length)
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, index, elementReg)
+	emitRegRegOp(e, 0x01, address, index)
+	return address, true
 }
 
 func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg, align asm.Reg) (asm.Reg, bool) {
@@ -3301,6 +3392,8 @@ func valueType(value ir.Value) ir.Type {
 	case *ir.ArenaReserveArray:
 		return v.Type
 	case *ir.ArenaPlace:
+		return v.Type
+	case *ir.SliceGet:
 		return v.Type
 	case *ir.ReliableTopicTryPublish:
 		return v.Type

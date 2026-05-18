@@ -148,6 +148,14 @@ func genericMemoryTypeInfos() map[string]ir.TypeInfo {
 			"address":  {Name: "address", Type: phys, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
 			"capacity": {Name: "capacity", Type: u64, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
 		}, FieldOrder: []string{"address", "capacity"}},
+		"Slice<Event>": {Name: "Slice<Event>", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16, Fields: map[string]ir.FieldInfo{
+			"address": {Name: "address", Type: phys, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+			"length":  {Name: "length", Type: u64, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+		}, FieldOrder: []string{"address", "length"}},
+		"MutableSlice<Event>": {Name: "MutableSlice<Event>", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16, Fields: map[string]ir.FieldInfo{
+			"address": {Name: "address", Type: phys, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+			"length":  {Name: "length", Type: u64, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+		}, FieldOrder: []string{"address", "length"}},
 	}
 }
 
@@ -230,6 +238,46 @@ func TestSlotWriteBounds(t *testing.T) {
 	}
 	if !codeCallsSymbol(t, image, "_wrela_test_slot_write", "_wrela_memory_oom") {
 		t.Fatal("slot write must branch/call to _wrela_memory_oom when index >= capacity")
+	}
+}
+
+func testProgramWithSliceGetSet(t *testing.T) *ir.Program {
+	t.Helper()
+	slice := &ir.Local{Symbol: "slice", Type: ir.Type{Name: "MutableSlice<Event>"}}
+	index := &ir.ConstInt{Symbol: "index", Value: 0, Type: ir.Type{Name: "U64"}}
+	value := &ir.Local{Symbol: "event", Type: ir.Type{Name: "Event"}}
+	return &ir.Program{Types: genericMemoryTypeInfos(), Functions: []ir.Function{{
+		Symbol: "_wrela_test_slice_bounds",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			slice,
+			index,
+			value,
+			&ir.SliceGet{Slice: slice, Index: index, Type: ir.Type{Name: "Event", Kind: ir.TypeKindData}},
+			&ir.SliceSet{Slice: slice, Index: index, Value: value},
+		}}},
+	}}}
+}
+
+func TestSliceGetSetBounds(t *testing.T) {
+	program := testProgramWithSliceGetSet(t)
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "_wrela_test_slice_bounds")
+	if !bytes.Contains(code, []byte{0x0F, 0x83}) && !bytes.Contains(code, []byte{0x73}) {
+		t.Fatalf("slice get/set must emit bounds branch, got %#x", code)
+	}
+	for name, want := range map[string][]byte{
+		"MutableSlice.length offset": {0x08, 0x00, 0x00, 0x00},
+		"Event storage size":         {0x08, 0x00, 0x00, 0x00},
+	} {
+		if !containsBytes(code, want) {
+			t.Fatalf("slice get/set missing %s constant %x in %x", name, want, code)
+		}
+	}
+	if !codeCallsSymbol(t, image, "_wrela_test_slice_bounds", "_wrela_memory_oom") {
+		t.Fatal("slice get/set must branch/call to _wrela_memory_oom when index >= length")
 	}
 }
 
