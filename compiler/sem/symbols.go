@@ -10,10 +10,12 @@ import (
 )
 
 type Index struct {
-	Modules  map[string]*ast.Module
-	ByModule map[string]map[string]*Type
-	ByImport map[string]map[string]*Type
-	Images   []*ast.ImageDecl
+	Modules      map[string]*ast.Module
+	ByModule     map[string]map[string]*Type
+	ByImport     map[string]map[string]*Type
+	Consts       map[string]map[string]ConstValue
+	ConstImports map[string]map[string]ConstValue
+	Images       []*ast.ImageDecl
 
 	InterruptEvents    map[string]map[string]*ast.InterruptEventDecl
 	OnHandlers         map[string]map[string]map[string]*ast.OnHandlerDecl
@@ -22,17 +24,50 @@ type Index struct {
 	primitives         map[string]*Type
 }
 
+type ConstValue struct {
+	Type  *Type
+	Value uint64
+	Span  source.Span
+}
+
 func NewIndex() *Index {
 	return &Index{
 		Modules:            map[string]*ast.Module{},
 		ByModule:           map[string]map[string]*Type{},
 		ByImport:           map[string]map[string]*Type{},
+		Consts:             map[string]map[string]ConstValue{},
+		ConstImports:       map[string]map[string]ConstValue{},
 		InterruptEvents:    map[string]map[string]*ast.InterruptEventDecl{},
 		OnHandlers:         map[string]map[string]map[string]*ast.OnHandlerDecl{},
 		Instantiations:     map[string]*Type{},
 		InstantiationOrder: []string{},
 		primitives:         map[string]*Type{},
 	}
+}
+
+func (idx *Index) LookupConst(moduleName, name string) (ConstValue, bool) {
+	if idx == nil {
+		return ConstValue{}, false
+	}
+	if m := idx.Consts[moduleName]; m != nil {
+		if v, ok := m[name]; ok {
+			return v, true
+		}
+	}
+	if m := idx.ConstImports[moduleName]; m != nil {
+		if v, ok := m[name]; ok {
+			return v, true
+		}
+	}
+	return ConstValue{}, false
+}
+
+func (idx *Index) ConstValue(moduleName, name string) uint64 {
+	v, ok := idx.LookupConst(moduleName, name)
+	if !ok {
+		return 0
+	}
+	return v.Value
 }
 
 func (idx *Index) Lookup(moduleName, name string) (*Type, bool) {
@@ -142,11 +177,18 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 
 	for _, mod := range modules {
 		idx.Modules[mod.Name] = mod
-		if _, ok := idx.ByModule[mod.Name]; ok {
-			continue
+		if _, ok := idx.ByModule[mod.Name]; !ok {
+			idx.ByModule[mod.Name] = map[string]*Type{}
 		}
-		idx.ByModule[mod.Name] = map[string]*Type{}
-		idx.ByImport[mod.Name] = map[string]*Type{}
+		if _, ok := idx.ByImport[mod.Name]; !ok {
+			idx.ByImport[mod.Name] = map[string]*Type{}
+		}
+		if _, ok := idx.Consts[mod.Name]; !ok {
+			idx.Consts[mod.Name] = map[string]ConstValue{}
+		}
+		if _, ok := idx.ConstImports[mod.Name]; !ok {
+			idx.ConstImports[mod.Name] = map[string]ConstValue{}
+		}
 	}
 
 	for _, mod := range modules {
@@ -171,6 +213,9 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 
 			kind := typeKind(decl)
 			if kind == -1 {
+				if d, ok := decl.(*ast.ConstDecl); ok {
+					idx.Consts[mod.Name][d.Name] = ConstValue{Span: d.SpanV}
+				}
 				continue
 			}
 			typ := &Type{Module: mod.Name, Name: name, Kind: kind}
@@ -201,7 +246,18 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				continue
 			}
 			for _, name := range imp.Names {
-				if idx.ByModule[mod.Name][name] != nil || seenImports[name] {
+				if _, ok := idx.ByModule[mod.Name][name]; ok || seenImports[name] {
+					diagOut = append(diagOut, diag.Diagnostic{
+						Phase:    "sem",
+						Code:     diag.SEM0001,
+						Severity: diag.Error,
+						Start:    imp.Span.Start,
+						End:      imp.Span.End,
+						Message:  "duplicate declaration " + name,
+					})
+					continue
+				}
+				if _, ok := idx.Consts[mod.Name][name]; ok {
 					diagOut = append(diagOut, diag.Diagnostic{
 						Phase:    "sem",
 						Code:     diag.SEM0001,
@@ -215,6 +271,10 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				seenImports[name] = true
 				if typ, ok := idx.ByModule[importedMod.Name][name]; ok && typ != nil {
 					imported[name] = typ
+					continue
+				}
+				if cv, ok := idx.Consts[importedMod.Name][name]; ok {
+					idx.ConstImports[mod.Name][name] = cv
 					continue
 				}
 				diagOut = append(diagOut, diag.Diagnostic{
@@ -443,6 +503,8 @@ func declarationName(decl ast.Decl) string {
 	case *ast.DataDecl:
 		return d.Name
 	case *ast.ClassDecl:
+		return d.Name
+	case *ast.ConstDecl:
 		return d.Name
 	case *ast.DriverDecl:
 		return d.Name

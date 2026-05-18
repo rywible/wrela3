@@ -255,6 +255,8 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkHiddenSchedulerVocabulary()
 	c.checkImageSignatures()
 	c.checkUnresolvedTypes()
+	c.checkConstDecls()
+	c.checkStaticAsserts()
 	c.checkDeclBodiesAndConstructors()
 	c.finalizeInterruptTopicRoutes()
 	c.checkDelegatedOnlyCrossing()
@@ -388,6 +390,8 @@ func (c *checker) checkUnresolvedTypes() {
 						c.error(handler.SpanV, diag.SEM0002, "unknown type "+paramTypeName)
 					}
 				}
+			case *ast.ConstDecl:
+				c.checkTypeRefResolved(mod.Name, d.Type, nil, d.SpanV)
 			case *ast.ImageDecl:
 				for _, phase := range d.Phases {
 					c.checkParamsResolved(mod.Name, phase.Params, nil)
@@ -396,6 +400,116 @@ func (c *checker) checkUnresolvedTypes() {
 						c.error(phase.SpanV, diag.SEM0002, "unknown type "+returnType)
 					}
 				}
+			}
+		}
+	}
+}
+
+func (c *checker) checkConstDecls() {
+	done := map[string]bool{}
+	active := map[string]bool{}
+	for _, mod := range c.modules {
+		c.checkModuleConstDecls(mod.Name, done, active)
+	}
+}
+
+func (c *checker) checkModuleConstDecls(moduleName string, done map[string]bool, active map[string]bool) {
+	if done[moduleName] {
+		return
+	}
+	mod := c.index.Modules[moduleName]
+	if mod == nil {
+		return
+	}
+	if active[moduleName] {
+		c.error(mod.Span, diag.SEM0087, "cyclic const import")
+		return
+	}
+	active[moduleName] = true
+	for _, imp := range mod.Imports {
+		if c.index.Modules[imp.Path] != nil {
+			c.checkModuleConstDecls(imp.Path, done, active)
+		}
+	}
+	delete(active, moduleName)
+	c.refreshConstImports(mod)
+
+	scope := map[string]ConstValue{}
+	for name, cv := range c.index.Consts[moduleName] {
+		if cv.Type != nil {
+			scope[name] = cv
+		}
+	}
+	for _, decl := range mod.Decls {
+		constDecl, ok := decl.(*ast.ConstDecl)
+		if !ok {
+			continue
+		}
+		if cv := c.index.Consts[moduleName][constDecl.Name]; cv.Type != nil {
+			scope[constDecl.Name] = cv
+			continue
+		}
+		typ, ds := c.index.LookupTypeRef(mod.Name, constDecl.Type, nil)
+		if len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
+			continue
+		}
+		if typ == nil {
+			continue
+		}
+		value, valueDiags := c.evalConstExpr(mod.Name, constDecl.Value, scope)
+		if len(valueDiags) != 0 {
+			c.diags = append(c.diags, valueDiags...)
+			continue
+		}
+		constValue := ConstValue{
+			Type:  typ,
+			Value: value,
+			Span:  constDecl.SpanV,
+		}
+		c.index.Consts[mod.Name][constDecl.Name] = constValue
+		scope[constDecl.Name] = constValue
+	}
+	c.refreshConstImports(mod)
+	done[moduleName] = true
+}
+
+func (c *checker) refreshConstImports(mod *ast.Module) {
+	if mod == nil || c.index == nil {
+		return
+	}
+	if c.index.ConstImports[mod.Name] == nil {
+		c.index.ConstImports[mod.Name] = map[string]ConstValue{}
+	}
+	for _, imp := range mod.Imports {
+		for _, name := range imp.Names {
+			if cv, ok := c.index.Consts[imp.Path][name]; ok {
+				c.index.ConstImports[mod.Name][name] = cv
+			}
+		}
+	}
+}
+
+func (c *checker) checkStaticAsserts() {
+	for _, mod := range c.modules {
+		scope := map[string]ConstValue{}
+		for name, cv := range c.index.Consts[mod.Name] {
+			if cv.Type != nil {
+				scope[name] = cv
+			}
+		}
+		for _, decl := range mod.Decls {
+			assert, ok := decl.(*ast.StaticAssertDecl)
+			if !ok {
+				continue
+			}
+			value, ds := c.evalConstExpr(mod.Name, assert.Expr, scope)
+			if len(ds) != 0 {
+				c.diags = append(c.diags, ds...)
+				continue
+			}
+			if value == 0 {
+				c.error(assert.SpanV, diag.SEM0089, "static assertion failed: "+assert.Message)
 			}
 		}
 	}

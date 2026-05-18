@@ -78,6 +78,32 @@ func primitivePayloadLayout(name string) (size uint64, align uint64, ok bool) {
 	}
 }
 
+func semanticSizeAlign(t *Type) (size uint64, align uint64, ok bool) {
+	if t == nil {
+		return 0, 0, false
+	}
+	if t.Kind == KindPrimitive {
+		return primitivePayloadLayout(t.Name)
+	}
+	if t.Kind != KindData && t.Kind != KindClass {
+		return 0, 0, false
+	}
+	var offset uint64
+	var maxAlign uint64 = 1
+	for _, field := range t.Fields {
+		fieldSize, fieldAlign, ok := semanticSizeAlign(field.Type)
+		if !ok {
+			return 0, 0, false
+		}
+		offset = alignPayloadOffset(offset, fieldAlign)
+		offset += fieldSize
+		if fieldAlign > maxAlign {
+			maxAlign = fieldAlign
+		}
+	}
+	return alignPayloadOffset(offset, maxAlign), maxAlign, true
+}
+
 func alignPayloadOffset(offset uint64, align uint64) uint64 {
 	if align == 0 || offset%align == 0 {
 		return offset
