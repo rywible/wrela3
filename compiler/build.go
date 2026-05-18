@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	stdbytes "bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -115,14 +116,17 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		if ds := append(sem.ValidateAuthorityAudit(imgReport), sem.ValidateAuthorityAuditContent(imgReport)...); len(ds) != 0 {
 			return BuildResult{}, DiagnosticError{Diagnostics: ds}
 		}
-		data, err := json.MarshalIndent(imgReport, "", "  ")
-		if err != nil {
+		var buf stdbytes.Buffer
+		encoder := json.NewEncoder(&buf)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(imgReport); err != nil {
 			return BuildResult{}, err
 		}
 		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 			return BuildResult{}, err
 		}
-		if err := os.WriteFile(reportPath, append(data, '\n'), 0o644); err != nil {
+		if err := os.WriteFile(reportPath, buf.Bytes(), 0o644); err != nil {
 			return BuildResult{}, err
 		}
 		result.ReportPath = reportPath
