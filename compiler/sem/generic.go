@@ -221,6 +221,16 @@ func (idx *Index) completeInstantiation(key string, visiting map[string]bool) []
 			}
 		}
 	}
+	for _, method := range concrete.Methods {
+		if method.Return != nil && method.Return.GenericOrigin != nil {
+			out = append(out, idx.completeInstantiation(method.Return.Key(), visiting)...)
+		}
+		for _, param := range method.Params {
+			if param.Type != nil && param.Type.GenericOrigin != nil {
+				out = append(out, idx.completeInstantiation(param.Type.Key(), visiting)...)
+			}
+		}
+	}
 	out = append(out, idx.checkConcreteBounds(concrete)...)
 	concrete.InstantiationComplete = true
 	return out

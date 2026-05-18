@@ -61,6 +61,32 @@ data Root {
 	}
 }
 
+func TestGenericMethodReturnInstantiationCompletesMethods(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module machine.x86_64.executor_memory
+data Event { kind: U64 }
+data MutableSlice<T> {
+    address: U64
+    length: U64
+    asm fn get(self, index: U64) -> T {}
+}
+data Slots<T> {
+    asm fn fill(self, value: T) -> MutableSlice<T> {}
+}
+class Worker {
+    fn run(self, slots: Slots<Event>) {
+        let mutable = slots.fill(value = Event(kind = 1))
+        let event = mutable.get(index = 0)
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
 func TestGenericArityMismatch(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.generics
