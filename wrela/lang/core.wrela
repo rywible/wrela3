@@ -1,0 +1,23 @@
+module wrela.lang.core
+
+data Unit {}
+
+enum Option<T> {
+    None
+    Some(value: T)
+}
+
+enum Result<T, E> {
+    Ok(value: T)
+    Err(error: E)
+}
+
+trait Publisher<T> {
+    fn publish(self, value: T)
+}
+
+trait Subscription<T> {
+    fn try_next(self) -> Option<T>
+    fn arm_wait(self)
+    fn is_wait_armed(self) -> Bool
+}

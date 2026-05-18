@@ -40,6 +40,16 @@ func checkedProgramFromSourceForTest(t *testing.T, sourceText string) *sem.Check
 	return checked
 }
 
+func lowerSourceForTest(t *testing.T, sourceText string) *Program {
+	t.Helper()
+	checked := checkedProgramForTest(t, sourceText)
+	program, ds := Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("lower diagnostics: %#v", ds)
+	}
+	return program
+}
+
 func repoRootForIRTest(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
