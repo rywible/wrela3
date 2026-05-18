@@ -366,6 +366,171 @@ image App {
 	}
 }
 
+func memoryViewPreludeForTest() string {
+	return `
+module machine.x86_64.executor_memory
+data BufferFull {}
+data ExecutorMemory {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+    fn frame(self, length: U64) -> ArenaFrame {
+        return ArenaFrame(arena_base = self.arena_base, arena_length = length, next_offset = 0)
+    }
+}
+data ArenaFrame {
+    arena_base: PhysicalAddress
+    arena_length: U64
+    next_offset: U64
+}
+data Slots<T> {
+    address: PhysicalAddress
+    capacity: U64
+    fn write(self, index: U64, value: T) {}
+}
+data Slice<T> { address: PhysicalAddress; length: U64 }
+data MutableSlice<T> { address: PhysicalAddress; length: U64 }
+`
+}
+
+func TestReserveArrayReturnsFrameLifetimeSlots(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { Slots, ExecutorMemory } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            slots.write(index = 0, value = Event(kind = 1))
+        }
+        while true {}
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
+func TestRawSlotsReadRejected(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ExecutorMemory } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            let bad = slots.get(index = 0)
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0093) {
+		t.Fatalf("diagnostics = %#v, want SEM0093", ds)
+	}
+}
+
+func TestReserveArraySizeOverflowDiagnostic(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ExecutorMemory } from machine.x86_64.executor_memory
+data Event { a: U64; b: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 18446744073709551615)
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0090) {
+		t.Fatalf("diagnostics = %#v, want SEM0090", ds)
+	}
+}
+
+func TestSlotsLifetimeEscapeDiagnostic(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ExecutorMemory, Slots } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    escaped: Slots<Event>
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            self.escaped = slots
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0091) {
+		t.Fatalf("diagnostics = %#v, want SEM0091", ds)
+	}
+}
+
+func TestSlotsAddressProtectedDiagnostic(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ExecutorMemory } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            let address = slots.address
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0096) {
+		t.Fatalf("diagnostics = %#v, want SEM0096", ds)
+	}
+}
+
+func TestSlotsReturnLifetimeEscapeDiagnostic(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ArenaFrame, Slots } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+class Parser {
+    fn leak(self, frame: ArenaFrame) -> Slots<Event> {
+        return frame.reserve_array(Event, count = 16)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0091) {
+		t.Fatalf("diagnostics = %#v, want SEM0091", ds)
+	}
+}
+
 func TestPlaceRejectsNonConstructor(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module machine.x86_64.executor_memory

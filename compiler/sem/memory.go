@@ -2,6 +2,7 @@ package sem
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -96,6 +97,44 @@ func ClassifyMemoryType(t *Type) MemoryKind {
 func IsArenaType(t *Type) bool {
 	kind := ClassifyMemoryType(t)
 	return kind == MemoryKindRootArena || kind == MemoryKindFrameArena
+}
+
+func isSlotsType(t *Type) bool {
+	return t != nil && t.Module == "machine.x86_64.executor_memory" && t.Name == "Slots" && len(t.TypeArgs) == 1
+}
+
+func isSliceType(t *Type) bool {
+	return t != nil &&
+		t.Module == "machine.x86_64.executor_memory" &&
+		(t.Name == "Slice" || t.Name == "MutableSlice") &&
+		len(t.TypeArgs) == 1
+}
+
+func isProtectedViewType(t *Type) bool {
+	if isSlotsType(t) || isSliceType(t) {
+		return true
+	}
+	switch qualifiedTypeName(t) {
+	case "platform.hardware.bytes.Mmio",
+		"platform.uefi.types.FirmwareSlice",
+		"platform.hardware.bytes.Volatile",
+		"platform.hardware.memory.DmaBuffer":
+		return true
+	default:
+		return false
+	}
+}
+
+func typeHasKnownLayout(t *Type) bool {
+	_, _, ok := semanticSizeAlign(t)
+	return ok
+}
+
+func isTrustedAuthorityModule(moduleName string) bool {
+	return strings.HasPrefix(moduleName, "platform.hardware.") ||
+		strings.HasPrefix(moduleName, "platform.uefi.") ||
+		strings.HasPrefix(moduleName, "platform.acpi.") ||
+		strings.HasPrefix(moduleName, "machine.x86_64.")
 }
 
 func IsPhysicalRegionAuthorityType(t *Type) bool {
@@ -326,6 +365,9 @@ func parameterCanCarryHiddenLifetime(typ *Type) bool {
 func typeCanCarryHiddenLifetime(typ *Type) bool {
 	if isValueOnlyAuthorityRecord(typ) {
 		return false
+	}
+	if isSlotsType(typ) || isSliceType(typ) {
+		return true
 	}
 	return typ != nil && (typ.Kind == KindData || typ.Kind == KindClass || ClassifyMemoryType(typ) == MemoryKindFrameArena)
 }
@@ -586,6 +628,17 @@ func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifeti
 	}
 }
 
+func (c *checker) rejectViewLifetimeEscape(span source.Span, typ *Type, value, target Lifetime) bool {
+	if !isSlotsType(typ) && !isSliceType(typ) {
+		return false
+	}
+	if c.lifetimeShorterThan(value, target) {
+		c.error(span, diag.SEM0091, "slots or slice lifetime escapes")
+		return true
+	}
+	return false
+}
+
 func (c *checker) recordLifetimeRequirement(value, target Lifetime) bool {
 	if c.currentMethodSummary == nil {
 		return false
@@ -728,13 +781,16 @@ func stricterSameScopeLifetime(a, b Lifetime) Lifetime {
 func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
 	recvType := c.typeExpr(moduleName, expr.Receiver, scope, ctx)
 	if !IsArenaType(recvType) {
+		if expr.Method == "reserve_array" {
+			c.error(expr.SpanV, diag.SEM0021, "reserve_array receiver must be ExecutorMemory or ArenaFrame")
+		}
 		return nil
 	}
 	receiverLifetime := c.lifetimeOfExpr(expr.Receiver, scope)
 	if receiverLifetime.Kind == LifetimeUnknown {
 		receiverLifetime = Lifetime{Kind: LifetimeExecutorRoot}
 	}
-	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve") {
+	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve" || expr.Method == "reserve_array") {
 		c.error(expr.SpanV, diag.SEM0016, "on handler cannot place or reserve arena memory")
 		return nil
 	}
@@ -763,8 +819,72 @@ func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, 
 		c.requireReserveArgs(moduleName, expr, scope, ctx)
 		c.rememberLifetime(expr, receiverLifetime)
 		return c.resolveType("machine.x86_64.executor_memory", "MutableBytes")
+	case "reserve_array":
+		elemType, ok := c.firstArgAsType(moduleName, expr.Args)
+		if !ok {
+			c.error(expr.SpanV, diag.SEM0078, "reserve_array first argument must be a type")
+			return nil
+		}
+		if !typeHasKnownLayout(elemType) {
+			c.error(expr.SpanV, diag.SEM0080, "reserve_array element type must have known layout")
+			return nil
+		}
+		c.requireReserveArrayArgs(moduleName, expr, scope, ctx, elemType)
+		slotsType := c.index.instantiateByName("machine.x86_64.executor_memory", "Slots", []*Type{elemType})
+		if slotsType == nil {
+			c.error(expr.SpanV, diag.SEM0002, "unknown type Slots")
+			return nil
+		}
+		for _, d := range c.index.completeInstantiation(slotsType.Key(), map[string]bool{}) {
+			c.diags = append(c.diags, d)
+		}
+		c.rememberLifetime(expr, receiverLifetime)
+		return slotsType
 	default:
 		return nil
+	}
+}
+
+func (c *checker) firstArgAsType(moduleName string, args []ast.NamedArg) (*Type, bool) {
+	if len(args) == 0 || args[0].Name != "" {
+		return nil, false
+	}
+	switch value := args[0].Value.(type) {
+	case *ast.NameExpr:
+		typ, ok := c.index.lookupBaseType(moduleName, value.Name)
+		return typ, ok
+	case *ast.TypeOperandExpr:
+		typ, ds := c.index.LookupTypeRef(moduleName, value.Type, nil)
+		if len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
+			return nil, false
+		}
+		return typ, typ != nil
+	default:
+		return nil, false
+	}
+}
+
+func (c *checker) requireReserveArrayArgs(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind, elemType *Type) {
+	if len(expr.Args) != 2 || expr.Args[0].Name != "" || expr.Args[1].Name != "count" {
+		c.error(expr.SpanV, diag.SEM0090, "reserve_array expects a type and count")
+		return
+	}
+	u64 := c.mustType(moduleName, "U64")
+	countType := c.typeExpr(moduleName, expr.Args[1].Value, scope, ctx)
+	if countType != nil && !typesCompatible(u64, countType) {
+		c.error(expr.Args[1].Value.Span(), diag.SEM0090, "reserve_array count must be U64")
+	}
+	countValue, ok := c.constValueOfExpr(moduleName, expr.Args[1].Value)
+	if !ok {
+		return
+	}
+	elemSize, _, ok := semanticSizeAlign(elemType)
+	if !ok || elemSize == 0 {
+		return
+	}
+	if countValue > ^uint64(0)/elemSize {
+		c.error(expr.SpanV, diag.SEM0090, "slot count overflows reservation size")
 	}
 }
 
@@ -784,6 +904,25 @@ func (c *checker) requireReserveArgs(moduleName string, expr *ast.CallExpr, scop
 	}
 	if value, ok := unsignedIntegerLiteral(expr.Args[1].Value); ok && !isPowerOfTwo(value) {
 		c.error(expr.Args[1].Value.Span(), diag.SEM0027, "reserve align must be a non-zero power of two")
+	}
+}
+
+func (c *checker) constValueOfExpr(moduleName string, expr ast.Expr) (uint64, bool) {
+	switch e := expr.(type) {
+	case *ast.IntLiteral:
+		return unsignedIntegerLiteral(e)
+	case *ast.NameExpr:
+		value, ok := c.index.LookupConst(moduleName, e.Name)
+		return value.Value, ok && value.Type != nil
+	default:
+		scope := map[string]ConstValue{}
+		for name, value := range c.index.Consts[moduleName] {
+			if value.Type != nil {
+				scope[name] = value
+			}
+		}
+		value, ds := c.evalConstExpr(moduleName, expr, scope)
+		return value, len(ds) == 0
 	}
 }
 

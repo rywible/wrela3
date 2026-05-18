@@ -910,6 +910,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		c.checkTypeAssign(s.Target.Span(), targetType, valueType)
 		sourceLifetime := c.lifetimeOfExpr(s.Value, scope)
 		targetLifetime := c.assignmentTargetLifetime(s.Target, scope)
+		if c.rejectViewLifetimeEscape(s.Value.Span(), valueType, sourceLifetime, targetLifetime) {
+			return isNeverType(valueType)
+		}
 		if !c.rejectCacheEscape(s.Value.Span(), sourceLifetime, targetLifetime) {
 			c.rejectIfLifetimeEscapes(s.Value.Span(), sourceLifetime, targetLifetime)
 		}
@@ -1003,6 +1006,9 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			c.requireType(got, expectedReturn, s.Value.Span())
 		}
 		lifetime := c.lifetimeOfExpr(s.Value, scope)
+		if c.rejectViewLifetimeEscape(s.Value.Span(), got, lifetime, Lifetime{Kind: LifetimeExecutorRoot}) {
+			return true
+		}
 		c.recordReturnLifetime(s.Value.Span(), lifetime)
 		if c.currentMethodSummary != nil &&
 			(lifetime.Kind == LifetimeFrame || lifetime.Kind == LifetimeCacheLookup || lifetime.Kind == LifetimeCacheCopy) &&
@@ -3089,6 +3095,9 @@ func (c *checker) typeExprNoExpected(moduleName string, expr ast.Expr, scope *Sc
 	case *ast.FieldExpr:
 		baseType := c.typeExpr(moduleName, e.Base, scope, ctx)
 		c.recordDiscoveryFactFromField(e, baseType)
+		if isSlotsType(baseType) && e.Field == "address" && !isTrustedAuthorityModule(moduleName) {
+			c.error(e.SpanV, diag.SEM0096, "Slots.address is protected")
+		}
 		fieldType := c.lookupField(baseType, e.Field, e.SpanV)
 		if fieldType != nil && !typeCanCarryHiddenLifetime(fieldType) && !typeCanCarryHiddenLifetime(baseType) {
 			c.rememberLifetime(e, Lifetime{Kind: LifetimeExecutorRoot})
@@ -3137,10 +3146,18 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		c.error(expr.SpanV, diag.SEM0002, "unknown constructor type "+typeName)
 		return nil
 	}
+	if constructed.GenericOrigin != nil {
+		for _, d := range c.index.completeInstantiation(constructed.Key(), map[string]bool{}) {
+			c.diags = append(c.diags, d)
+		}
+	}
 	if ctx == ContextOnHandler && constructed.Kind != KindData {
 		c.error(expr.SpanV, diag.SEM0016, "on handler can only construct data values")
 	}
 
+	if isProtectedViewType(constructed) && !isTrustedAuthorityModule(moduleName) {
+		c.error(expr.SpanV, diag.SEM0092, "protected memory-region view construction is not allowed here")
+	}
 	c.checkConstructorPermissions(moduleName, expr, constructed, scope, ctx)
 	if c.currentPhase == "owned_hardware" && c.hasDelegatedField(constructed) {
 		c.error(expr.SpanV, diag.SEM0009, "delegated-only value cannot be constructed in owned_hardware phase")
@@ -3396,6 +3413,13 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 			c.error(expr.SpanV, diag.SEM0040, "topic subscription must be created in image wiring")
 		}
 		return nil
+	}
+	if isSlotsType(recvType) && (expr.Method == "get" || expr.Method == "read") {
+		c.error(expr.SpanV, diag.SEM0093, "raw Slots memory cannot be read directly")
+		return nil
+	}
+	if expr.Method == "reserve_array" {
+		return c.typeArenaIntrinsicCall(moduleName, expr, scope, ctx)
 	}
 	if IsArenaType(recvType) && (expr.Method == "place" || expr.Method == "reserve") {
 		return c.typeArenaIntrinsicCall(moduleName, expr, scope, ctx)
