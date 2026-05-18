@@ -17,6 +17,7 @@ const (
 	KindDriverPath
 	KindExecutor
 	KindImage
+	KindTrait
 	KindTypeParam
 )
 
@@ -36,6 +37,8 @@ func (k Kind) String() string {
 		return "executor"
 	case KindImage:
 		return "image"
+	case KindTrait:
+		return "trait"
 	case KindTypeParam:
 		return "type param"
 	default:

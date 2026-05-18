@@ -15,6 +15,8 @@ type Index struct {
 	ByImport     map[string]map[string]*Type
 	Consts       map[string]map[string]ConstValue
 	ConstImports map[string]map[string]ConstValue
+	Traits       map[string]*Trait
+	Impls        []Impl
 	Images       []*ast.ImageDecl
 
 	InterruptEvents    map[string]map[string]*ast.InterruptEventDecl
@@ -37,6 +39,8 @@ func NewIndex() *Index {
 		ByImport:           map[string]map[string]*Type{},
 		Consts:             map[string]map[string]ConstValue{},
 		ConstImports:       map[string]map[string]ConstValue{},
+		Traits:             map[string]*Trait{},
+		Impls:              []Impl{},
 		InterruptEvents:    map[string]map[string]*ast.InterruptEventDecl{},
 		OnHandlers:         map[string]map[string]map[string]*ast.OnHandlerDecl{},
 		Instantiations:     map[string]*Type{},
@@ -292,7 +296,53 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 	for _, mod := range modules {
 		for _, decl := range mod.Decls {
 			typ := idx.resolveInScope(mod.Name, declarationName(decl))
+			processImpl := func(d *ast.ImplDecl) {
+				paramNames := freeImplTypeParams(idx, mod.Name, d.Trait, d.For)
+				implTypeParams := map[string]*Type{}
+				for _, name := range paramNames {
+					implTypeParams[name] = &Type{Name: name, Kind: KindTypeParam}
+				}
+				implTrait, traitDiags := idx.LookupTypeRef(mod.Name, d.Trait, implTypeParams)
+				diagOut = append(diagOut, traitDiags...)
+				implFor, forDiags := idx.LookupTypeRef(mod.Name, d.For, implTypeParams)
+				diagOut = append(diagOut, forDiags...)
+				if implTrait == nil || implFor == nil {
+					return
+				}
+				implTypeParamSet := map[string]bool{}
+				for _, name := range paramNames {
+					implTypeParamSet[name] = true
+				}
+				implDecl := Impl{
+					Trait:      implTrait,
+					For:        implFor,
+					TypeParams: implTypeParamSet,
+					Span:       d.SpanV,
+				}
+				overlap := false
+				for _, existing := range idx.Impls {
+					if implsOverlap(&existing, &implDecl) {
+						overlap = true
+						diagOut = append(diagOut, diag.Diagnostic{
+							Phase:    "sem",
+							Code:     diag.SEM0083,
+							Severity: diag.Error,
+							Start:    d.SpanV.Start,
+							End:      d.SpanV.End,
+							Message:  "overlapping impl",
+						})
+						break
+					}
+				}
+				idx.Impls = append(idx.Impls, implDecl)
+				if !overlap {
+					diagOut = append(diagOut, idx.validateImplSignatures(implDecl)...)
+				}
+			}
 			if typ == nil {
+				if d, ok := decl.(*ast.ImplDecl); ok {
+					processImpl(d)
+				}
 				continue
 			}
 			var params map[string]*Type
@@ -308,6 +358,19 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				diagOut = append(diagOut, localDiags...)
 				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
 				diagOut = append(diagOut, localDiags...)
+			case *ast.TraitDecl:
+				params, localDiags = buildTypeParamMap(d.TypeParams)
+				diagOut = append(diagOut, localDiags...)
+				typ.TypeParams = toTypeParams(d.TypeParams)
+				typ.Methods, localDiags = buildMethods(idx, mod.Name, d.Methods, params)
+				diagOut = append(diagOut, localDiags...)
+				idx.Traits[qualifiedTypeName(typ)] = &Trait{
+					Module:     mod.Name,
+					Name:       typ.Name,
+					TypeParams: typ.TypeParams,
+					Methods:    typ.Methods,
+					Span:       d.SpanV,
+				}
 			case *ast.ClassDecl:
 				params, localDiags = buildTypeParamMap(d.TypeParams)
 				diagOut = append(diagOut, localDiags...)
@@ -489,6 +552,8 @@ func typeKind(decl ast.Decl) Kind {
 		return KindDriver
 	case *ast.DriverPathDecl:
 		return KindDriverPath
+	case *ast.TraitDecl:
+		return KindTrait
 	case *ast.ExecutorDecl:
 		return KindExecutor
 	case *ast.ImageDecl:
@@ -509,6 +574,8 @@ func declarationName(decl ast.Decl) string {
 	case *ast.DriverDecl:
 		return d.Name
 	case *ast.DriverPathDecl:
+		return d.Name
+	case *ast.TraitDecl:
 		return d.Name
 	case *ast.ExecutorDecl:
 		return d.Name

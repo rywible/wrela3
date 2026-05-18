@@ -267,5 +267,27 @@ func substituteBounds(idx *Index, bounds []TraitBound, subst substitution) []Tra
 }
 
 func (idx *Index) checkConcreteBounds(concrete *Type) []diag.Diagnostic {
-	return nil
+	if concrete == nil || concrete.GenericOrigin == nil {
+		return nil
+	}
+	subst := substitutionFor(concrete.GenericOrigin, concrete.TypeArgs)
+	var out []diag.Diagnostic
+	for _, bound := range concrete.GenericOrigin.Where {
+		concreteArg := subst[bound.Param]
+		boundTrait := idx.substituteType(bound.Trait, subst)
+		if concreteArg == nil || boundTrait == nil {
+			continue
+		}
+		if !idx.hasImpl(boundTrait, concreteArg) {
+			out = append(out, diag.Diagnostic{
+				Phase:    "sem",
+				Code:     diag.SEM0081,
+				Severity: diag.Error,
+				Start:    bound.Span.Start,
+				End:      bound.Span.End,
+				Message:  "missing impl " + boundTrait.Display() + " for " + concreteArg.Display(),
+			})
+		}
+	}
+	return out
 }
