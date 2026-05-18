@@ -267,7 +267,19 @@ func TestImageReportIncludesCompleteAuthorityAuditMappings(t *testing.T) {
 			{Label: "periodic.1000us", Source: "local_apic_pit_calibrated", PeriodUS: 1000},
 		},
 		Topics: []TopicNode{
-			{Label: "timer.periodic", Kind: "timer_tick", PayloadType: "machine.x86_64.topic_payload.TimerTickPayload", PayloadSize: 24, PayloadAlign: 8, Depth: 64},
+			{
+				Label:        "timer.periodic",
+				Type:         "Topic<TimerTickPayload>",
+				TypeKey:      "machine.x86_64.topic.Topic<machine.x86_64.topic_payload.TimerTickPayload>",
+				Kind:         "timer_tick",
+				PayloadType:  "machine.x86_64.topic_payload.TimerTickPayload",
+				PayloadKey:   "machine.x86_64.topic_payload.TimerTickPayload",
+				PayloadSize:  24,
+				PayloadAlign: 8,
+				Depth:        64,
+				NextType:     "Option<TimerTickPayload>",
+				NextKey:      "wrela.lang.core.Option<machine.x86_64.topic_payload.TimerTickPayload>",
+			},
 		},
 		WakeTargets: []WakeTargetNode{
 			{SlotLabel: "worker", Owner: "timer.periodic", Strategy: "sti_hlt", Fallback: "sti_hlt"},
@@ -285,6 +297,15 @@ func TestImageReportIncludesCompleteAuthorityAuditMappings(t *testing.T) {
 	}
 	if len(r.Runtime.Topics) != 1 || len(r.AuthorityAudit.Topics) != 1 {
 		t.Fatalf("topic report/audit missing: runtime=%#v audit=%#v", r.Runtime.Topics, r.AuthorityAudit.Topics)
+	}
+	topic := r.Runtime.Topics[0]
+	if topic.Type != "Topic<TimerTickPayload>" ||
+		topic.TypeKey != "machine.x86_64.topic.Topic<machine.x86_64.topic_payload.TimerTickPayload>" ||
+		topic.PayloadType != "TimerTickPayload" ||
+		topic.PayloadKey != "machine.x86_64.topic_payload.TimerTickPayload" ||
+		topic.NextType != "Option<TimerTickPayload>" ||
+		topic.NextKey != "wrela.lang.core.Option<machine.x86_64.topic_payload.TimerTickPayload>" {
+		t.Fatalf("generic topic report fields = %#v", topic)
 	}
 	if len(r.AuthorityAudit.WakeTargets) != 1 {
 		t.Fatalf("wake audit missing: %#v", r.AuthorityAudit.WakeTargets)

@@ -15,12 +15,13 @@ use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { TimerTickSubscription } from machine.x86_64.topic_payload
+use { TopicSubscription } from machine.x86_64.topic
+use { TimerTickPayload } from machine.x86_64.topic_payload
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     memory: ExecutorMemory
-    ticks: TimerTickSubscription
+    ticks: TopicSubscription<TimerTickPayload>
     start fn run(self) -> never {
         self.loop.wait()
         while true {}

@@ -13,9 +13,9 @@ import (
 
 func TestTopicOpsDefineExpectedValues(t *testing.T) {
 	publish := TopicPublish{TopicLabel: "counter", Kind: "gap_u64", Value: ConstInt{Value: 1}}
-	tryNext := TopicTryNext{TopicLabel: "counter", Subscription: Local{Symbol: "sub"}, Type: Type{Name: "U64TopicNext"}}
+	tryNext := TopicTryNext{TopicLabel: "counter", Subscription: Local{Symbol: "sub"}, Type: Type{Name: "Option<U64>", Kind: TypeKindEnum}}
 	arm := TopicArmWait{TopicLabel: "counter", Subscription: Local{Symbol: "sub"}}
-	reliable := ReliableTopicTryPublish{TopicLabel: "commands", Value: ConstInt{Value: 7}, Type: Type{Name: "U64PublishResult"}}
+	reliable := ReliableTopicTryPublish{TopicLabel: "commands", Value: ConstInt{Value: 7}, Type: Type{Name: "Result<Unit, TopicFull>", Kind: TypeKindEnum}}
 	ops := []Operation{publish, tryNext, arm, reliable}
 	for _, op := range ops {
 		if op == nil {
@@ -35,19 +35,20 @@ func TestLowerTopicCallsToIntrinsicOps(t *testing.T) {
 module test.topic_lower
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { TopicIdentity, U64GapSubscription, U64GapTopic, U64ReliablePublisher, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicSubscription, ReliableTopic, ReliablePublisher, ReliableSubscription } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-    input: U64GapSubscription
-    reliable_input: U64ReliableSubscription
-    reliable_output: U64ReliablePublisher
+    input: TopicSubscription<U64>
+    reliable_input: ReliableSubscription<U64>
+    reliable_output: ReliablePublisher<U64>
     start fn run(self) -> never {
         let next = self.input.try_next()
         self.input.arm_wait()
         let armed = self.input.is_wait_armed()
-        self.reliable_output.publish_or_wait(value = 42)
+        let publish_result = self.reliable_output.try_publish(value = 42)
         if self.input.is_wait_armed() {
             if self.reliable_input.is_wait_armed() {
                 self.loop.wait()
@@ -63,16 +64,15 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let counter = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
+        let counter = Topic<U64>(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
         let input = counter.subscribe(subscriber = worker_slot)
-        let commands = U64ReliableTopic(identity = TopicIdentity(label = "commands"), id = 1, depth = 64)
+        let commands = ReliableTopic<U64>(identity = TopicIdentity(label = "commands"), id = 1, depth = 64)
         let command_pub = commands.publisher()
         let reliable_input = commands.subscribe(subscriber = worker_slot)
-        let results = U64ReliableTopic(identity = TopicIdentity(label = "results"), id = 2, depth = 64)
+        let results = ReliableTopic<U64>(identity = TopicIdentity(label = "results"), id = 2, depth = 64)
         let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), input = input, reliable_input = reliable_input, reliable_output = results.publisher())
         counter.publisher().publish(value = 1)
         let result = command_pub.try_publish(value = 2)
-        command_pub.wait_for_subscriber_advance()
         hardware.vcpu0.enter(executor = worker)
     }
 }`)
@@ -108,16 +108,9 @@ image Img {
 	if len(waitIfArmed.Guards) != 2 || waitIfArmed.Guards[0].TopicLabel != "counter" || waitIfArmed.Guards[1].TopicLabel != "commands" {
 		t.Fatalf("TopicWaitIfArmed guards = %#v, want counter and commands", waitIfArmed.Guards)
 	}
-	workerTryPublish, ok := functionOp[*ReliableTopicTryPublish](*worker)
+	workerTryPublish, ok := functionOp[ReliableTopicTryPublish](*worker)
 	if !ok || workerTryPublish.TopicLabel != "results" {
-		t.Fatalf("worker missing lowered publish_or_wait try-publish: %#v", worker.Blocks)
-	}
-	workerWaitAdvance, ok := functionOp[*ReliableTopicWaitForAdvance](*worker)
-	if !ok || workerWaitAdvance.TopicLabel != "results" || workerWaitAdvance.PublisherSlot != "worker" {
-		t.Fatalf("worker missing lowered publish_or_wait wait: %#v", worker.Blocks)
-	}
-	if call, ok := functionOp[*Call](*worker); ok && strings.Contains(call.Symbol, "publish_or_wait") {
-		t.Fatalf("worker kept publish_or_wait as ordinary call: %#v", call)
+		t.Fatalf("worker missing lowered try-publish: %#v", worker.Blocks)
 	}
 
 	owned := findFunction(program, "_wrela_phase_test_topic_lower_Img_owned_hardware")
@@ -131,10 +124,6 @@ image Img {
 	tryPublish, ok := functionOp[ReliableTopicTryPublish](*owned)
 	if !ok || tryPublish.TopicLabel != "commands" {
 		t.Fatalf("owned phase missing ReliableTopicTryPublish: %#v", owned.Blocks)
-	}
-	waitAdvance, ok := functionOp[ReliableTopicWaitForAdvance](*owned)
-	if !ok || waitAdvance.TopicLabel != "commands" {
-		t.Fatalf("owned phase missing ReliableTopicWaitForAdvance: %#v", owned.Blocks)
 	}
 	if len(program.Topics) != 3 {
 		t.Fatalf("program topics = %#v, want three topic layouts", program.Topics)
@@ -151,15 +140,19 @@ func TestLowerSpecializesTopicOpsForSameExecutorTypePlacements(t *testing.T) {
 module test.same_type_topic_lower
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicSubscription } from machine.x86_64.topic
+use { Option } from wrela.lang.core
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-    input: U64GapSubscription
+    input: TopicSubscription<U64>
     fn poll(self) {
         let next = self.input.try_next()
-        if next.has_message {
+        match next {
+            Option.Some(value = value) => {}
+            Option.None => {}
         }
     }
     start fn run(self) -> never {
@@ -174,8 +167,8 @@ image Img {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "worker.a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "worker.b"))
-        let topic_a = U64GapTopic(identity = TopicIdentity(label = "topic.a"), id = 0, depth = 64)
-        let topic_b = U64GapTopic(identity = TopicIdentity(label = "topic.b"), id = 1, depth = 64)
+        let topic_a = Topic<U64>(identity = TopicIdentity(label = "topic.a"), id = 0, depth = 64)
+        let topic_b = Topic<U64>(identity = TopicIdentity(label = "topic.b"), id = 1, depth = 64)
         let input_a = topic_a.subscribe(subscriber = slot_a)
         let input_b = topic_b.subscribe(subscriber = slot_b)
         let worker_a = Worker(slot = slot_a, loop = EventSleepPolicy(), input = input_a)
@@ -222,7 +215,7 @@ image Img {
 	}
 }
 
-func TestLowerSerialRxNextMessageFieldUsesIRHandleOffset(t *testing.T) {
+func TestLowerSerialReceiveResultMessageFieldUsesIRHandleOffset(t *testing.T) {
 	checked := checkedProgramFromSourcesForTest(t, `
 module machine.x86_64.serial
 data SerialPathInterrupt {
@@ -230,16 +223,16 @@ data SerialPathInterrupt {
     byte: U8
 }
 
-data SerialRxNext {
+data SerialReceiveResult {
     has_message: Bool
     message: SerialPathInterrupt
 }
 
 module test.serial_next
-use { SerialRxNext } from machine.x86_64.serial
+use { SerialReceiveResult } from machine.x86_64.serial
 
 executor Worker {
-    start fn run(self, next: SerialRxNext) -> never {
+    start fn run(self, next: SerialReceiveResult) -> never {
         if next.has_message {
             let byte = next.message.byte
         }
@@ -252,10 +245,10 @@ executor Worker {
 		t.Fatalf("Lower diagnostics: %#v", diags)
 	}
 
-	nextInfo := program.Types["machine.x86_64.serial.SerialRxNext"]
+	nextInfo := program.Types["machine.x86_64.serial.SerialReceiveResult"]
 	messageOffset := nextInfo.Fields["message"].Offset
 	if messageOffset != 8 {
-		t.Fatalf("SerialRxNext.message IR offset = %d, want 8", messageOffset)
+		t.Fatalf("SerialReceiveResult.message IR offset = %d, want 8", messageOffset)
 	}
 
 	worker := findFunction(program, "_wrela_method_test_serial_next_Worker_run")
@@ -423,58 +416,60 @@ class ExecutorMemory { arena_base: PhysicalAddress; arena_length: U64; next_offs
 module machine.x86_64.executor_loop
 class EventSleepPolicy { asm fn wait(self) { hlt; ret } }
 
+module wrela.lang.core
+data Unit {}
+enum Option<T> { None Some(value: T) }
+enum Result<T, E> { Ok(value: T) Err(error: E) }
+
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-data U64TopicMessage { sequence: U64; value: U64 }
-data U64TopicNext { has_message: Bool; gap: Bool; missed: U64; message: U64TopicMessage }
-data U64PublishResult { published: Bool; full: Bool }
-class U64GapTopic {
+
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { Option, Result, Unit } from wrela.lang.core
+use { TopicIdentity } from machine.x86_64.topic_u64
+data TopicFull {}
+class Topic<T> {
     identity: TopicIdentity
     id: U64
     depth: U64
-    asm fn publisher(self) -> U64GapPublisher { ret }
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret }
+    fn publisher(self) -> TopicPublisher<T> { return TopicPublisher<T>(topic = self) }
+    fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> {
+        return TopicSubscription<T>(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    }
 }
-class U64GapPublisher {
-    topic: U64GapTopic
-    fn publish(self, value: U64) { self.publish_intrinsic(value = value) }
-    asm fn publish_intrinsic(self, value: U64) { ret }
+class TopicPublisher<T> {
+    topic: Topic<T>
+    asm fn publish(self, value: T) { ret }
 }
-class U64GapSubscription {
-    topic: U64GapTopic
+class TopicSubscription<T> {
+    topic: Topic<T>
     subscriber: ExecutorSlot
     cursor: U64
     armed: Bool
-    asm fn try_next(self) -> U64TopicNext { ret }
+    asm fn try_next(self) -> Option<T> { ret }
     fn arm_wait(self) { self.armed = true }
     fn is_wait_armed(self) -> Bool { return self.armed }
 }
-class U64ReliableTopic {
+class ReliableTopic<T> {
     identity: TopicIdentity
     id: U64
     depth: U64
-    asm fn publisher(self) -> U64ReliablePublisher { ret }
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64ReliableSubscription { ret }
-}
-class U64ReliablePublisher {
-    topic: U64ReliableTopic
-    asm fn try_publish(self, value: U64) -> U64PublishResult { ret }
-    fn publish_or_wait(self, value: U64) {
-        let result = self.try_publish(value = value)
-        while result.full {
-            self.wait_for_subscriber_advance()
-            result = self.try_publish(value = value)
-        }
+    fn publisher(self) -> ReliablePublisher<T> { return ReliablePublisher<T>(topic = self) }
+    fn subscribe(self, subscriber: ExecutorSlot) -> ReliableSubscription<T> {
+        return ReliableSubscription<T>(topic = self, subscriber = subscriber, cursor = 0, armed = false)
     }
-    asm fn wait_for_subscriber_advance(self) { hlt; ret }
 }
-class U64ReliableSubscription {
-    topic: U64ReliableTopic
+class ReliablePublisher<T> {
+    topic: ReliableTopic<T>
+    asm fn try_publish(self, value: T) -> Result<Unit, TopicFull> { ret }
+}
+class ReliableSubscription<T> {
+    topic: ReliableTopic<T>
     subscriber: ExecutorSlot
     cursor: U64
     armed: Bool
-    asm fn try_next(self) -> U64TopicNext { ret }
+    asm fn try_next(self) -> Option<T> { ret }
     fn arm_wait(self) { self.armed = true }
     fn is_wait_armed(self) -> Bool { return self.armed }
 }

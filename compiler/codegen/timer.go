@@ -58,7 +58,7 @@ func buildTimerUnit(symbol string, route ir.TimerRoute, ctx compileContext) (com
 	}
 	e := &Emitter{Labels: map[string]int{}, ctx: ctx}
 	emitInterruptSave(e)
-	emitTimerTickTopicPublish(e, layout, route, ctx)
+	emitTimerPayloadPublish(e, layout, route, ctx)
 	emitLocalApicEOI(e)
 	emitInterruptRestore(e)
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
@@ -155,7 +155,7 @@ func compileTimerUnsupportedSourceTrapUnit() compiledUnit {
 	return compiledUnit{Symbol: "_wrela_timer_unsupported_source", Bytes: e.Code}
 }
 
-func emitTimerTickTopicPublish(e *Emitter, layout topicDataLayout, route ir.TimerRoute, ctx compileContext) {
+func emitTimerPayloadPublish(e *Emitter, layout topicDataLayout, route ir.TimerRoute, ctx compileContext) {
 	base := asm.MustLookup("r12")
 	seq := asm.MustLookup("r10")
 	slot := asm.MustLookup("r11")

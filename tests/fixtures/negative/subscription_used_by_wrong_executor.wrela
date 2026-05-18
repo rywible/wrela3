@@ -6,19 +6,19 @@ data SlotIdentity { label: StringLiteral }
 data ExecutorSlot { id: U64 }
 class ExecutorRegistry { asm fn claim(self, identity: SlotIdentity) -> ExecutorSlot { ret } }
 
-module machine.x86_64.topic_u64
+module machine.x86_64.topic
 use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret } }
-class U64GapSubscription { subscriber: ExecutorSlot; asm fn poll(self) -> Bool { ret } }
+class Topic<T> { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret } }
+class TopicSubscription<T> { subscriber: ExecutorSlot; asm fn poll(self) -> Bool { ret } }
 
 module negative.subscription_used_by_wrong_executor.app
 use { ExecutorRegistry, ExecutorSlot, SlotIdentity } from machine.x86_64.cpu_state
-use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { Topic, TopicIdentity, TopicSubscription } from machine.x86_64.topic
 
 executor Other {
     slot: ExecutorSlot
-    input: U64GapSubscription
+    input: TopicSubscription<U64>
     start fn run(self) -> never {
         let ready = self.input.poll()
         while true {}
@@ -32,7 +32,7 @@ image Bad {
         let registry = ExecutorRegistry()
         let worker_slot = registry.claim(identity = SlotIdentity(label = "worker"))
         let other_slot = registry.claim(identity = SlotIdentity(label = "other"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
         let sub = topic.subscribe(subscriber = worker_slot)
         let other = Other(slot = other_slot, input = sub)
         while true {}

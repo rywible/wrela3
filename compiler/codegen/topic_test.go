@@ -178,7 +178,7 @@ func TestReliableTopicPublishChecksSlowestSubscriber(t *testing.T) {
 		&ir.ReliableTopicTryPublish{
 			TopicLabel: "counter",
 			Value:      program.Functions[0].Blocks[0].Ops[0].(ir.Value),
-			Type:       ir.Type{Name: "U64PublishResult"},
+			Type:       ir.Type{Name: "Result<Unit, TopicFull>", Kind: ir.TypeKindEnum},
 		},
 		&ir.Return{},
 	}
@@ -234,7 +234,7 @@ func TestReliableTopicWaitRechecksCapacityAfterArmingWaitline(t *testing.T) {
 }
 
 func TestTopicArmWaitStoresStaticSubscriberWaitline(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
 		Symbol: "arm_counter",
@@ -268,7 +268,7 @@ func TestTopicArmWaitStoresStaticSubscriberWaitline(t *testing.T) {
 }
 
 func TestTopicIsWaitArmedComparesStaticCursorAndWaitline(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindData}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
 		Symbol: "is_counter_armed",
@@ -295,7 +295,7 @@ func TestTopicIsWaitArmedComparesStaticCursorAndWaitline(t *testing.T) {
 }
 
 func TestTopicIsWaitArmedValueFormGetsFrameSlot(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	armed := ir.TopicIsWaitArmed{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "Bool", Kind: ir.TypeKindPrimitive}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
@@ -319,7 +319,7 @@ func TestTopicIsWaitArmedValueFormGetsFrameSlot(t *testing.T) {
 }
 
 func TestTopicWaitIfArmedUsesCliStiHltSequence(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindData}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
 		Symbol: "wait_counter_if_armed",
@@ -342,8 +342,8 @@ func TestTopicWaitIfArmedUsesCliStiHltSequence(t *testing.T) {
 }
 
 func TestTopicWaitIfArmedChecksAllGuardsBeforeHlt(t *testing.T) {
-	counterSub := &ir.Param{Symbol: "counter_input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
-	alertSub := &ir.Param{Symbol: "alert_input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
+	counterSub := &ir.Param{Symbol: "counter_input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
+	alertSub := &ir.Param{Symbol: "alert_input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	program := topicProgramForCodegenTest()
 	program.Topics = append(program.Topics, ir.TopicLayout{
 		Label:       "alerts",
@@ -422,54 +422,9 @@ func TestTopicTryNextWritesOptionLayout(t *testing.T) {
 	}
 }
 
-func TestTopicTryNextStoresNestedMessageHandle(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
-	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
-	fn := ir.Function{
-		Symbol: "try_counter",
-		Params: []ir.Value{sub},
-		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
-			next,
-			&ir.Return{},
-		}}},
-	}
-	program := topicProgramForCodegenTest()
-	program.Functions[0] = fn
-
-	image, diags := Compile(program)
-	if len(diags) != 0 {
-		t.Fatalf("Compile() diagnostics = %#v", diags)
-	}
-
-	frame := buildFrame(fn, compileContext{types: program.Types})
-	outSlot, ok := frame.ObjectSlots[next]
-	if !ok {
-		t.Fatalf("TopicTryNext missing object slot: %#v", frame)
-	}
-	message := program.Types["U64TopicNext"].Fields["message"]
-	want := append([]byte{},
-		mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-			asm.RegOperand{Reg: asm.MustLookup("r10")},
-			asm.RegOperand{Reg: asm.MustLookup("rbp")},
-		}})...,
-	)
-	want = append(want, mustEncode(t, asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
-		asm.RegOperand{Reg: asm.MustLookup("r10")},
-		asm.ImmOperand{Value: int64(outSlot + message.StorageOffset)},
-	}})...)
-	want = append(want, mustEncode(t, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
-		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(outSlot + message.Offset), Width: 64},
-		asm.RegOperand{Reg: asm.MustLookup("r10")},
-	}})...)
-	code := symbolBytes(t, image, "try_counter")
-	if !bytes.Contains(code, want) {
-		t.Fatalf("try_counter missing nested message handle store %x in %x", want, code)
-	}
-}
-
 func TestTopicTryNextPreservesTopicBaseForSlotCopy(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
-	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
+	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "Option<U64>", Kind: ir.TypeKindEnum}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
 		Symbol: "try_counter",
@@ -518,8 +473,8 @@ func TestTopicTryNextPreservesTopicBaseForSlotCopy(t *testing.T) {
 }
 
 func TestGapTopicTryNextComparesSlotSequenceBeforePayload(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
-	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
+	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "Option<U64>", Kind: ir.TypeKindEnum}}
 	program := topicProgramForCodegenTest()
 	program.Functions[0] = ir.Function{
 		Symbol: "try_counter",
@@ -554,8 +509,8 @@ func TestGapTopicTryNextComparesSlotSequenceBeforePayload(t *testing.T) {
 }
 
 func TestGapTopicTryNextDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
-	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
-	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}
+	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
+	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "Option<U64>", Kind: ir.TypeKindEnum}}
 	program := topicProgramForCodegenTest()
 	program.Topics[0].PayloadSize = 184
 	program.Topics[0].PayloadAlign = 8
@@ -721,36 +676,26 @@ func topicProgramForCodegenTest() *ir.Program {
 			Subscribers: []string{"worker"},
 		}},
 		Types: map[string]ir.TypeInfo{
-			"U64TopicMessage": {
-				Name: "U64TopicMessage", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16,
+			"Option<U64>": {
+				Name: "Option<U64>", Kind: ir.TypeKindEnum, Size: 16, Align: 8, StorageSize: 16,
 				Fields: map[string]ir.FieldInfo{
-					"sequence": {Name: "sequence", Type: ir.Type{Name: "U64"}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
-					"value":    {Name: "value", Type: ir.Type{Name: "U64"}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+					"$tag":       {Name: "$tag", Type: ir.Type{Name: "U64"}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+					"Some.value": {Name: "Some.value", Type: ir.Type{Name: "U64"}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
 				},
-				FieldOrder: []string{"sequence", "value"},
+				EnumVariants: []ir.EnumVariantInfo{{Name: "None", Discriminant: 0}, {Name: "Some", Discriminant: 1, Fields: []string{"Some.value"}}},
 			},
-			"U64TopicNext": {
-				Name: "U64TopicNext", Kind: ir.TypeKindData, Size: 24, Align: 8, StorageSize: 40,
+			"Result<Unit, TopicFull>": {
+				Name: "Result<Unit, TopicFull>", Kind: ir.TypeKindEnum, Size: 16, Align: 8, StorageSize: 16,
 				Fields: map[string]ir.FieldInfo{
-					"has_message": {Name: "has_message", Type: ir.Type{Name: "Bool"}, Offset: 0, Size: 1, Align: 1, StorageOffset: 0, StorageSize: 1},
-					"gap":         {Name: "gap", Type: ir.Type{Name: "Bool"}, Offset: 1, Size: 1, Align: 1, StorageOffset: 1, StorageSize: 1},
-					"missed":      {Name: "missed", Type: ir.Type{Name: "U64"}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
-					"message":     {Name: "message", Type: ir.Type{Name: "U64TopicMessage", Kind: ir.TypeKindData}, Offset: 16, Size: 8, Align: 8, StorageOffset: 24, StorageSize: 16},
+					"$tag":     {Name: "$tag", Type: ir.Type{Name: "U64"}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+					"Ok.value": {Name: "Ok.value", Type: ir.Type{Name: "Unit", Kind: ir.TypeKindData}, Offset: 8, Size: 0, Align: 1, StorageOffset: 8, StorageSize: 0},
 				},
-				FieldOrder: []string{"has_message", "gap", "missed", "message"},
+				EnumVariants: []ir.EnumVariantInfo{{Name: "Ok", Discriminant: 0, Fields: []string{"Ok.value"}}, {Name: "Err", Discriminant: 1}},
 			},
-			"U64PublishResult": {
-				Name: "U64PublishResult", Kind: ir.TypeKindData, Size: 2, Align: 1, StorageSize: 2,
+			"TopicSubscription<U64>": {
+				Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass, Size: 32, Align: 8, StorageSize: 32,
 				Fields: map[string]ir.FieldInfo{
-					"published": {Name: "published", Type: ir.Type{Name: "Bool"}, Offset: 0, Size: 1, Align: 1, StorageOffset: 0, StorageSize: 1},
-					"full":      {Name: "full", Type: ir.Type{Name: "Bool"}, Offset: 1, Size: 1, Align: 1, StorageOffset: 1, StorageSize: 1},
-				},
-				FieldOrder: []string{"published", "full"},
-			},
-			"U64GapSubscription": {
-				Name: "U64GapSubscription", Kind: ir.TypeKindClass, Size: 32, Align: 8, StorageSize: 32,
-				Fields: map[string]ir.FieldInfo{
-					"topic":      {Name: "topic", Type: ir.Type{Name: "U64GapTopic", Kind: ir.TypeKindClass}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+					"topic":      {Name: "topic", Type: ir.Type{Name: "Topic<U64>", Kind: ir.TypeKindClass}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
 					"subscriber": {Name: "subscriber", Type: ir.Type{Name: "ExecutorSlot", Kind: ir.TypeKindData}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
 					"cursor":     {Name: "cursor", Type: ir.Type{Name: "U64"}, Offset: 16, Size: 8, Align: 8, StorageOffset: 16, StorageSize: 8},
 					"armed":      {Name: "armed", Type: ir.Type{Name: "Bool"}, Offset: 24, Size: 1, Align: 1, StorageOffset: 24, StorageSize: 1},

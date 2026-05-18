@@ -1,18 +1,8 @@
 package sem
 
-import "strings"
-
 func TopicPayloadTypeForTopic(t *Type) (payload *Type, kind string, ok bool) {
 	if IsTopicType(t) && len(t.TypeArgs) == 1 {
 		return t.TypeArgs[0], topicKindFromPayload(t.TypeArgs[0], t.Name == "ReliableTopic"), true
-	}
-	// Compatibility branch removed by Task 20 after source migration.
-	if t != nil && t.Module == "machine.x86_64.topic_payload" && t.Name == "TimerTickTopic" {
-		return resolveBuiltinTopicPayload("machine.x86_64.topic_payload", "TimerTickPayload"), "timer_tick", true
-	}
-	// Compatibility branch removed by Task 20 after source migration.
-	if t != nil && t.Module == "machine.x86_64.topic_u64" && strings.HasPrefix(t.Name, "U64") {
-		return primitiveU64Type(), existingU64TopicKind(t), true
 	}
 	return nil, "", false
 }
@@ -48,24 +38,6 @@ func topicKindFromPayload(payload *Type, reliable bool) string {
 
 func resolveBuiltinTopicPayload(moduleName string, typeName string) *Type {
 	return &Type{Module: moduleName, Name: typeName, Kind: KindData}
-}
-
-func primitiveU64Type() *Type {
-	return &Type{Module: "", Name: "U64", Kind: KindPrimitive}
-}
-
-func existingU64TopicKind(t *Type) string {
-	if t == nil {
-		return ""
-	}
-	switch t.Name {
-	case "U64GapTopic":
-		return "gap_u64"
-	case "U64ReliableTopic":
-		return "reliable_u64"
-	default:
-		return "u64"
-	}
 }
 
 func payloadLayoutFromType(t *Type) (size uint64, align uint64, ok bool) {

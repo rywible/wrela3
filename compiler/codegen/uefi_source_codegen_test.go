@@ -158,7 +158,7 @@ func TestAcpiRootRequireTableLowersChecksumAndOffsets(t *testing.T) {
 	}
 	rootSource := readCodegenRepoFile(t, "wrela/platform/acpi/root.wrela")
 	for _, want := range []string{
-		"let table_bytes = PhysicalBytes(address = found_table.address, length = found_table.length, panic = self.panic).bounded()",
+		"let table_bytes = found_table.view.bytes",
 		"helpers.checksum_ok(bytes = table_bytes)",
 		"self.panic.fail(code = 0xAC010005)",
 		"return found_table",
@@ -767,6 +767,7 @@ func readCodegenRepoFile(t *testing.T, rel string) string {
 func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 	t.Helper()
 	paths := []string{
+		filepath.Join(repoRoot, "wrela/lang/core.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/boot_services.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
@@ -784,6 +785,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/topic.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_payload.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),

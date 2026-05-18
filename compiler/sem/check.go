@@ -2901,7 +2901,7 @@ func (c *checker) recordReliableTryPublishCall(moduleName string, expr ast.Expr,
 		return
 	}
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
-	if qualifiedTypeName(receiverType) != "machine.x86_64.topic_u64.U64ReliablePublisher" {
+	if qualifiedTypeName(receiverType) != "machine.x86_64.topic.ReliablePublisher" || len(receiverType.TypeArgs) != 1 {
 		return
 	}
 	c.graph.ReliableTryPublishCalls = append(c.graph.ReliableTryPublishCalls, ReliableTryPublishCallNode{ResultObserved: observed, Span: call.SpanV})
@@ -3077,23 +3077,7 @@ func topicKindForType(typ *Type) string {
 	if typ != nil && qualifiedTypeName(typ) == "machine.x86_64.topic.ReliableTopic" && len(typ.TypeArgs) == 1 {
 		return "reliable"
 	}
-	// Compatibility branch removed by Task 20 after source migration.
-	switch qualifiedTypeName(typ) {
-	case "machine.x86_64.topic_u64.U64GapTopic":
-		return "gap_u64"
-	case "machine.x86_64.topic_u64.U64ReliableTopic":
-		return "reliable_u64"
-	case "machine.x86_64.topic_payload.TimerTickTopic":
-		return "timer_tick"
-	case "machine.x86_64.serial.SerialRxTopic":
-		return "serial_rx"
-	case "machine.x86_64.edu.EduInterruptTopic":
-		return "edu_interrupt"
-	case "machine.x86_64.ivshmem.IvshmemDoorbellTopic":
-		return "ivshmem_doorbell"
-	default:
-		return ""
-	}
+	return ""
 }
 
 func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) {

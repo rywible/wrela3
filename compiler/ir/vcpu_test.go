@@ -24,13 +24,14 @@ func TestLowerVcpuStartAndEnterToIntrinsicOps(t *testing.T) {
 module test.vcpu_lower
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy } from machine.x86_64.executor_loop
-use { TopicIdentity, U64GapSubscription, U64GapTopic, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicSubscription, ReliableTopic, ReliableSubscription } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-    input: U64GapSubscription
-    reliable_input: U64ReliableSubscription
+    input: TopicSubscription<U64>
+    reliable_input: ReliableSubscription<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -40,8 +41,8 @@ image Img {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
         let hello_slot = hardware.executors.claim(identity = SlotIdentity(label = "hello"))
-        let counter = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
-        let commands = U64ReliableTopic(identity = TopicIdentity(label = "commands"), id = 1, depth = 64)
+        let counter = Topic<U64>(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
+        let commands = ReliableTopic<U64>(identity = TopicIdentity(label = "commands"), id = 1, depth = 64)
         let worker_input = counter.subscribe(subscriber = worker_slot)
         let worker_reliable_input = commands.subscribe(subscriber = worker_slot)
         let hello_input = counter.subscribe(subscriber = hello_slot)

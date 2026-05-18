@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-const timerTickTopicSource = `
+const timerTopicSource = `
 module examples.timer_tick_topic
 use { BootPanic } from platform.hardware.panic
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
@@ -39,9 +39,9 @@ image TimerTopicImage {
 }
 `
 
-func TestTimerTickTopicPayloadLayoutRecorded(t *testing.T) {
+func TestTimerPayloadLayoutRecorded(t *testing.T) {
 	topicName := "timer.periodic"
-	checked, ds := checkUEFIModulesWithExtraSource(t, "timer-topic.wrela", timerTickTopicSource)
+	checked, ds := checkUEFIModulesWithExtraSource(t, "timer-topic.wrela", timerTopicSource)
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics: %#v", ds)
 	}

@@ -1967,51 +1967,6 @@ func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.
 				ops = append(ops, valueOps...)
 				ops = append(ops, tryPublish)
 				return tryPublish, ops, ret
-			case "publish_or_wait":
-				value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "value"))
-				method := ctx.lookupMethod(recvType, "try_publish")
-				ret := ctx.methodReturn(moduleName, method)
-				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				if label == "" {
-					break
-				}
-				fullField := ctx.lookupField(ret, "full")
-				if fullField == nil {
-					ctx.errorf("publish_or_wait requires U64PublishResult.full")
-					break
-				}
-				publisherSlot := ctx.publisherSlotForValue(receiver, receiverType)
-				result := ctx.tempLocal("publish_or_wait_result", ctx.irType(ret))
-				initialTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
-				initialCopy := &Copy{Target: result, Source: initialTry, Type: ctx.irType(ret)}
-				condition := &FieldLoad{
-					Object:     result,
-					ObjectType: ret.Name,
-					Field:      "full",
-					Type:       fullField.Type,
-					Offset:     fullField.Offset,
-				}
-				wait := &ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: publisherSlot}
-				retryTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
-				retryCopy := &Copy{Target: result, Source: retryTry, Type: ctx.irType(ret)}
-				loop := &While{
-					ConditionOps: []Operation{condition},
-					Condition:    condition,
-					Body:         []Operation{wait, retryTry, retryCopy},
-				}
-				ops := append([]Operation{}, receiverOps...)
-				ops = append(ops, valueOps...)
-				ops = append(ops, initialTry, initialCopy, loop)
-				return receiver, ops, ctx.resolveType(moduleName, "void")
-			case "wait_for_subscriber_advance":
-				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				if label == "" {
-					break
-				}
-				wait := ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: ctx.publisherSlotForValue(receiver, receiverType)}
-				ops := append([]Operation{}, receiverOps...)
-				ops = append(ops, wait)
-				return receiver, ops, ctx.resolveType(moduleName, "void")
 			}
 		}
 		if sem.IsTopicSubscriptionType(recvType) {

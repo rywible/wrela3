@@ -1,11 +1,11 @@
 // expect: SEM0045: reliable try_publish result must be observed
 module negative.reliable_try_publish_ignored
 
-module machine.x86_64.topic_u64
-class U64ReliablePublisher { fn try_publish(self, value: U64) -> Bool { return true } }
+module machine.x86_64.topic
+class ReliablePublisher<T> { fn try_publish(self, value: T) -> Bool { return true } }
 
 executor Producer {
-    pub: U64ReliablePublisher
+    pub: ReliablePublisher<U64>
     start fn run(self) -> never {
         self.pub.try_publish(value = 1)
         while true {}

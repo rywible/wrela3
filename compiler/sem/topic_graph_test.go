@@ -43,81 +43,6 @@ func TestExecutorTopicKindClassification(t *testing.T) {
 			typ:  &Type{Module: "machine.x86_64.cpu_state", Name: "Vcpu", Kind: KindClass},
 			fn:   IsVcpuType,
 		},
-		{
-			name: "gap topic",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64GapTopic", Kind: KindClass},
-			fn:   IsTopicType,
-		},
-		{
-			name: "reliable topic",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64ReliableTopic", Kind: KindClass},
-			fn:   IsTopicType,
-		},
-		{
-			name: "gap publisher",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64GapPublisher", Kind: KindClass},
-			fn:   IsTopicPublisherType,
-		},
-		{
-			name: "reliable publisher",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64ReliablePublisher", Kind: KindClass},
-			fn:   IsTopicPublisherType,
-		},
-		{
-			name: "gap subscription",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64GapSubscription", Kind: KindClass},
-			fn:   IsTopicSubscriptionType,
-		},
-		{
-			name: "reliable subscription",
-			typ:  &Type{Module: "machine.x86_64.topic_u64", Name: "U64ReliableSubscription", Kind: KindClass},
-			fn:   IsTopicSubscriptionType,
-		},
-		{
-			name: "serial rx topic",
-			typ:  &Type{Module: "machine.x86_64.serial", Name: "SerialRxTopic", Kind: KindClass},
-			fn:   IsTopicType,
-		},
-		{
-			name: "serial publisher",
-			typ:  &Type{Module: "machine.x86_64.serial", Name: "SerialRxPublisher", Kind: KindClass},
-			fn:   IsTopicPublisherType,
-		},
-		{
-			name: "serial subscription",
-			typ:  &Type{Module: "machine.x86_64.serial", Name: "SerialRxSubscription", Kind: KindClass},
-			fn:   IsTopicSubscriptionType,
-		},
-		{
-			name: "edu interrupt topic",
-			typ:  &Type{Module: "machine.x86_64.edu", Name: "EduInterruptTopic", Kind: KindClass},
-			fn:   IsTopicType,
-		},
-		{
-			name: "edu interrupt publisher",
-			typ:  &Type{Module: "machine.x86_64.edu", Name: "EduInterruptPublisher", Kind: KindClass},
-			fn:   IsTopicPublisherType,
-		},
-		{
-			name: "edu interrupt subscription",
-			typ:  &Type{Module: "machine.x86_64.edu", Name: "EduInterruptSubscription", Kind: KindClass},
-			fn:   IsTopicSubscriptionType,
-		},
-		{
-			name: "ivshmem doorbell topic",
-			typ:  &Type{Module: "machine.x86_64.ivshmem", Name: "IvshmemDoorbellTopic", Kind: KindClass},
-			fn:   IsTopicType,
-		},
-		{
-			name: "ivshmem doorbell publisher",
-			typ:  &Type{Module: "machine.x86_64.ivshmem", Name: "IvshmemDoorbellPublisher", Kind: KindClass},
-			fn:   IsTopicPublisherType,
-		},
-		{
-			name: "ivshmem doorbell subscription",
-			typ:  &Type{Module: "machine.x86_64.ivshmem", Name: "IvshmemDoorbellSubscription", Kind: KindClass},
-			fn:   IsTopicSubscriptionType,
-		},
 	}
 
 	for _, test := range tests {
@@ -162,29 +87,34 @@ module machine.x86_64.executor_loop
 class EventSleepPolicy { asm fn wait(self) { hlt; ret } }
 `, `
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-	class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+	class Topic<T> {
 	    identity: TopicIdentity
 	    id: U64
 	    depth: U64
-	    asm fn publisher(self) -> U64GapPublisher { ret }
-	    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret }
+	    asm fn publisher(self) -> TopicPublisher<T> { ret }
+	    asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret }
 	}
-	class U64GapPublisher { topic: U64GapTopic }
-	data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot; cursor: U64; armed: Bool }
+	class TopicPublisher<T> { topic: Topic<T> }
+	data TopicSubscription<T> { topic: Topic<T>; subscriber: ExecutorSlot; cursor: U64; armed: Bool }
 	`)
 	src := `
 module test.graph
 use { ExecutorSlot, SlotIdentity, OwnedHardware, DelegatedHardware } from machine.x86_64.cpu_state
-	use { U64GapPublisher, U64GapSubscription, U64GapTopic, TopicIdentity } from machine.x86_64.topic_u64
+	use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicPublisher, TopicSubscription } from machine.x86_64.topic
 use { EventSleepPolicy } from machine.x86_64.executor_loop
 
 executor Worker {
     slot: ExecutorSlot
     loop: EventSleepPolicy
-	    input: U64GapSubscription
-	    out: U64GapPublisher
+	    input: TopicSubscription<U64>
+	    out: TopicPublisher<U64>
 	    start fn run(self) -> never { while true {} }
 	}
 
@@ -193,7 +123,7 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
         let input = topic.subscribe(subscriber = worker_slot)
 	        let worker = Worker(slot = worker_slot, loop = EventSleepPolicy(), input = input, out = topic.publisher())
         hardware.vcpu0.enter(executor = worker)
@@ -328,22 +258,27 @@ class OwnedHardware { vcpu0: Vcpu; executors: ExecutorRegistry }
 unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardware { return OwnedHardware(vcpu0 = Vcpu(), executors = ExecutorRegistry()) } }
 `, `
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+class Topic<T> {
     identity: TopicIdentity
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret }
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret }
 }
-data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot }
+data TopicSubscription<T> { topic: Topic<T>; subscriber: ExecutorSlot }
 	`)
 	src := `
 module test.inline_subscription_graph
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
-use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicSubscription } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
-    input: U64GapSubscription
+    input: TopicSubscription<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -352,7 +287,7 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
         let worker = Worker(slot = worker_slot, input = topic.subscribe(subscriber = worker_slot))
         hardware.vcpu0.enter(executor = worker)
     }
@@ -379,21 +314,26 @@ class OwnedHardware { vcpu0: Vcpu; executors: ExecutorRegistry }
 unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardware { return OwnedHardware(vcpu0 = Vcpu(), executors = ExecutorRegistry()) } }
 `, `
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+class Topic<T> {
     identity: TopicIdentity
-    asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret }
+    asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret }
 }
-data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot }
+data TopicSubscription<T> { topic: Topic<T>; subscriber: ExecutorSlot }
 `, `
 module test.inline_subscription_mismatch
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
-use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicSubscription } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
-    input: U64GapSubscription
+    input: TopicSubscription<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -403,7 +343,7 @@ image Img {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
         let other_slot = hardware.executors.claim(identity = SlotIdentity(label = "other"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
         let worker = Worker(slot = worker_slot, input = topic.subscribe(subscriber = other_slot))
         hardware.vcpu0.enter(executor = worker)
     }
@@ -612,23 +552,28 @@ class OwnedHardware { vcpu0: Vcpu; executors: ExecutorRegistry }
 unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardware { return OwnedHardware(vcpu0 = Vcpu(), executors = ExecutorRegistry()) } }
 `, `
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+class Topic<T> {
     identity: TopicIdentity
-    fn publisher(self) -> U64GapPublisher { return U64GapPublisher(topic = self) }
-    fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { return U64GapSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false) }
+    fn publisher(self) -> TopicPublisher<T> { return TopicPublisher<T>(topic = self) }
+    fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { return TopicSubscription<T>(topic = self, subscriber = subscriber, cursor = 0, armed = false) }
 }
-class U64GapPublisher { topic: U64GapTopic }
-class U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot; cursor: U64; armed: Bool }
+class TopicPublisher<T> { topic: Topic<T> }
+class TopicSubscription<T> { topic: Topic<T>; subscriber: ExecutorSlot; cursor: U64; armed: Bool }
 `, `
 module test.direct_topic_capability
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
-use { TopicIdentity, U64GapPublisher, U64GapTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicPublisher } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
-    out: U64GapPublisher
+    out: TopicPublisher<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -637,8 +582,8 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
-        let worker = Worker(slot = worker_slot, out = U64GapPublisher(topic = topic))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
+        let worker = Worker(slot = worker_slot, out = TopicPublisher<U64>(topic = topic))
         hardware.vcpu0.enter(executor = worker)
     }
 }
@@ -729,19 +674,24 @@ unique class DelegatedHardware { fn exit_to_owned_hardware(self) -> OwnedHardwar
 `, `
 module machine.x86_64.topic_u64
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { TopicIdentity } from machine.x86_64.topic_u64
+class Topic<T> {
     identity: TopicIdentity
-    asm fn publisher(self) -> U64GapPublisher { ret }
+    asm fn publisher(self) -> TopicPublisher<T> { ret }
 }
-class U64GapPublisher { topic: U64GapTopic }
+class TopicPublisher<T> { topic: Topic<T> }
 `, `
 module test.runtime_topic_factory
 use { DelegatedHardware, ExecutorSlot, OwnedHardware, SlotIdentity } from machine.x86_64.cpu_state
-use { TopicIdentity, U64GapTopic } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
-    topic: U64GapTopic
+    topic: Topic<U64>
     start fn run(self) -> never {
         let pub = self.topic.publisher()
         while true {}
@@ -753,7 +703,7 @@ image Img {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let worker_slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
         let worker = Worker(slot = worker_slot, topic = topic)
         hardware.vcpu0.enter(executor = worker)
     }
@@ -794,20 +744,25 @@ module machine.x86_64.executor_loop
 class HotPollPolicy {}
 `, `
 module machine.x86_64.topic_u64
-use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic {
+
+`, `
+module machine.x86_64.topic
+use { ExecutorSlot } from machine.x86_64.cpu_state
+use { TopicIdentity } from machine.x86_64.topic_u64
+class Topic<T> {
     identity: TopicIdentity
     id: U64
     depth: U64
-    asm fn publisher(self) -> U64GapPublisher { ret }
+    asm fn publisher(self) -> TopicPublisher<T> { ret }
 }
-class U64GapPublisher { topic: U64GapTopic }
+class TopicPublisher<T> { topic: Topic<T> }
 `)
 	src := `
 module test.two_producers
 use { ExecutorSlot, SlotIdentity, OwnedHardware, DelegatedHardware } from machine.x86_64.cpu_state
-use { U64GapPublisher, U64GapTopic, TopicIdentity } from machine.x86_64.topic_u64
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { Topic, TopicPublisher } from machine.x86_64.topic
 use { HotPollPolicy } from machine.x86_64.executor_loop
 use { ExecutorMemory } from machine.x86_64.executor_memory
 
@@ -815,7 +770,7 @@ executor Producer {
     slot: ExecutorSlot
     loop: HotPollPolicy
     memory: ExecutorMemory
-    out: U64GapPublisher
+    out: TopicPublisher<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -825,7 +780,7 @@ image Img {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot_a = hardware.executors.claim(identity = SlotIdentity(label = "producer.a"))
         let slot_b = hardware.executors.claim(identity = SlotIdentity(label = "producer.b"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"), id = 0, depth = 64)
         let producer_a = Producer(slot = slot_a, loop = HotPollPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), out = topic.publisher())
         let producer_b = Producer(slot = slot_b, loop = HotPollPolicy(), memory = ExecutorMemory(arena_base = 0, arena_length = 4096, next_offset = 0), out = topic.publisher())
         hardware.vcpu1.start(executor = producer_a)
@@ -878,7 +833,8 @@ use { Bytes, MutableBytes } from machine.x86_64.executor_memory
 use { HotPollPolicy } from machine.x86_64.executor_loop
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, IoApicDiscovered, IoApicRoute, LocalApic } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { SerialConsolePath, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialConsolePath, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { Topic, TopicSubscription } from machine.x86_64.topic
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -886,7 +842,7 @@ executor Worker {
     slot: ExecutorSlot
     loop: HotPollPolicy
     interrupts: ApicInterruptController
-    serial_rx: SerialRxSubscription
+    serial_rx: TopicSubscription<SerialPathInterrupt>
 
     start fn run(self) -> never {
         `+test.configure+`
@@ -940,7 +896,7 @@ image ExplicitInterruptConfigurator {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = SerialRxTopic(identity = TopicIdentity(label = "serial.rx"), id = 0)
+        let topic = Topic<SerialPathInterrupt>(identity = TopicIdentity(label = "serial.rx"), id = 0, depth = 64)
         let path = SerialConsolePath(
             identity = PathIdentity(label = "serial"),
             registers = SerialWriterRegisters(port_base = 0x03f8),
@@ -986,21 +942,23 @@ func TestPathPublisherWithoutTopicIdentityIsRejectedFromSource(t *testing.T) {
 module machine.x86_64.cpu_state
 data PathIdentity { label: StringLiteral }
 `, `
-module machine.x86_64.serial
-use { PathIdentity } from machine.x86_64.cpu_state
-
-data SerialPathInterrupt { has_byte: Bool; byte: U8 }
-
-class SerialRxTopic {
+module machine.x86_64.topic
+class Topic<T> {
     id: U64
-    fn publisher(self) -> SerialRxPublisher {
-        return SerialRxPublisher(topic = self)
+    fn publisher(self) -> TopicPublisher<T> {
+        return TopicPublisher<T>(topic = self)
     }
 }
 
-class SerialRxPublisher {
-    topic: SerialRxTopic
+class TopicPublisher<T> {
+    topic: Topic<T>
 }
+`, `
+module machine.x86_64.serial
+use { PathIdentity } from machine.x86_64.cpu_state
+use { TopicPublisher } from machine.x86_64.topic
+
+data SerialPathInterrupt { has_byte: Bool; byte: U8 }
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -1009,7 +967,7 @@ driver path SerialWriterRegisters {
 driver path SerialConsolePath {
     identity: PathIdentity
     registers: SerialWriterRegisters
-    rx: SerialRxPublisher
+    rx: TopicPublisher<SerialPathInterrupt>
 
     interrupt receiver -> SerialPathInterrupt {
         return SerialPathInterrupt(has_byte = false, byte = 0)
@@ -1018,7 +976,8 @@ driver path SerialConsolePath {
 `, `
 module test.path_topic_identity
 use { PathIdentity } from machine.x86_64.cpu_state
-use { SerialConsolePath, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialConsolePath, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { Topic } from machine.x86_64.topic
 
 unique class OwnedHardware {}
 unique class DelegatedHardware {
@@ -1035,7 +994,7 @@ image Img {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let topic = SerialRxTopic(id = 0)
+        let topic = Topic<SerialPathInterrupt>(id = 0)
         let path = SerialConsolePath(
             identity = PathIdentity(label = "serial"),
             registers = SerialWriterRegisters(port_base = 0x03f8),
@@ -1271,11 +1230,21 @@ func testSpan(start int) source.Span {
 }
 
 func topicPublisherType() *Type {
-	return &Type{Module: "machine.x86_64.topic_u64", Name: "U64ReliablePublisher", Kind: KindClass}
+	return &Type{
+		Module:   "machine.x86_64.topic",
+		Name:     "ReliablePublisher",
+		Kind:     KindClass,
+		TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}},
+	}
 }
 
 func topicSubscriptionType() *Type {
-	return &Type{Module: "machine.x86_64.topic_u64", Name: "U64GapSubscription", Kind: KindData}
+	return &Type{
+		Module:   "machine.x86_64.topic",
+		Name:     "TopicSubscription",
+		Kind:     KindClass,
+		TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}},
+	}
 }
 
 func workerWithSlotType() *Type {
