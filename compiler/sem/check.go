@@ -3099,6 +3099,12 @@ func (c *checker) typeExprNoExpected(moduleName string, expr ast.Expr, scope *Sc
 		return c.mustType(moduleName, "StringLiteral")
 	case *ast.BoolLiteral:
 		return c.mustType(moduleName, "Bool")
+	case *ast.SizeOfExpr:
+		c.constValueOfExpr(moduleName, e)
+		return c.mustType(moduleName, "U64")
+	case *ast.AlignOfExpr:
+		c.constValueOfExpr(moduleName, e)
+		return c.mustType(moduleName, "U64")
 	case *ast.FieldExpr:
 		baseType := c.typeExpr(moduleName, e.Base, scope, ctx)
 		c.recordDiscoveryFactFromField(e, baseType)
@@ -3246,6 +3252,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			c.error(expr.SpanV, diag.CG0001, "missing constructor field "+field.Name)
 		}
 	}
+	c.recordInterruptQueueConstructor(moduleName, expr, constructed, scope, ctx)
 	if qualifiedTypeName(constructed) == "machine.x86_64.cpu_state.HardwarePlan" {
 		strategy, fallback := c.hardwarePlanWakeOrigin(moduleName, expr, scope)
 		c.rememberHardwarePlanWakeOrigin(strategy, fallback)
@@ -3350,6 +3357,9 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 			c.error(expr.SpanV, diag.SEM0056, "physical region and arena authorities cannot be forged")
 			return
 		}
+	}
+	if isInterruptQueueType(typ) && ctx == ContextImagePhaseDirect {
+		return
 	}
 	if isHardwareAuthorityType(typ) && !isTrustedHardwareAuthorityModule(moduleName) {
 		c.error(expr.SpanV, diag.SEM0049, typ.Name+" must come from hardware discovery authority")
@@ -3758,6 +3768,9 @@ func typesCompatible(target, value *Type) bool {
 		return true
 	}
 	if target.Key() != "" && target.Key() == value.Key() {
+		return true
+	}
+	if isInterruptQueueType(target) && isInterruptQueueType(value) {
 		return true
 	}
 	if isIntegerType(target) && isIntegerType(value) {

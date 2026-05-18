@@ -103,6 +103,10 @@ func isSlotsType(t *Type) bool {
 	return t != nil && t.Module == "machine.x86_64.executor_memory" && t.Name == "Slots" && len(t.TypeArgs) == 1
 }
 
+func isInterruptQueueType(t *Type) bool {
+	return t != nil && t.Module == "machine.x86_64.interrupt_queue" && t.Name == "InterruptQueue" && len(t.TypeArgs) == 1
+}
+
 func isSliceType(t *Type) bool {
 	return t != nil &&
 		t.Module == "machine.x86_64.executor_memory" &&

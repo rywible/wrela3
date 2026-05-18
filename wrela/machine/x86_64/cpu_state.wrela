@@ -265,7 +265,7 @@ data HardwarePlan {
     interrupts: InterruptRoutingPlan
     pci: ClaimedPciPlan
     timer: TimerAuthority
-    serial_irq_queue: InterruptQueue
+    serial_irq_queue: InterruptQueue<U8>
     console_memory: ExecutorMemory
     worker_memory: ExecutorMemory
     wake_strategy: WakeStrategy

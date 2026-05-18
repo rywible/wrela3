@@ -1,7 +1,7 @@
 module machine.x86_64.interrupt_queue
 
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { MutableBytes } from machine.x86_64.executor_memory
+use { Slots } from machine.x86_64.executor_memory
 
 data QueueIdentity {
     label: StringLiteral
@@ -17,10 +17,10 @@ data InterruptOverflowPolicy {
     mode: U64
 }
 
-data InterruptQueue {
+data InterruptQueue<T> {
     identity: QueueIdentity
     owner: ExecutorSlot
-    storage: MutableBytes
+    slots: Slots<T>
     capacity: U64
     payload: InterruptPayloadKind
     overflow: InterruptOverflowPolicy

@@ -8,11 +8,16 @@ import (
 
 func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "missing-overflow-policy.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
+        let queue = InterruptQueue<SerialPathInterrupt>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
             capacity = 4,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8)
+            payload = InterruptPayloadKind(kind = 1, size = sizeof(SerialPathInterrupt), align = alignof(SerialPathInterrupt)),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if !hasCode(ds, diag.SEM0060) {
@@ -20,14 +25,54 @@ func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	}
 }
 
-func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
-	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+func TestInterruptQueueSourceShapeIsGeneric(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-shape.wrela", interruptQueueSource(`
+        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
+        let queue = InterruptQueue<SerialPathInterrupt>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
             capacity = 4,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 2)
+            payload = InterruptPayloadKind(kind = 1, size = sizeof(SerialPathInterrupt), align = alignof(SerialPathInterrupt)),
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+`))
+	if len(ds) != 0 {
+		t.Fatalf("interrupt queue diagnostics: %#v", ds)
+	}
+	queue := moduleType(t, checked.Index, "machine.x86_64.interrupt_queue", "InterruptQueue")
+	if len(queue.TypeParams) != 1 || queue.TypeParams[0].Name != "T" {
+		t.Fatalf("InterruptQueue type params = %#v, want T", queue.TypeParams)
+	}
+	assertTypeFields(t, queue, map[string]string{
+		"identity":   "QueueIdentity",
+		"owner":      "ExecutorSlot",
+		"slots":      "Slots<T>",
+		"capacity":   "U64",
+		"payload":    "InterruptPayloadKind",
+		"overflow":   "InterruptOverflowPolicy",
+		"head":       "U64",
+		"tail":       "U64",
+		"overflowed": "Bool",
+	})
+}
+
+func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
+        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
+        let queue = InterruptQueue<SerialPathInterrupt>(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
+            capacity = 4,
+            payload = InterruptPayloadKind(kind = 1, size = sizeof(SerialPathInterrupt), align = alignof(SerialPathInterrupt)),
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if len(ds) != 0 {
@@ -37,19 +82,24 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
 	}
 	queue := checked.ImageGraph.InterruptQueues[0]
-	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "kind:1" || queue.PayloadSize != 8 || queue.PayloadAlign != 8 || queue.Overflow != "set_flag_and_wake" {
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "kind:1" || queue.PayloadSize != 2 || queue.PayloadAlign != 1 || queue.Overflow != "set_flag_and_wake" {
 		t.Fatalf("interrupt queue node = %#v", queue)
 	}
 }
 
 func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-overflow.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 1)
+        let queue = InterruptQueue<SerialPathInterrupt>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
             capacity = 0x8000000000000000,
-            payload = InterruptPayloadKind(kind = 1, size = 2, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 2)
+            payload = InterruptPayloadKind(kind = 1, size = sizeof(SerialPathInterrupt), align = alignof(SerialPathInterrupt)),
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if !hasCode(ds, diag.SEM0060) {
@@ -113,8 +163,9 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, 
 use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
-use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy } from machine.x86_64.interrupt_queue
+use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { SerialPathInterrupt } from machine.x86_64.serial
 
 image InterruptQueueTest {
     transitions { delegated_hardware -> owned_hardware }

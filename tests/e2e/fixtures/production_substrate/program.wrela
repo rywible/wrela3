@@ -43,7 +43,7 @@ executor ProductionSubstrateProgram {
     ivshmem_events: IvshmemDoorbellSubscription
     ivshmem_tx: IvshmemDoorbellPeerPath
     serial_irq_source: SharedInterruptSource
-    serial_irq_queue: InterruptQueue
+    serial_irq_queue: InterruptQueue<U8>
     console_ticks: TimerTickSubscription
 
     start fn run(self) -> never {

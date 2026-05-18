@@ -1831,6 +1831,18 @@ func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.
 		typ := ctx.resolveType(moduleName, "Bool")
 		c := &ConstInt{Symbol: "bool", Value: raw, Type: ctx.irType(typ)}
 		return c, []Operation{c}, typ
+	case *ast.SizeOfExpr:
+		target := ctx.resolveTypeRef(moduleName, e.Type)
+		info := ctx.ensureTypeInfo(target, map[string]bool{})
+		typ := ctx.resolveType(moduleName, "U64")
+		c := &ConstInt{Symbol: "sizeof", Value: uint64(info.Size), Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
+	case *ast.AlignOfExpr:
+		target := ctx.resolveTypeRef(moduleName, e.Type)
+		info := ctx.ensureTypeInfo(target, map[string]bool{})
+		typ := ctx.resolveType(moduleName, "U64")
+		c := &ConstInt{Symbol: "alignof", Value: uint64(info.Align), Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
 	case *ast.StringLiteral:
 		typ := ctx.resolveType(moduleName, "StringLiteral")
 		dataSymbol := symbolName("str", moduleName, fmt.Sprintf("%d", ctx.stringSeq))

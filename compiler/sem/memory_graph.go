@@ -229,7 +229,7 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 	label, _ := queueIdentityForArg(namedArgExpr(expr.Args, "identity"))
 	owner := c.interruptQueueOwnerLabel(moduleName, namedArgExpr(expr.Args, "owner"), scope)
 	capacity, _ := arenaUnsignedIntArg(expr, "capacity")
-	payloadKind, payloadSize, payloadAlign := interruptPayloadKind(namedArgExpr(expr.Args, "payload"))
+	payloadKind, payloadSize, payloadAlign := c.interruptPayloadKindValue(moduleName, namedArgExpr(expr.Args, "payload"))
 	payloadBytes, payloadBytesOK := interruptQueuePayloadBytes(capacity, payloadSize)
 	if !payloadBytesOK {
 		c.error(expr.SpanV, diag.SEM0060, "interrupt queue backing size overflows 64-bit arithmetic")
@@ -247,6 +247,54 @@ func (c *checker) recordArenaInterruptQueue(moduleName string, expr *ast.CallExp
 	if payloadBytesOK {
 		c.graph.Arenas = append(c.graph.Arenas, c.implicitArenaAllocation(receiverOrigin, label, owner, "interrupt_queue", payloadBytes, payloadAlign, expr.SpanV))
 	}
+}
+
+func (c *checker) recordInterruptQueueConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope, ctx ContextKind) {
+	if !isInterruptQueueType(typ) || ctx != ContextImagePhaseDirect {
+		return
+	}
+	overflow, overflowOK := interruptOverflowPolicy(constructorArg(expr, "overflow"))
+	if !overflowOK {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue overflow policy is missing or invalid")
+	}
+	label, _ := queueIdentityForArg(constructorArg(expr, "identity"))
+	owner := c.interruptQueueOwnerLabel(moduleName, constructorArg(expr, "owner"), scope)
+	capacity, _ := c.constValueOfExpr(moduleName, constructorArg(expr, "capacity"))
+	payloadKind, payloadSize, payloadAlign := c.interruptPayloadKindValue(moduleName, constructorArg(expr, "payload"))
+	if capacity == 0 {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue capacity must be non-zero")
+	}
+	if payloadSize == 0 {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue payload size must be non-zero")
+	}
+	if payloadAlign == 0 {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue payload align must be non-zero")
+	}
+	if len(typ.TypeArgs) == 1 {
+		if size, align, ok := semanticSizeAlign(typ.TypeArgs[0]); ok {
+			if payloadSize != 0 && payloadSize != size {
+				c.error(expr.SpanV, diag.SEM0060, "interrupt queue payload size must match element type")
+			}
+			if payloadAlign != 0 && payloadAlign != align {
+				c.error(expr.SpanV, diag.SEM0060, "interrupt queue payload align must match element type")
+			}
+			payloadSize = size
+			payloadAlign = align
+		}
+	}
+	if _, ok := interruptQueuePayloadBytes(capacity, payloadSize); !ok {
+		c.error(expr.SpanV, diag.SEM0060, "interrupt queue backing size overflows 64-bit arithmetic")
+	}
+	c.graph.InterruptQueues = append(c.graph.InterruptQueues, InterruptQueueNode{
+		Label:        label,
+		Owner:        owner,
+		Capacity:     capacity,
+		PayloadKind:  payloadKind,
+		PayloadSize:  payloadSize,
+		PayloadAlign: payloadAlign,
+		Overflow:     overflow,
+		Span:         expr.SpanV,
+	})
 }
 
 func interruptQueuePayloadBytes(capacity, payloadSize uint64) (uint64, bool) {
@@ -307,7 +355,7 @@ func queueIdentityForArg(expr ast.Expr) (string, bool) {
 	return label, ok
 }
 
-func interruptPayloadKind(expr ast.Expr) (string, uint64, uint64) {
+func (c *checker) interruptPayloadKindValue(moduleName string, expr ast.Expr) (string, uint64, uint64) {
 	payload, ok := expr.(*ast.ConstructorExpr)
 	if !ok || payload == nil {
 		return "", 0, 0
@@ -316,8 +364,8 @@ func interruptPayloadKind(expr ast.Expr) (string, uint64, uint64) {
 	if !ok {
 		return "", 0, 0
 	}
-	size, _ := unsignedIntegerLiteral(constructorArg(payload, "size"))
-	align, _ := unsignedIntegerLiteral(constructorArg(payload, "align"))
+	size, _ := c.constValueOfExpr(moduleName, constructorArg(payload, "size"))
+	align, _ := c.constValueOfExpr(moduleName, constructorArg(payload, "align"))
 	return fmt.Sprintf("kind:%d", kind), size, align
 }
 
