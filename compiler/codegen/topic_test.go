@@ -367,6 +367,41 @@ func TestTopicWaitIfArmedChecksAllGuardsBeforeHlt(t *testing.T) {
 	}
 }
 
+func TestTopicTryNextWritesOptionLayout(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	sub := &ir.Local{Symbol: "sub", Type: ir.Type{Name: "TopicSubscription<U64>"}}
+	next := &ir.TopicTryNext{
+		TopicLabel:     "counter",
+		SubscriberSlot: "worker",
+		Subscription:   sub,
+		Type:           ir.Type{Name: "Option<U64>", Kind: ir.TypeKindEnum},
+	}
+	program.Types["Option<U64>"] = ir.TypeInfo{
+		Name: "Option<U64>", Kind: ir.TypeKindEnum, Size: 16, Align: 8, StorageSize: 16,
+		Fields: map[string]ir.FieldInfo{
+			"$tag":       {Name: "$tag", Type: ir.Type{Name: "U64"}, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+			"Some.value": {Name: "Some.value", Type: ir.Type{Name: "U64"}, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+		},
+		EnumVariants: []ir.EnumVariantInfo{{Name: "None", Discriminant: 0}, {Name: "Some", Discriminant: 1, Fields: []string{"Some.value"}}},
+	}
+	program.Functions = []ir.Function{{
+		Symbol: "try_counter_option",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			sub,
+			next,
+			&ir.Return{},
+		}}},
+	}}
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "try_counter_option")
+	if !containsBytes(code, []byte{0x01, 0x00, 0x00, 0x00}) || !containsBytes(code, []byte{0x08, 0x00, 0x00, 0x00}) {
+		t.Fatalf("try_next must write Option.Some tag and payload offset 8, got %x", code)
+	}
+}
+
 func TestTopicTryNextStoresNestedMessageHandle(t *testing.T) {
 	sub := &ir.Param{Symbol: "input", Type: ir.Type{Name: "U64GapSubscription", Kind: ir.TypeKindClass}}
 	next := &ir.TopicTryNext{TopicLabel: "counter", SubscriberSlot: "worker", Subscription: sub, Type: ir.Type{Name: "U64TopicNext", Kind: ir.TypeKindData}}

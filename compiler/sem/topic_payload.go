@@ -4,12 +4,7 @@ import "strings"
 
 func TopicPayloadTypeForTopic(t *Type) (payload *Type, kind string, ok bool) {
 	if IsTopicType(t) && len(t.TypeArgs) == 1 {
-		if t.Name == "ReliableTopic" {
-			return t.TypeArgs[0], "reliable", true
-		}
-		if t.Name == "Topic" {
-			return t.TypeArgs[0], "topic", true
-		}
+		return t.TypeArgs[0], topicKindFromPayload(t.TypeArgs[0], t.Name == "ReliableTopic"), true
 	}
 	// Compatibility branch removed by Task 20 after source migration.
 	if t != nil && t.Module == "machine.x86_64.topic_payload" && t.Name == "TimerTickTopic" {
@@ -20,6 +15,35 @@ func TopicPayloadTypeForTopic(t *Type) (payload *Type, kind string, ok bool) {
 		return primitiveU64Type(), existingU64TopicKind(t), true
 	}
 	return nil, "", false
+}
+
+func topicKindFromPayload(payload *Type, reliable bool) string {
+	if payload == nil {
+		if reliable {
+			return "reliable"
+		}
+		return "topic"
+	}
+	switch payload.Key() {
+	case "U64":
+		if reliable {
+			return "reliable_u64"
+		}
+		return "gap_u64"
+	case "machine.x86_64.topic_payload.TimerTickPayload":
+		return "timer_tick"
+	case "machine.x86_64.serial.SerialPathInterrupt":
+		return "serial_rx"
+	case "machine.x86_64.edu.EduInterrupt":
+		return "edu_interrupt"
+	case "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt":
+		return "ivshmem_doorbell"
+	default:
+		if reliable {
+			return "reliable"
+		}
+		return "topic"
+	}
 }
 
 func resolveBuiltinTopicPayload(moduleName string, typeName string) *Type {

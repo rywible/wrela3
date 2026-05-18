@@ -973,13 +973,13 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 	case *ir.FieldLoad:
 		return ctx.isDataType(v.Type)
 	case *ir.ReliableTopicTryPublish:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case ir.ReliableTopicTryPublish:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case *ir.TopicTryNext:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case ir.TopicTryNext:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case *ir.VcpuStart:
 		return ctx.isDataType(v.Type)
 	case ir.VcpuStart:
@@ -2645,15 +2645,9 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
 		return
 	}
-	if (publish.Kind != "" && publish.Kind != "gap_u64") || (layout.Kind != "" && layout.Kind != "gap_u64") {
-		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + publish.Kind})
-		return
-	}
-
 	base := asm.MustLookup("rax")
 	seq := asm.MustLookup("r10")
 	slot := asm.MustLookup("r11")
-	value := asm.MustLookup("rcx")
 
 	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
@@ -2665,8 +2659,7 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
-	emitLoadValue(e, frame, publish.Value, value)
-	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitCopyValueToMemoryRange(e, frame, publish.Value, slot, 8, e.ctx.storageSizeForType(valueType(publish.Value)))
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
 	wakeSlots := make([]string, 0, len(layout.Subscribers))
@@ -2696,12 +2689,27 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	}
 	publishedOffset := outSlot
 	fullOffset := outSlot + 1
+	resultTagOffset := -1
+	okDiscriminant := int64(0)
+	errDiscriminant := int64(1)
 	if info, ok := e.ctx.typeInfo(publish.Type); ok {
-		if field, ok := info.Fields["published"]; ok {
-			publishedOffset = outSlot + field.Offset
-		}
-		if field, ok := info.Fields["full"]; ok {
-			fullOffset = outSlot + field.Offset
+		if info.Kind == ir.TypeKindEnum {
+			if field, ok := info.Fields["$tag"]; ok {
+				resultTagOffset = outSlot + fieldStorageOffset(field)
+			}
+			if variant, ok := enumVariantInfo(info, "Ok"); ok {
+				okDiscriminant = int64(variant.Discriminant)
+			}
+			if variant, ok := enumVariantInfo(info, "Err"); ok {
+				errDiscriminant = int64(variant.Discriminant)
+			}
+		} else {
+			if field, ok := info.Fields["published"]; ok {
+				publishedOffset = outSlot + field.Offset
+			}
+			if field, ok := info.Fields["full"]; ok {
+				fullOffset = outSlot + field.Offset
+			}
 		}
 	}
 
@@ -2717,6 +2725,9 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitSlotFromBase(e, asm.MustLookup("r8"), asm.MustLookup("rbp"), outSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("r8"), valueSlot, 64)
 	emitZeroSlotRange(e, outSlot, e.ctx.storageSizeForType(publish.Type))
+	if resultTagOffset >= 0 {
+		emitStoreSlotImm(e, resultTagOffset, okDiscriminant, 64)
+	}
 	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitLoadMemToReg(e, producer, base, int64(layout.HeadOffset), 64)
 	emitReliableTopicMinCursor(e, layout, base, minCursor, candidate)
@@ -2745,11 +2756,17 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 		wakeSlots = append(wakeSlots, subscriber.Label)
 	}
 	emitTouchSubscriberWaitlinesAndWake(e, layout, base, producer, wakeSlots, e.ctx)
-	emitStoreSlotBool(e, publishedOffset, 1)
+	if resultTagOffset < 0 {
+		emitStoreSlotBool(e, publishedOffset, 1)
+	}
 	e.emitJmp(done)
 
 	e.bindLabel(full)
-	emitStoreSlotBool(e, fullOffset, 1)
+	if resultTagOffset >= 0 {
+		emitStoreSlotImm(e, resultTagOffset, errDiscriminant, 64)
+	} else {
+		emitStoreSlotBool(e, fullOffset, 1)
+	}
 	e.bindLabel(done)
 }
 
@@ -2914,8 +2931,20 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	noMessage := e.newLabel("topic_try_next_empty")
 	gap := e.newLabel("topic_try_next_gap")
 	resultInfo, hasResultInfo := e.ctx.typeInfo(next.Type)
-	messageField := resultInfo.Fields["message"]
-	hasMessageField := hasResultInfo && messageField.StorageOffset >= 0
+	messageField, hasMessageField := resultInfo.Fields["message"]
+	hasMessageField = hasResultInfo && hasMessageField && messageField.StorageOffset >= 0
+	optionPayloadField, hasOptionPayload := resultInfo.Fields["Some.value"]
+	isOptionResult := hasResultInfo && resultInfo.Kind == ir.TypeKindEnum && hasOptionPayload
+	optionTagOffset := outSlot
+	optionSomeDiscriminant := int64(1)
+	if isOptionResult {
+		if tagField, ok := resultInfo.Fields["$tag"]; ok {
+			optionTagOffset = outSlot + fieldStorageOffset(tagField)
+		}
+		if variant, ok := enumVariantInfo(resultInfo, "Some"); ok {
+			optionSomeDiscriminant = int64(variant.Discriminant)
+		}
+	}
 	hasMessageOffset := outSlot
 	if hasResultInfo {
 		if field, ok := resultInfo.Fields["has_message"]; ok {
@@ -2957,9 +2986,13 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitCmpRegReg(e, tmp, cursor)
 	e.emitJcc(0x85, gap)
 	emitMfence(e)
-	emitMovImmToReg(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
-	if hasMessageField {
+	if isOptionResult {
+		emitStoreSlotImm(e, optionTagOffset, optionSomeDiscriminant, 64)
+		emitMovImmToReg(e, asm.MustLookup("rdi"), int64(fieldStorageOffset(optionPayloadField)))
+		emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+fieldStorageOffset(optionPayloadField)), slot, 8, fieldStorageSize(e.ctx, optionPayloadField))
+	} else if hasMessageField {
+		emitMovImmToReg(e, tmp, 1)
+		emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
 		if messageField.Type.Name == "U64TopicMessage" {
 			messageInfo, _ := e.ctx.typeInfo(messageField.Type)
 			sequenceOffset := messageField.StorageOffset
@@ -2977,6 +3010,8 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 			emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+messageField.StorageOffset), slot, 8, messageField.StorageSize)
 		}
 	} else {
+		emitMovImmToReg(e, tmp, 1)
+		emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
 		emitStoreSlotFromReg(e, tmp, outSlot+16, 64)
 		emitLoadMemToReg(e, tmp, slot, 8, 64)
 		emitStoreSlotFromReg(e, tmp, outSlot+24, 64)

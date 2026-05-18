@@ -70,7 +70,7 @@ func TestGenericTopicPayloadLayoutRecorded(t *testing.T) {
 	if !ok {
 		t.Fatal("generic topic payload was not recognized")
 	}
-	if gotPayload.Key() != payload.Key() || kind != "topic" {
-		t.Fatalf("payload/kind = %s/%s, want %s/topic", gotPayload.Key(), kind, payload.Key())
+	if gotPayload.Key() != payload.Key() || kind != "timer_tick" {
+		t.Fatalf("payload/kind = %s/%s, want %s/timer_tick", gotPayload.Key(), kind, payload.Key())
 	}
 }
