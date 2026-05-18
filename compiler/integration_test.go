@@ -429,6 +429,29 @@ func TestHelloSourceUsesArenaFrames(t *testing.T) {
 	}
 }
 
+func TestHelloUsesGenericTopicResultNames(t *testing.T) {
+	program := compileHelloProgram(t)
+	var report strings.Builder
+	report.WriteString(readRepoFile(t, "examples/hello/main.wrela"))
+	report.WriteString(readRepoFile(t, "examples/hello/program.wrela"))
+	for key, info := range program.Types {
+		report.WriteString(key)
+		report.WriteString(info.Name)
+	}
+	text := report.String()
+
+	for _, forbidden := range []string{"TimerTickNext", "SerialRxNext", "EduInterruptNext", "IvshmemDoorbellNext", "U64TopicNext"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("report still contains concrete next type %s", forbidden)
+		}
+	}
+	for _, want := range []string{"Topic<TimerTickPayload>", "Option<TimerTickPayload>", "FixedBuffer<RunEvent>"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("report missing %s", want)
+		}
+	}
+}
+
 func TestSerialRXEnablementIsCentralized(t *testing.T) {
 	serialSource := readRepoFile(t, "wrela/machine/x86_64/serial.wrela")
 	if !strings.Contains(serialSource, "let console_path = SerialConsolePath(") {

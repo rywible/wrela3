@@ -1,13 +1,15 @@
 module tests.e2e.fixtures.hello_ivshmem.program
 
+use { Option } from wrela.lang.core
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { EventSleepPolicy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
-use { EduInterruptSubscription, EduMsiPath } from machine.x86_64.edu
+use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptVector } from machine.x86_64.interrupts
-use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellSubscription } from machine.x86_64.ivshmem
+use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } from machine.x86_64.ivshmem
 use { MsiCapability, MsixCapability } from machine.x86_64.pci
-use { SerialConsolePath, SerialRxSubscription } from machine.x86_64.serial
+use { SerialConsolePath, SerialPathInterrupt } from machine.x86_64.serial
+use { TopicSubscription } from machine.x86_64.topic
 
 data RunScratch {
     hello: Bytes
@@ -21,11 +23,11 @@ executor HelloWorld {
     edu_msi: MsiCapability
     ivshmem_msix: MsixCapability
     serial_path: SerialConsolePath
-    serial_rx: SerialRxSubscription
+    serial_rx: TopicSubscription<SerialPathInterrupt>
     edu_path: EduMsiPath
-    edu_interrupts: EduInterruptSubscription
+    edu_interrupts: TopicSubscription<EduInterrupt>
     ivshmem_rx: IvshmemDoorbellPath
-    ivshmem_events: IvshmemDoorbellSubscription
+    ivshmem_events: TopicSubscription<IvshmemDoorbellInterrupt>
     ivshmem_tx: IvshmemDoorbellPeerPath
 
     start fn run(self) -> never {
@@ -40,54 +42,67 @@ executor HelloWorld {
         self.edu_path.raise_test_interrupt()
         self.ivshmem_tx.ring_peer(peer_id = self.ivshmem_rx.position(), vector = 0)
         while true {
-            let serial_event = self.serial_rx.try_next()
-            if serial_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                self.serial_path.write_byte(value = serial_event.message.byte)
-                self.serial_path.write(self.memory.bytes(value = "\n"))
-                self.serial_path.ack_receive(event = serial_event.message)
+            match self.serial_rx.try_next() {
+                Option.Some(value = serial_event) => {
+                    if serial_event.has_byte {
+                        self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
+                        self.serial_path.write_byte(value = serial_event.byte)
+                        self.serial_path.write(self.memory.bytes(value = "\n"))
+                        self.serial_path.ack_receive(event = serial_event)
+                    }
+                }
+                Option.None => {
+                    self.serial_rx.arm_wait()
+                }
             }
-            let edu_event = self.edu_interrupts.try_next()
-            if edu_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
-                self.edu_path.ack_completed(event = edu_event.message)
+            match self.edu_interrupts.try_next() {
+                Option.Some(value = edu_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
+                    self.edu_path.ack_completed(event = edu_event)
+                }
+                Option.None => {
+                    self.edu_interrupts.arm_wait()
+                }
             }
-            let ivshmem_event = self.ivshmem_events.try_next()
-            if ivshmem_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_event.message)
+            match self.ivshmem_events.try_next() {
+                Option.Some(value = ivshmem_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
+                    self.ivshmem_rx.ack_doorbell(event = ivshmem_event)
+                }
+                Option.None => {
+                    self.ivshmem_events.arm_wait()
+                }
             }
 
             self.serial_rx.arm_wait()
             self.edu_interrupts.arm_wait()
             self.ivshmem_events.arm_wait()
 
-            let serial_retry = self.serial_rx.try_next()
-            if serial_retry.has_message {
-                self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                self.serial_path.write_byte(value = serial_retry.message.byte)
-                self.serial_path.write(self.memory.bytes(value = "\n"))
-                self.serial_path.ack_receive(event = serial_retry.message)
+            let had_retry_event = false
+            if let Option.Some(value = serial_retry) = self.serial_rx.try_next() {
+                had_retry_event = true
+                if serial_retry.has_byte {
+                    self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
+                    self.serial_path.write_byte(value = serial_retry.byte)
+                    self.serial_path.write(self.memory.bytes(value = "\n"))
+                    self.serial_path.ack_receive(event = serial_retry)
+                }
             }
-            let edu_retry = self.edu_interrupts.try_next()
-            if edu_retry.has_message {
+            if let Option.Some(value = edu_retry) = self.edu_interrupts.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
-                self.edu_path.ack_completed(event = edu_retry.message)
+                self.edu_path.ack_completed(event = edu_retry)
             }
-            let ivshmem_retry = self.ivshmem_events.try_next()
-            if ivshmem_retry.has_message {
+            if let Option.Some(value = ivshmem_retry) = self.ivshmem_events.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry.message)
+                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry)
             }
-            if serial_retry.has_message == false {
-                if edu_retry.has_message == false {
-                    if ivshmem_retry.has_message == false {
-                        if self.serial_rx.is_wait_armed() {
-                            if self.edu_interrupts.is_wait_armed() {
-                                if self.ivshmem_events.is_wait_armed() {
-                                    self.loop.wait()
-                                }
-                            }
+            if had_retry_event == false {
+                if self.serial_rx.is_wait_armed() {
+                    if self.edu_interrupts.is_wait_armed() {
+                        if self.ivshmem_events.is_wait_armed() {
+                            self.loop.wait()
                         }
                     }
                 }

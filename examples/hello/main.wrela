@@ -8,10 +8,11 @@ use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan,
 use { EventSleepPolicy, HotPollPolicy } from machine.x86_64.executor_loop
 use { Bytes } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
+use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { SerialDriver, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { Topic } from machine.x86_64.topic
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -135,9 +136,10 @@ image HelloSerial {
             owner = worker_slot,
             memory = hardware.hardware_plan.worker_memory
         )
-        let serial_rx_topic = SerialRxTopic(
+        let serial_rx_topic = Topic<SerialPathInterrupt>(
             identity = TopicIdentity(label = "hello.console.rx"),
-            id = 0
+            id = 0,
+            depth = 64
         )
         let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "hello.console"),
@@ -145,9 +147,10 @@ image HelloSerial {
             rx = serial_rx_topic.publisher()
         )
         serial_path.write(hello_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
-        let edu_interrupt_topic = EduInterruptTopic(
+        let edu_interrupt_topic = Topic<EduInterrupt>(
             identity = TopicIdentity(label = "hello.edu.interrupt"),
-            id = 1
+            id = 1,
+            depth = 64
         )
         let serial_rx = serial_rx_topic.subscribe(subscriber = console_slot)
         let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = console_slot)
