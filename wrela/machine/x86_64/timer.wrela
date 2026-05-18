@@ -2,7 +2,8 @@ module machine.x86_64.timer
 
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { LocalApic } from machine.x86_64.interrupts
-use { TimerTickTopic, TimerTickSubscription } from machine.x86_64.topic_payload
+use { Topic, TopicSubscription } from machine.x86_64.topic
+use { TimerTickPayload } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { BootPanic } from platform.hardware.panic
 
@@ -21,8 +22,8 @@ data TimerAuthority {
         }
     }
 
-    fn subscribe(self, subscriber: ExecutorSlot) -> TimerTickSubscription {
-        let topic = TimerTickTopic(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
+    fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<TimerTickPayload> {
+        let topic = Topic<TimerTickPayload>(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
         return topic.subscribe(subscriber = subscriber)
     }
 }

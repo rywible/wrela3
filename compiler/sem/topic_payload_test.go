@@ -15,14 +15,15 @@ use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
-use { TimerTickTopic } from machine.x86_64.topic_payload
+use { Topic } from machine.x86_64.topic
+use { TimerTickPayload } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 image TimerTopicImage {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let panic = BootPanic()
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
-        let topic = TimerTickTopic(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
+        let topic = Topic<TimerTickPayload>(identity = TopicIdentity(label = "timer.periodic"), id = 3, depth = 64)
         let root_region = discovery.memory.require_usable_region(min_base = 0x200000, length = 0x400000, align = 4096)
         let root = root_region.create_arena(identity = ArenaIdentity(label = "timer.topic.root"), policy = ArenaPolicy(evict_cache_by_default = true))
         let console_seed = ExecutorSlot(id = 0)
