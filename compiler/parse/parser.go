@@ -147,6 +147,11 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix data in v0")
 		}
 		return p.parseDataDecl()
+	case lex.KeywordEnum:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix enum in v0")
+		}
+		return p.parseEnumDecl()
 	case lex.KeywordTrait:
 		if unique {
 			return nil, p.err(p.peek(), diag.PAR0002, "trait may not be unique in v0")
@@ -178,11 +183,137 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "image may not be unique")
 		}
 		return p.parseImageDecl()
+	case lex.KeywordConst:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix const in v0")
+		}
+		return p.parseConstDecl()
+	case lex.KeywordStaticAssert:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix static_assert in v0")
+		}
+		return p.parseStaticAssertDecl()
 	case lex.KeywordFn:
 		return nil, p.err(p.peek(), diag.PAR0002, "module-scope fn is not allowed in v0")
 	default:
 		return nil, p.err(p.peek(), diag.PAR0002, "expected declaration")
 	}
+}
+
+func (p *Parser) parseEnumDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected enum name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	var variants []ast.EnumVariant
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		variantName, ds := p.expectIdentifier("expected enum variant name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		spanEnd := variantName.End
+		var fields []ast.Field
+		if p.match(lex.LParen) {
+			variantFields, ds := p.parseFieldListUntil(lex.RParen)
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			fields = variantFields
+			spanEnd = p.previous().End
+		}
+		variants = append(variants, ast.EnumVariant{
+			Name:   variantName.Text,
+			Fields: fields,
+			Span:   p.span(variantName.Start, spanEnd),
+		})
+		p.match(lex.Comma)
+	}
+	if !p.match(lex.RBrace) {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected '}' after enum variants")
+	}
+	return &ast.EnumDecl{
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Variants:   variants,
+		SpanV:      p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseConstDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected const name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
+		return nil, ds
+	}
+	typeRef, ds := p.parseTypeRef()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.ConstDecl{
+		Name:  name.Text,
+		Type:  typeRef,
+		Value: value,
+		SpanV: p.span(start.Start, value.Span().End),
+	}, nil
+}
+
+func (p *Parser) parseStaticAssertDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	if !p.match(lex.LParen) {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected '(' after static_assert")
+	}
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Comma); len(ds) != 0 {
+		return nil, ds
+	}
+	name, ds := p.expectIdentifier("expected message argument")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if name.Text != "message" {
+		return nil, p.err(name, diag.PAR0001, "expected message argument")
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	msgTok := p.nextIf(lex.String)
+	if msgTok.Kind != lex.String {
+		return nil, p.err(msgTok, diag.PAR0001, "expected message string in static_assert")
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.StaticAssertDecl{
+		Expr:    expr,
+		Message: msgTok.Text,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
 }
 
 func (p *Parser) parseDataDecl() (ast.Decl, []diag.Diagnostic) {
@@ -609,6 +740,38 @@ func (p *Parser) parseFieldContainer() ([]ast.Field, []diag.Diagnostic) {
 	return fields, nil
 }
 
+func (p *Parser) parseFieldListUntil(end lex.Kind) ([]ast.Field, []diag.Diagnostic) {
+	var fields []ast.Field
+	if p.match(end) {
+		return fields, nil
+	}
+	for {
+		p.skipSeparators()
+		if p.peek().Kind == end {
+			p.next()
+			return fields, nil
+		}
+		field, ds := p.parseFieldDecl()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		fields = append(fields, field)
+		p.skipSeparators()
+		if p.match(lex.Comma) {
+			p.skipSeparators()
+			if p.peek().Kind == end {
+				return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
+			}
+			continue
+		}
+		if p.peek().Kind != end {
+			return nil, p.err(p.peek(), diag.PAR0001, "expected ',' or ')' in enum variant fields")
+		}
+		p.next()
+		return fields, nil
+	}
+}
+
 func (p *Parser) parseFieldDecl() (ast.Field, []diag.Diagnostic) {
 	name, ds := p.expectIdentifier("expected field name")
 	if len(ds) != 0 {
@@ -765,7 +928,12 @@ func (p *Parser) parseStmt() (ast.Stmt, []diag.Diagnostic) {
 	case lex.KeywordReturn:
 		return p.parseReturnStmt()
 	case lex.KeywordIf:
+		if p.peekN(1).Kind == lex.KeywordLet {
+			return p.parseIfLetStmt()
+		}
 		return p.parseIfStmt()
+	case lex.KeywordMatch:
+		return p.parseMatchStmt()
 	case lex.KeywordWhile:
 		return p.parseWhileStmt()
 	case lex.KeywordFor:
@@ -827,6 +995,117 @@ func (p *Parser) parseIfStmt() (ast.Stmt, []diag.Diagnostic) {
 		}
 	}
 	return &ast.IfStmt{Cond: cond, Then: thenBody, Else: elseBody, SpanV: p.span(start.Start, p.previous().End)}, nil
+}
+
+func (p *Parser) parseIfLetStmt() (ast.Stmt, []diag.Diagnostic) {
+	start := p.next()
+	if _, ds := p.consume(lex.KeywordLet); len(ds) != 0 {
+		return nil, ds
+	}
+	pattern, ds := p.parsePattern()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	body, ds := p.parseBlockStmts()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.IfLetStmt{
+		Pattern: pattern,
+		Value:   value,
+		Body:    body,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseMatchStmt() (ast.Stmt, []diag.Diagnostic) {
+	start := p.next()
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+	var arms []ast.MatchArm
+	for {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace {
+			p.next()
+			return &ast.MatchStmt{Value: value, Arms: arms, SpanV: p.span(start.Start, p.previous().End)}, nil
+		}
+		armStart := p.peek().Start
+		pat, ds := p.parsePattern()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.FatArrow); len(ds) != 0 {
+			return nil, ds
+		}
+		body, ds := p.parseBlockStmts()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		arms = append(arms, ast.MatchArm{
+			Pattern: pat,
+			Body:    body,
+			Span:    p.span(armStart, p.previous().End),
+		})
+	}
+}
+
+func (p *Parser) parsePattern() (ast.Pattern, []diag.Diagnostic) {
+	if p.peek().Kind == lex.Identifier && p.peek().Text == "_" {
+		p.next()
+		return ast.WildcardPattern{}, nil
+	}
+	enumTok, ds := p.expectIdentifier("expected enum name in pattern")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Dot); len(ds) != 0 {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected enum variant pattern")
+	}
+	variantTok, ds := p.expectIdentifier("expected enum variant")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	pattern := ast.VariantPattern{
+		Enum:    enumTok.Text,
+		Variant: variantTok.Text,
+	}
+	if !p.match(lex.LParen) {
+		return pattern, nil
+	}
+	for {
+		name, ds := p.expectIdentifier("expected pattern field name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+			return nil, ds
+		}
+		bind, ds := p.expectIdentifier("expected pattern binding name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		pattern.Bindings = append(pattern.Bindings, ast.PatternBinding{Name: name.Text, Bind: bind.Text})
+		if !p.match(lex.Comma) {
+			break
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return nil, ds
+	}
+	return pattern, nil
 }
 
 func (p *Parser) parseWhileStmt() (ast.Stmt, []diag.Diagnostic) {

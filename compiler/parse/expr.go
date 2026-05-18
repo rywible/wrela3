@@ -1,6 +1,8 @@
 package parse
 
 import (
+	"strings"
+
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/lex"
@@ -92,11 +94,34 @@ func (p *Parser) parseExpr(minPrec int) (ast.Expr, []diag.Diagnostic) {
 func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 	tok := p.next()
 	switch tok.Kind {
+	case lex.KeywordSizeof, lex.KeywordAlignof:
+		isSizeOf := tok.Kind == lex.KeywordSizeof
+		if !p.match(lex.LParen) {
+			return nil, p.err(tok, diag.PAR0001, "expected '(' after operator")
+		}
+		typ, ds := p.parseTypeRef()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+			return nil, ds
+		}
+		if isSizeOf {
+			return &ast.SizeOfExpr{Type: typ, SpanV: p.span(tok.Start, p.previous().End)}, nil
+		}
+		return &ast.AlignOfExpr{Type: typ, SpanV: p.span(tok.Start, p.previous().End)}, nil
 	case lex.Identifier, lex.KeywordNever:
 		if tok.Kind == lex.Identifier && p.peek().Kind == lex.Less && (!startsUpper(tok.Text) || !p.looksLikeGenericConstructor()) {
 			return &ast.NameExpr{Name: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
 		}
-		if tok.Kind == lex.Identifier && p.peek().Kind != lex.LParen && p.peek().Kind != lex.Less {
+		if tok.Kind == lex.Identifier &&
+			p.peek().Kind != lex.LParen &&
+			p.peek().Kind != lex.Less &&
+			!(p.peek().Kind == lex.Dot &&
+				p.peekN(1).Kind == lex.Identifier &&
+				startsUpper(tok.Text) &&
+				startsUpper(p.peekN(1).Text) &&
+				p.peekN(2).Kind == lex.LParen) {
 			return &ast.NameExpr{Name: tok.Text, SpanV: p.span(tok.Start, tok.End)}, nil
 		}
 		p.idx--
@@ -112,6 +137,15 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 			close, ds := p.consume(lex.RParen)
 			if len(ds) != 0 {
 				return nil, ds
+			}
+			parts := strings.Split(typ.Name, ".")
+			if len(parts) == 2 && startsUpper(parts[0]) && startsUpper(parts[1]) {
+				return &ast.VariantConstructorExpr{
+					Enum:    parts[0],
+					Variant: parts[1],
+					Args:    args,
+					SpanV:   p.span(tok.Start, close.End),
+				}, nil
 			}
 			return &ast.ConstructorExpr{
 				Type:  typ,
