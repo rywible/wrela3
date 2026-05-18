@@ -194,6 +194,45 @@ func TestArenaReserveArrayEmitsOverflowAndBoundsTrap(t *testing.T) {
 	}
 }
 
+func testProgramWithSlotWrite(t *testing.T) *ir.Program {
+	t.Helper()
+	slots := &ir.Local{Symbol: "slots", Type: ir.Type{Name: "Slots<Event>"}}
+	index := &ir.ConstInt{Symbol: "index", Value: 0, Type: ir.Type{Name: "U64"}}
+	value := &ir.Local{Symbol: "event", Type: ir.Type{Name: "Event"}}
+	return &ir.Program{Types: genericMemoryTypeInfos(), Functions: []ir.Function{{
+		Symbol: "_wrela_test_slot_write",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			slots,
+			index,
+			value,
+			&ir.SlotWrite{Slots: slots, Index: index, Value: value},
+		}}},
+	}}}
+}
+
+func TestSlotWriteBounds(t *testing.T) {
+	program := testProgramWithSlotWrite(t)
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "_wrela_test_slot_write")
+	if !bytes.Contains(code, []byte{0x0F, 0x83}) && !bytes.Contains(code, []byte{0x73}) {
+		t.Fatalf("slot write must emit jae/jnc style bounds branch, got %#x", code)
+	}
+	for name, want := range map[string][]byte{
+		"Slots.capacity offset": {0x08, 0x00, 0x00, 0x00},
+		"Event storage size":    {0x08, 0x00, 0x00, 0x00},
+	} {
+		if !containsBytes(code, want) {
+			t.Fatalf("slot write missing %s constant %x in %x", name, want, code)
+		}
+	}
+	if !codeCallsSymbol(t, image, "_wrela_test_slot_write", "_wrela_memory_oom") {
+		t.Fatal("slot write must branch/call to _wrela_memory_oom when index >= capacity")
+	}
+}
+
 func testProgramWithArenaReserve(t *testing.T) *ir.Program {
 	t.Helper()
 	memoryType := ir.Type{Name: "ExecutorMemory", Module: "machine.x86_64.executor_memory", Kind: ir.TypeKindClass}

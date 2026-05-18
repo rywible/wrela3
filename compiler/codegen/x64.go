@@ -714,6 +714,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitArenaReserveArray(e, v, frame)
 			case *ir.ArenaPlace:
 				emitArenaPlace(e, v, frame)
+			case *ir.SlotWrite:
+				emitSlotWrite(e, v, frame)
 			case *ir.FrameEnd:
 				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
@@ -1697,6 +1699,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitArenaReserveArray(e, v, frame)
 		case *ir.ArenaPlace:
 			emitArenaPlace(e, v, frame)
+		case *ir.SlotWrite:
+			emitSlotWrite(e, v, frame)
 		case *ir.FrameEnd:
 			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
@@ -2182,6 +2186,51 @@ func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
 	}
 }
 
+func emitSlotWrite(e *Emitter, op *ir.SlotWrite, frame Frame) {
+	slotsBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	capacity := asm.MustLookup("r11")
+	elementReg := asm.MustLookup("rcx")
+
+	if !emitValueAddressToReg(e, frame, op.Slots, slotsBase) {
+		return
+	}
+	slotsInfo, ok := e.ctx.typeInfo(valueType(op.Slots))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slots type: " + valueTypeName(op.Slots)})
+		return
+	}
+	addressField, ok := slotsInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing address field: " + slotsInfo.Name})
+		return
+	}
+	capacityField, ok := slotsInfo.Fields["capacity"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing capacity field: " + slotsInfo.Name})
+		return
+	}
+	emitLoadMemToReg(e, address, slotsBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, capacity, slotsBase, int64(fieldStorageOffset(capacityField)), 64)
+	emitLoadValue(e, frame, op.Index, index)
+	emitIndexBoundsCheck(e, index, capacity)
+
+	valueType := valueType(op.Value)
+	elementSize := e.ctx.storageSizeForType(valueType)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, index, elementReg)
+	emitRegRegOp(e, 0x01, address, index)
+	if e.ctx.isDataType(valueType) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, valueType, address, 0)
+		return
+	}
+	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
 func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg, align asm.Reg) (asm.Reg, bool) {
 	arena := asm.MustLookup("rdi")
 	next := asm.MustLookup("rax")
@@ -2245,6 +2294,17 @@ func emitTrapOnCarry(e *Emitter) {
 	e.emitJcc(0x83, ok)
 	emitCallReloc(e, "_wrela_memory_oom")
 	e.bindLabel(ok)
+}
+
+func emitIndexBoundsCheck(e *Emitter, index asm.Reg, length asm.Reg) {
+	trap := e.newLabel("index_bounds_trap")
+	done := e.newLabel("index_bounds_ok")
+	emitCmpRegReg(e, index, length)
+	e.emitJcc(0x83, trap)
+	e.emitJmp(done)
+	e.bindLabel(trap)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(done)
 }
 
 func emitTrapIfZero(e *Emitter, value asm.Reg) {
