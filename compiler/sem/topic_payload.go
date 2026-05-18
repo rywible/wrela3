@@ -3,9 +3,19 @@ package sem
 import "strings"
 
 func TopicPayloadTypeForTopic(t *Type) (payload *Type, kind string, ok bool) {
+	if IsTopicType(t) && len(t.TypeArgs) == 1 {
+		if t.Name == "ReliableTopic" {
+			return t.TypeArgs[0], "reliable", true
+		}
+		if t.Name == "Topic" {
+			return t.TypeArgs[0], "topic", true
+		}
+	}
+	// Compatibility branch removed by Task 20 after source migration.
 	if t != nil && t.Module == "machine.x86_64.topic_payload" && t.Name == "TimerTickTopic" {
 		return resolveBuiltinTopicPayload("machine.x86_64.topic_payload", "TimerTickPayload"), "timer_tick", true
 	}
+	// Compatibility branch removed by Task 20 after source migration.
 	if t != nil && t.Module == "machine.x86_64.topic_u64" && strings.HasPrefix(t.Name, "U64") {
 		return primitiveU64Type(), existingU64TopicKind(t), true
 	}

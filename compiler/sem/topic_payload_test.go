@@ -59,3 +59,17 @@ func TestTimerTickTopicPayloadLayoutRecorded(t *testing.T) {
 		t.Fatalf("TimerTickPayload field order drifted: %#v", payload.Fields)
 	}
 }
+
+func TestGenericTopicPayloadLayoutRecorded(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index := mustBuildIndex(t, modules)
+	payload := moduleType(t, index, "machine.x86_64.topic_payload", "TimerTickPayload")
+	topic := index.instantiateByName("machine.x86_64.topic", "Topic", []*Type{payload})
+	gotPayload, kind, ok := TopicPayloadTypeForTopic(topic)
+	if !ok {
+		t.Fatal("generic topic payload was not recognized")
+	}
+	if gotPayload.Key() != payload.Key() || kind != "topic" {
+		t.Fatalf("payload/kind = %s/%s, want %s/topic", gotPayload.Key(), kind, payload.Key())
+	}
+}

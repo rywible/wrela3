@@ -14,6 +14,26 @@ func TestExecutorTopicKindClassification(t *testing.T) {
 		fn   func(*Type) bool
 	}{
 		{
+			name: "generic topic",
+			typ:  &Type{Module: "machine.x86_64.topic", Name: "Topic", Kind: KindClass, TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}}},
+			fn:   IsTopicType,
+		},
+		{
+			name: "generic reliable topic",
+			typ:  &Type{Module: "machine.x86_64.topic", Name: "ReliableTopic", Kind: KindClass, TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}}},
+			fn:   IsTopicType,
+		},
+		{
+			name: "generic publisher",
+			typ:  &Type{Module: "machine.x86_64.topic", Name: "TopicPublisher", Kind: KindClass, TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}}},
+			fn:   IsTopicPublisherType,
+		},
+		{
+			name: "generic subscription",
+			typ:  &Type{Module: "machine.x86_64.topic", Name: "TopicSubscription", Kind: KindClass, TypeArgs: []*Type{{Name: "U64", Kind: KindPrimitive}}},
+			fn:   IsTopicSubscriptionType,
+		},
+		{
 			name: "executor slot",
 			typ:  &Type{Module: "machine.x86_64.cpu_state", Name: "ExecutorSlot", Kind: KindClass},
 			fn:   IsExecutorSlotType,

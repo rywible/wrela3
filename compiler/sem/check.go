@@ -3008,6 +3008,13 @@ func vcpuIDForReceiver(expr ast.Expr) (int, bool) {
 }
 
 func topicKindForType(typ *Type) string {
+	if typ != nil && qualifiedTypeName(typ) == "machine.x86_64.topic.Topic" && len(typ.TypeArgs) == 1 {
+		return "topic"
+	}
+	if typ != nil && qualifiedTypeName(typ) == "machine.x86_64.topic.ReliableTopic" && len(typ.TypeArgs) == 1 {
+		return "reliable"
+	}
+	// Compatibility branch removed by Task 20 after source migration.
 	switch qualifiedTypeName(typ) {
 	case "machine.x86_64.topic_u64.U64GapTopic":
 		return "gap_u64"

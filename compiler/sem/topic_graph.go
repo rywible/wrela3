@@ -15,6 +15,11 @@ func IsVcpuType(t *Type) bool {
 }
 
 func IsTopicType(t *Type) bool {
+	q := qualifiedTypeName(t)
+	if t != nil && (q == "machine.x86_64.topic.Topic" || q == "machine.x86_64.topic.ReliableTopic") && len(t.TypeArgs) == 1 {
+		return true
+	}
+	// Compatibility branch removed by Task 20 after source migration.
 	switch qualifiedTypeName(t) {
 	case "machine.x86_64.topic_u64.U64GapTopic",
 		"machine.x86_64.topic_u64.U64ReliableTopic",
@@ -29,6 +34,11 @@ func IsTopicType(t *Type) bool {
 }
 
 func IsTopicPublisherType(t *Type) bool {
+	q := qualifiedTypeName(t)
+	if t != nil && (q == "machine.x86_64.topic.TopicPublisher" || q == "machine.x86_64.topic.ReliablePublisher") && len(t.TypeArgs) == 1 {
+		return true
+	}
+	// Compatibility branch removed by Task 20 after source migration.
 	switch qualifiedTypeName(t) {
 	case "machine.x86_64.topic_u64.U64GapPublisher",
 		"machine.x86_64.topic_u64.U64ReliablePublisher",
@@ -43,6 +53,11 @@ func IsTopicPublisherType(t *Type) bool {
 }
 
 func IsTopicSubscriptionType(t *Type) bool {
+	q := qualifiedTypeName(t)
+	if t != nil && (q == "machine.x86_64.topic.TopicSubscription" || q == "machine.x86_64.topic.ReliableSubscription") && len(t.TypeArgs) == 1 {
+		return true
+	}
+	// Compatibility branch removed by Task 20 after source migration.
 	switch qualifiedTypeName(t) {
 	case "machine.x86_64.topic_u64.U64GapSubscription",
 		"machine.x86_64.topic_u64.U64ReliableSubscription",
