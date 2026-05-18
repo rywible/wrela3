@@ -2,58 +2,16 @@ module machine.x86_64.ivshmem
 
 use { MmioRegion } from platform.hardware.bytes
 use { PathIdentity } from machine.x86_64.cpu_state
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { TopicIdentity } from machine.x86_64.topic_u64
+use { TopicPublisher } from machine.x86_64.topic
 
 data IvshmemDoorbellInterrupt {
     vector: U32
 }
 
-data IvshmemDoorbellNext {
-    has_message: Bool
-    message: IvshmemDoorbellInterrupt
-}
-
-class IvshmemDoorbellTopic {
-    identity: TopicIdentity
-    id: U64
-
-    fn publisher(self) -> IvshmemDoorbellPublisher {
-        return IvshmemDoorbellPublisher(topic = self)
-    }
-
-    fn subscribe(self, subscriber: ExecutorSlot) -> IvshmemDoorbellSubscription {
-        return IvshmemDoorbellSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
-    }
-}
-
-class IvshmemDoorbellPublisher {
-    topic: IvshmemDoorbellTopic
-}
-
-class IvshmemDoorbellSubscription {
-    topic: IvshmemDoorbellTopic
-    subscriber: ExecutorSlot
-    cursor: U64
-    armed: Bool
-
-    asm fn try_next(self) -> IvshmemDoorbellNext {
-        ret
-    }
-
-    fn arm_wait(self) {
-        self.armed = true
-    }
-
-    fn is_wait_armed(self) -> Bool {
-        return self.armed
-    }
-}
-
 driver path IvshmemDoorbellPath {
     identity: PathIdentity
     registers: MmioRegion
-    irq: IvshmemDoorbellPublisher
+    irq: TopicPublisher<IvshmemDoorbellInterrupt>
 
     interrupt receiver -> IvshmemDoorbellInterrupt {
         return IvshmemDoorbellInterrupt(vector = 0)

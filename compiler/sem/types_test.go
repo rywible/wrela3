@@ -985,10 +985,16 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 		"route":     "IoApicRoute",
 		"rx":        "TopicPublisher<SerialPathInterrupt>",
 	})
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.edu", "EduInterruptTopic"), "subscribe")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "publisher")
-	assertMethodIsSource(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellTopic"), "subscribe")
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.edu", "EduMsiPath"), map[string]string{
+		"identity": "PathIdentity",
+		"mmio":     "MmioRegion",
+		"irq":      "TopicPublisher<EduInterrupt>",
+	})
+	assertTypeFields(t, moduleType(t, index, "machine.x86_64.ivshmem", "IvshmemDoorbellPath"), map[string]string{
+		"identity":  "PathIdentity",
+		"registers": "MmioRegion",
+		"irq":       "TopicPublisher<IvshmemDoorbellInterrupt>",
+	})
 }
 
 func TestCoreLanguageModuleTypes(t *testing.T) {
