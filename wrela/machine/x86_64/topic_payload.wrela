@@ -6,7 +6,5 @@ data TimerTickPayload {
     source_id: U32
 }
 
-data SerialPathInterrupt {
-    has_byte: Bool
-    byte: U8
-}
+static_assert(sizeof(TimerTickPayload) <= 64, message = "timer tick payload fits one topic slot")
+static_assert(alignof(TimerTickPayload) == 8, message = "timer tick payload alignment")

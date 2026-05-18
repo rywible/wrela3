@@ -43,16 +43,8 @@ func topicSlotSize(payloadSize uint64) uint64 {
 	return alignUp64(8 + payloadSize)
 }
 
-func defaultTopicPayloadSize(kind string) (size uint64, align uint64, ok bool) {
-	switch kind {
-	case "gap_u64", "reliable_u64", "serial_rx", "edu_interrupt", "ivshmem_doorbell":
-		return 8, 8, true
-	case "timer_tick":
-		// Timer topics are expected to carry a typed payload, which must be declared.
-		return 0, 0, false
-	default:
-		return 0, 0, false
-	}
+func isReliableTopicKind(kind string) bool {
+	return kind == "reliable" || kind == "reliable_u64"
 }
 
 func planTopicData(topic ir.TopicLayout) topicDataLayout {
@@ -85,12 +77,6 @@ func planTopicDataChecked(topic ir.TopicLayout) (topicDataLayout, []diag.Diagnos
 	payloadSize := topic.PayloadSize
 	payloadAlign := topic.PayloadAlign
 	if payloadSize == 0 || payloadAlign == 0 {
-		if defaultSize, defaultAlign, ok := defaultTopicPayloadSize(topic.Kind); ok {
-			payloadSize = defaultSize
-			payloadAlign = defaultAlign
-		}
-	}
-	if payloadSize == 0 || payloadAlign == 0 {
 		return topicDataLayout{}, []diag.Diagnostic{{
 			Phase:   diagnosticPhase,
 			Code:    diag.SEM0066,
@@ -106,7 +92,7 @@ func planTopicDataChecked(topic ir.TopicLayout) (topicDataLayout, []diag.Diagnos
 			Message: "topic depth must be a power of two",
 		}}
 	}
-	if topic.Kind == "reliable_u64" && len(topic.Subscribers) == 0 {
+	if isReliableTopicKind(topic.Kind) && len(topic.Subscribers) == 0 {
 		return topicDataLayout{}, []diag.Diagnostic{{
 			Phase:   diagnosticPhase,
 			Code:    diag.CG0001,

@@ -616,6 +616,7 @@ type InterruptBinding struct {
 	HandlerFunctionSymbol string
 	ExecutorType          Type
 	PathField             string
+	EventType             Type
 	PathFieldOffset       int
 	ContextSymbol         string
 	EventStorageSymbol    string

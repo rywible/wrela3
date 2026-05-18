@@ -10,6 +10,8 @@ import (
 
 type substitution map[string]*Type
 
+const maxGenericInstantiationDepth = 64
+
 func substitutionFor(base *Type, args []*Type) substitution {
 	out := substitution{}
 	if base == nil {
@@ -34,8 +36,16 @@ func (idx *Index) substituteType(t *Type, subst substitution) *Type {
 		return t
 	}
 	args := make([]*Type, 0, len(t.TypeArgs))
+	changed := false
 	for _, arg := range t.TypeArgs {
-		args = append(args, idx.substituteType(arg, subst))
+		substituted := idx.substituteType(arg, subst)
+		if substituted != arg {
+			changed = true
+		}
+		args = append(args, substituted)
+	}
+	if !changed {
+		return t
 	}
 	origin := t.GenericOrigin
 	if origin == nil {
@@ -45,10 +55,14 @@ func (idx *Index) substituteType(t *Type, subst substitution) *Type {
 }
 
 func (idx *Index) LookupTypeRef(moduleName string, ref ast.TypeRef, params map[string]*Type) (*Type, []diag.Diagnostic) {
-	return idx.lookupTypeRef(moduleName, ref, params, false)
+	return idx.lookupTypeRef(moduleName, ref, params, false, false)
 }
 
-func (idx *Index) lookupTypeRef(moduleName string, ref ast.TypeRef, params map[string]*Type, inTypeArg bool) (*Type, []diag.Diagnostic) {
+func (idx *Index) LookupTraitRef(moduleName string, ref ast.TypeRef, params map[string]*Type) (*Type, []diag.Diagnostic) {
+	return idx.lookupTypeRef(moduleName, ref, params, false, true)
+}
+
+func (idx *Index) lookupTypeRef(moduleName string, ref ast.TypeRef, params map[string]*Type, inTypeArg bool, allowTrait bool) (*Type, []diag.Diagnostic) {
 	if params != nil {
 		if typ := params[ref.Name]; typ != nil {
 			if len(ref.Args) != 0 {
@@ -79,6 +93,16 @@ func (idx *Index) lookupTypeRef(moduleName string, ref ast.TypeRef, params map[s
 			Message:  "unknown type " + ref.Name,
 		}}
 	}
+	if base.Kind == KindTrait && !allowTrait {
+		return nil, []diag.Diagnostic{{
+			Phase:    "sem",
+			Code:     diag.SEM0080,
+			Severity: diag.Error,
+			Start:    ref.Span().Start,
+			End:      ref.Span().End,
+			Message:  "trait " + ref.Name + " is compile-time-only and cannot be used as a value type",
+		}}
+	}
 	if len(base.TypeParams) != len(ref.Args) {
 		return nil, []diag.Diagnostic{{
 			Phase:    "sem",
@@ -94,7 +118,7 @@ func (idx *Index) lookupTypeRef(moduleName string, ref ast.TypeRef, params map[s
 	}
 	args := make([]*Type, 0, len(ref.Args))
 	for _, arg := range ref.Args {
-		argType, argDiags := idx.lookupTypeRef(moduleName, arg, params, true)
+		argType, argDiags := idx.lookupTypeRef(moduleName, arg, params, true, false)
 		if len(argDiags) != 0 {
 			return nil, argDiags
 		}
@@ -130,6 +154,20 @@ func (idx *Index) registerInstantiation(base *Type, args []*Type) *Type {
 	if existing := idx.Instantiations[key]; existing != nil {
 		return existing
 	}
+	if typeArgumentDepth(concrete) > maxGenericInstantiationDepth {
+		concrete.InstantiationComplete = true
+		idx.Instantiations[key] = concrete
+		if !idx.InstantiationDepthExceeded {
+			idx.InstantiationDepthExceeded = true
+			idx.InstantiationDiags = append(idx.InstantiationDiags, diag.Diagnostic{
+				Phase:    "sem",
+				Code:     diag.SEM0080,
+				Severity: diag.Error,
+				Message:  "generic instantiation depth exceeded",
+			})
+		}
+		return concrete
+	}
 	idx.Instantiations[key] = concrete
 	idx.InstantiationOrder = append(idx.InstantiationOrder, key)
 	if idx.ByModule[base.Module] == nil {
@@ -137,6 +175,19 @@ func (idx *Index) registerInstantiation(base *Type, args []*Type) *Type {
 	}
 	idx.ByModule[base.Module][concrete.Display()] = concrete
 	return concrete
+}
+
+func typeArgumentDepth(t *Type) int {
+	if t == nil || len(t.TypeArgs) == 0 {
+		return 0
+	}
+	maxDepth := 0
+	for _, arg := range t.TypeArgs {
+		if depth := typeArgumentDepth(arg); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	return maxDepth + 1
 }
 
 func (idx *Index) instantiateByName(moduleName, name string, args []*Type) *Type {
@@ -181,12 +232,31 @@ func (idx *Index) CompleteGenericInstantiations() []diag.Diagnostic {
 	if idx == nil {
 		return out
 	}
-	for {
+	const maxGenericInstantiationPasses = maxGenericInstantiationDepth
+	seenInstantiationDiags := 0
+	for pass := 0; ; pass++ {
+		if len(idx.InstantiationDiags) > seenInstantiationDiags {
+			out = append(out, idx.InstantiationDiags[seenInstantiationDiags:]...)
+			seenInstantiationDiags = len(idx.InstantiationDiags)
+		}
+		if pass >= maxGenericInstantiationPasses {
+			out = append(out, diag.Diagnostic{
+				Phase:    "sem",
+				Code:     diag.SEM0080,
+				Severity: diag.Error,
+				Message:  "generic instantiation depth exceeded",
+			})
+			return out
+		}
 		before := len(idx.InstantiationOrder)
 		keys := append([]string(nil), idx.InstantiationOrder...)
 		sort.Strings(keys)
 		for _, key := range keys {
 			out = append(out, idx.completeInstantiation(key, map[string]bool{})...)
+		}
+		if len(idx.InstantiationDiags) > seenInstantiationDiags {
+			out = append(out, idx.InstantiationDiags[seenInstantiationDiags:]...)
+			seenInstantiationDiags = len(idx.InstantiationDiags)
 		}
 		if len(idx.InstantiationOrder) == before {
 			return out

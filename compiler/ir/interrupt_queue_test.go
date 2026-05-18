@@ -17,7 +17,7 @@ use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, QueueIdentity, InterruptQueue } from machine.x86_64.interrupt_queue
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 image QueueBounds {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
@@ -26,8 +26,8 @@ image QueueBounds {
         let root_region = PhysicalRegionAuthority(base = 0x200000, length = 0x1000000, align = 4096, provenance = 1, panic = panic)
         let root = root_region.create_arena(identity = ArenaIdentity(label = "root"), policy = ArenaPolicy(evict_cache_by_default = true))
         let console_memory = root.executor_memory(owner = ExecutorSlot(id = 0), length = 0x100000, align = 4096)
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
-        let q = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let queue_slots = console_memory.reserve_array(U8, count = 64)
+        let q = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let worker_memory = root.executor_memory(owner = ExecutorSlot(id = 1), length = 0x100000, align = 4096)
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
         let arena = MutableBytes(address = 0, length = 0)
@@ -75,7 +75,7 @@ func TestInterruptQueueLowersLayout(t *testing.T) {
 		t.Fatalf("interrupt queues = %#v", program.InterruptQueues)
 	}
 	queue := program.InterruptQueues[0]
-	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 64 || queue.PayloadSize != 2 || queue.PayloadAlign != 1 || queue.Overflow != "drop_newest_and_set_flag" {
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 64 || queue.PayloadSize != 1 || queue.PayloadAlign != 1 || queue.Overflow != "drop_newest_and_set_flag" {
 		t.Fatalf("interrupt queue layout = %#v", queue)
 	}
 }

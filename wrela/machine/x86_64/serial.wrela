@@ -4,7 +4,7 @@ use { Bytes } from machine.x86_64.executor_memory
 use { DriverMemory, PathIdentity } from machine.x86_64.cpu_state
 use { IoApicRoute } from machine.x86_64.interrupts
 use { TopicPublisher } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -40,7 +40,7 @@ unique driver SerialDriver {
         return self
     }
 
-    fn create_console_path(self, identity: PathIdentity, route: IoApicRoute, rx: TopicPublisher<SerialPathInterrupt>) -> SerialConsolePath {
+    fn create_console_path(self, identity: PathIdentity, route: IoApicRoute, rx: TopicPublisher<U8>) -> SerialConsolePath {
         let console_path = SerialConsolePath(identity = identity, registers = self.registers, route = route, rx = rx)
         console_path.enable_receive_interrupts()
         return console_path
@@ -51,15 +51,15 @@ driver path SerialConsolePath {
     identity: PathIdentity
     registers: SerialWriterRegisters
     route: IoApicRoute
-    rx: TopicPublisher<SerialPathInterrupt>
+    rx: TopicPublisher<U8>
 
-    interrupt receiver -> SerialPathInterrupt {
+    interrupt receiver -> Option<U8> {
         let status = self.registers.read8(offset = 5)
         if (status & 0x01) != 0 {
             let value = self.registers.read8(offset = 0)
-            return SerialPathInterrupt(has_byte = true, byte = value)
+            return Option.Some(value = value)
         }
-        return SerialPathInterrupt(has_byte = false, byte = 0)
+        return Option.None()
     }
 
     fn enable_receive_interrupts(self) {
@@ -68,7 +68,7 @@ driver path SerialConsolePath {
         self.registers.write8(offset = 4, value = 0x0B)
     }
 
-    fn ack_receive(self, event: SerialPathInterrupt) {
+    fn ack_receive(self, event: U8) {
         // COM1 receive is acknowledged by reading offset 0 above; this method exists so all interrupt paths expose an explicit ack hook.
     }
 

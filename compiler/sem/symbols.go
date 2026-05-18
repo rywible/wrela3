@@ -2,6 +2,7 @@ package sem
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -19,11 +20,13 @@ type Index struct {
 	Impls        []Impl
 	Images       []*ast.ImageDecl
 
-	InterruptEvents    map[string]map[string]*ast.InterruptEventDecl
-	OnHandlers         map[string]map[string]map[string]*ast.OnHandlerDecl
-	Instantiations     map[string]*Type
-	InstantiationOrder []string
-	primitives         map[string]*Type
+	InterruptEvents            map[string]map[string]*ast.InterruptEventDecl
+	OnHandlers                 map[string]map[string]map[string]*ast.OnHandlerDecl
+	Instantiations             map[string]*Type
+	InstantiationOrder         []string
+	InstantiationDiags         []diag.Diagnostic
+	InstantiationDepthExceeded bool
+	primitives                 map[string]*Type
 }
 
 type ConstValue struct {
@@ -112,8 +115,13 @@ func (idx *Index) MustType(name string) *Type {
 	if idx == nil {
 		return nil
 	}
-	for _, m := range idx.ByModule {
-		if t, ok := m[name]; ok {
+	modules := make([]string, 0, len(idx.ByModule))
+	for module := range idx.ByModule {
+		modules = append(modules, module)
+	}
+	sort.Strings(modules)
+	for _, module := range modules {
+		if t, ok := idx.ByModule[module][name]; ok {
 			return t
 		}
 	}
@@ -310,7 +318,7 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				for _, name := range paramNames {
 					implTypeParams[name] = &Type{Name: name, Kind: KindTypeParam}
 				}
-				implTrait, traitDiags := idx.LookupTypeRef(mod.Name, d.Trait, implTypeParams)
+				implTrait, traitDiags := idx.LookupTraitRef(mod.Name, d.Trait, implTypeParams)
 				diagOut = append(diagOut, traitDiags...)
 				implFor, forDiags := idx.LookupTypeRef(mod.Name, d.For, implTypeParams)
 				diagOut = append(diagOut, forDiags...)
@@ -537,6 +545,9 @@ func (idx *Index) lookupType(moduleName string, raw string) *Type {
 	if raw == "" {
 		return nil
 	}
+	if t := idx.Instantiations[raw]; t != nil {
+		return t
+	}
 	if t := idx.resolveInScope(moduleName, raw); t != nil {
 		return t
 	}
@@ -724,7 +735,7 @@ func buildWhereBounds(idx *Index, moduleName string, where []ast.TraitBound, typ
 	out := make([]TraitBound, 0, len(where))
 	var diags []diag.Diagnostic
 	for _, bound := range where {
-		trait, traitDiags := idx.LookupTypeRef(moduleName, bound.Trait, typeParams)
+		trait, traitDiags := idx.LookupTraitRef(moduleName, bound.Trait, typeParams)
 		diags = append(diags, traitDiags...)
 		out = append(out, TraitBound{
 			Param: bound.Param,

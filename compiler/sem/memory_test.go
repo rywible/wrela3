@@ -525,6 +525,35 @@ executor Worker {
 	}
 }
 
+func TestProtectedViewLiteralForgeryRejectedInTrustedPrefixModule(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data Mmio<T> { address: PhysicalAddress }
+`, `
+module platform.uefi.fake
+use { Mmio } from platform.hardware.bytes
+
+data Registers {
+    value: U64
+}
+
+class Forgery {
+    fn mmio(self) -> Mmio<Registers> {
+        return Mmio<Registers>(address = 0xFEE00000)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
 func TestSlotsReturnLifetimeEscapeDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
 module sem.slots

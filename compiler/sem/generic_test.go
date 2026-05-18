@@ -32,6 +32,27 @@ data UsesBox { box: Box<Payload> }
 	}
 }
 
+func TestGenericMangledNameSeparatesStructuralKeys(t *testing.T) {
+	twoArgs := (&Type{
+		Module: "sem.generics",
+		Name:   "Topic",
+		TypeArgs: []*Type{
+			{Module: "sem.generics", Name: "a"},
+			{Module: "sem.generics", Name: "b"},
+		},
+	}).MangledName()
+	qualifiedArg := (&Type{
+		Module:   "sem.generics",
+		Name:     "Topic",
+		TypeArgs: []*Type{{Module: "a", Name: "b"}},
+	}).MangledName()
+	literalName := (&Type{Module: "sem.generics", Name: "Topic_a_b"}).MangledName()
+
+	if twoArgs == qualifiedArg || twoArgs == literalName || qualifiedArg == literalName {
+		t.Fatalf("mangled names collide: two args=%q qualified arg=%q literal=%q", twoArgs, qualifiedArg, literalName)
+	}
+}
+
 func TestGenericFieldSubstitutionIsRecursive(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.generics
@@ -58,6 +79,19 @@ data Root {
 	pair := index.Instantiations["sem.generics.Pair[sem.generics.Box[sem.generics.Event]]"]
 	if pair.Fields[0].Type.Key() != "sem.generics.Box[sem.generics.Event]" {
 		t.Fatalf("Pair<Box<Event>>.first = %s", pair.Fields[0].Type.Key())
+	}
+}
+
+func TestGenericInstantiationDepthLimit(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.generics
+data List<T> { tail: List<List<T>> }
+data Root { value: List<U64> }
+`)
+	_, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if !hasCode(ds, diag.SEM0080) {
+		t.Fatalf("diagnostics = %#v, want SEM0080", ds)
 	}
 }
 

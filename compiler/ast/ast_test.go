@@ -97,19 +97,19 @@ func TestInterruptEventASTContracts(t *testing.T) {
 	path := &DriverPathDecl{
 		Name: "SerialConsolePath",
 		InterruptEvents: []InterruptEventDecl{
-			{EventType: TypeRef{Name: "SerialPathInterrupt"}},
+			{EventType: TypeRef{Name: "Option", Args: []TypeRef{{Name: "U8"}}}},
 		},
 	}
 	exec := &ExecutorDecl{
 		Name: "HelloWorld",
 		OnHandlers: []OnHandlerDecl{
-			{PathField: "serial_path", ParamName: "event", ParamType: TypeRef{Name: "SerialPathInterrupt"}},
+			{PathField: "serial_path", ParamName: "event", ParamType: TypeRef{Name: "Option", Args: []TypeRef{{Name: "U8"}}}},
 		},
 	}
-	if path.InterruptEvents[0].EventType.Name != "SerialPathInterrupt" {
+	if path.InterruptEvents[0].EventType.String() != "Option<U8>" {
 		t.Fatalf("interrupt event not stored")
 	}
-	if exec.OnHandlers[0].PathField != "serial_path" || exec.OnHandlers[0].ParamType.Name != "SerialPathInterrupt" {
+	if exec.OnHandlers[0].PathField != "serial_path" || exec.OnHandlers[0].ParamType.String() != "Option<U8>" {
 		t.Fatalf("on handler not stored")
 	}
 }

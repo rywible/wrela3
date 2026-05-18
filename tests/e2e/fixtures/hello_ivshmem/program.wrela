@@ -10,7 +10,6 @@ use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } f
 use { MsiCapability, MsixCapability } from machine.x86_64.pci
 use { SerialConsolePath } from machine.x86_64.serial
 use { TopicSubscription } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
 
 data RunScratch {
     hello: Bytes
@@ -24,7 +23,7 @@ executor HelloWorld {
     edu_msi: MsiCapability
     ivshmem_msix: MsixCapability
     serial_path: SerialConsolePath
-    serial_rx: TopicSubscription<SerialPathInterrupt>
+    serial_rx: TopicSubscription<U8>
     edu_path: EduMsiPath
     edu_interrupts: TopicSubscription<EduInterrupt>
     ivshmem_rx: IvshmemDoorbellPath
@@ -45,12 +44,10 @@ executor HelloWorld {
         while true {
             match self.serial_rx.try_next() {
                 Option.Some(value = serial_event) => {
-                    if serial_event.has_byte {
-                        self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                        self.serial_path.write_byte(value = serial_event.byte)
-                        self.serial_path.write(self.memory.bytes(value = "\n"))
-                        self.serial_path.ack_receive(event = serial_event)
-                    }
+                    self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
+                    self.serial_path.write_byte(value = serial_event)
+                    self.serial_path.write(self.memory.bytes(value = "\n"))
+                    self.serial_path.ack_receive(event = serial_event)
                 }
                 Option.None => {
                     self.serial_rx.arm_wait()
@@ -82,12 +79,10 @@ executor HelloWorld {
             let had_retry_event = false
             if let Option.Some(value = serial_retry) = self.serial_rx.try_next() {
                 had_retry_event = true
-                if serial_retry.has_byte {
-                    self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                    self.serial_path.write_byte(value = serial_retry.byte)
-                    self.serial_path.write(self.memory.bytes(value = "\n"))
-                    self.serial_path.ack_receive(event = serial_retry)
-                }
+                self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
+                self.serial_path.write_byte(value = serial_retry)
+                self.serial_path.write(self.memory.bytes(value = "\n"))
+                self.serial_path.ack_receive(event = serial_retry)
             }
             if let Option.Some(value = edu_retry) = self.edu_interrupts.try_next() {
                 had_retry_event = true

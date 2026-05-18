@@ -355,10 +355,13 @@ executor HelloWorld {
 func TestParseDriverPathInterruptEvent(t *testing.T) {
 	mod, ds := parseModuleForTest(t, `
 module test.interrupt_event
-data SerialPathInterrupt { byte: U8 }
+enum Option<T> {
+    None
+    Some(value: T)
+}
 driver path SerialConsolePath {
-    interrupt receiver -> SerialPathInterrupt {
-        return SerialPathInterrupt(byte = 0)
+    interrupt receiver -> Option<U8> {
+        return Option.None()
     }
 }`)
 	if len(ds) != 0 {
@@ -369,7 +372,7 @@ driver path SerialConsolePath {
 		t.Fatalf("events = %d, want 1", len(path.InterruptEvents))
 	}
 	ev := path.InterruptEvents[0]
-	if ev.EventType.Name != "SerialPathInterrupt" || len(ev.Body) != 1 {
+	if ev.EventType.String() != "Option<U8>" || len(ev.Body) != 1 {
 		t.Fatalf("event = %#v", ev)
 	}
 }
@@ -393,7 +396,7 @@ func TestParseExecutorOnHandler(t *testing.T) {
 module test.on_handler
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.interrupt(event: SerialPathInterrupt) {
+    on serial_path.interrupt(event: Option<U8>) {
         self.serial_path.ack_receive(event = event)
     }
 }`)
@@ -405,7 +408,7 @@ executor HelloWorld {
 		t.Fatalf("on handlers = %d, want 1", len(exec.OnHandlers))
 	}
 	got := exec.OnHandlers[0]
-	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType.Name != "SerialPathInterrupt" {
+	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType.String() != "Option<U8>" {
 		t.Fatalf("on handler = %#v", got)
 	}
 }
@@ -428,7 +431,7 @@ func TestOnHandlerRejectsNonInterruptSelector(t *testing.T) {
 module test.bad_on_selector
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.receive(event: SerialPathInterrupt) {
+    on serial_path.receive(event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {
@@ -440,7 +443,7 @@ func TestOnHandlerRejectedOutsideExecutor(t *testing.T) {
 	_, ds := parseModuleForTest(t, `
 module test.bad_on_placement
 class C {
-    on serial_path.interrupt(event: SerialPathInterrupt) {
+    on serial_path.interrupt(event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {

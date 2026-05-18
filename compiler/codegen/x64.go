@@ -362,10 +362,8 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding, ctx 
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
 	emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
 	emitCallReloc(e, binding.EventFunctionSymbol)
-	emitInterruptTopicPublish(e, binding, ctx)
-	if queue, ok := ctx.interruptQueues[binding.Vector]; ok {
-		emitInterruptQueuePushPayload(e, queue, binding.EventStorageSymbol, uint64(binding.EventStorageSize))
-	}
+	queue, hasQueue := ctx.interruptQueues[binding.Vector]
+	emitInterruptTopicPublish(e, binding, ctx, queue, hasQueue)
 	emitLocalApicEOI(e)
 	emitInterruptRestore(e)
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
@@ -374,6 +372,27 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding, ctx 
 		return compiledUnit{}, e.Diags
 	}
 	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}, nil
+}
+
+func interruptQueuePayloadRangeForBinding(e *Emitter, binding ir.InterruptBinding, ctx compileContext) (uint64, uint64, bool) {
+	if binding.TopicKind != "serial_rx" {
+		return 0, uint64(binding.EventStorageSize), true
+	}
+	eventType := binding.EventType
+	if eventType.Name == "" {
+		eventType = ir.Type{Name: "wrela.lang.core.Option[U8]", Module: "wrela.lang.core", Kind: ir.TypeKindEnum}
+	}
+	eventInfo, ok := ctx.typeInfo(eventType)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt event type"})
+		return 0, 0, false
+	}
+	valueField, ok := eventInfo.Fields["Some.value"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some.value field"})
+		return 0, 0, false
+	}
+	return uint64(fieldStorageOffset(valueField)), uint64(fieldStorageSize(ctx, valueField)), true
 }
 
 func buildInterruptQueueOnlyUnit(symbol string, queue ir.InterruptQueueLayout, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
@@ -421,7 +440,7 @@ func emitLoadInterruptPathReceiver(e *Emitter, binding ir.InterruptBinding) {
 	}})
 }
 
-func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx compileContext) {
+func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx compileContext, queue ir.InterruptQueueLayout, hasQueue bool) {
 	layout, ok := ctx.topicLayouts[binding.TopicLabel]
 	if !ok {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + binding.TopicLabel})
@@ -438,27 +457,45 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	mask := asm.MustLookup("rdx")
 	src := asm.MustLookup("rsi")
 	skipPublish := e.newLabel("interrupt_topic_publish_skip")
+	payloadOffset := 0
+	payloadSize := binding.EventStorageSize
 
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), topicDataSymbol(binding.TopicLabel))
 	emitRegRegMove(e, base, asm.MustLookup("rax"))
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
 	emitRegRegMove(e, src, asm.MustLookup("rax"))
 	if binding.TopicKind == "serial_rx" {
-		eventInfo, ok := ctx.typeInfo(ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.topic_payload", Kind: ir.TypeKindData})
+		eventType := binding.EventType
+		if eventType.Name == "" {
+			eventType = ir.Type{Name: "wrela.lang.core.Option[U8]", Module: "wrela.lang.core", Kind: ir.TypeKindEnum}
+		}
+		eventInfo, ok := ctx.typeInfo(eventType)
 		if !ok {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt event type"})
 			return
 		}
-		hasByte, ok := eventInfo.Fields["has_byte"]
+		tagField, ok := eventInfo.Fields["$tag"]
 		if !ok {
-			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt has_byte field"})
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt option tag field"})
+			return
+		}
+		someVariant, ok := enumVariantInfo(eventInfo, "Some")
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some variant"})
+			return
+		}
+		valueField, ok := eventInfo.Fields["Some.value"]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some.value field"})
 			return
 		}
 		emitMovImmToReg(e, mask, 0)
-		emitLoadMemToReg(e, mask, src, int64(hasByte.Offset), 8)
-		emitMovImmToReg(e, asm.MustLookup("rdi"), 0)
+		emitLoadMemToReg(e, mask, src, int64(fieldStorageOffset(tagField)), 64)
+		emitMovImmToReg(e, asm.MustLookup("rdi"), int64(someVariant.Discriminant))
 		emitCmpRegReg(e, mask, asm.MustLookup("rdi"))
-		e.emitJcc(0x84, skipPublish)
+		e.emitJcc(0x85, skipPublish)
+		payloadOffset = fieldStorageOffset(valueField)
+		payloadSize = fieldStorageSize(ctx, valueField)
 	}
 	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
 	emitRegRegMove(e, slot, seq)
@@ -469,10 +506,16 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
-	emitCopyBytes(e, slot, 8, src, 0, binding.EventStorageSize)
+	emitCopyBytes(e, slot, 8, src, int64(payloadOffset), payloadSize)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
 	emitTouchSubscriberWaitlinesAndWakeSkippingVcpu(e, layout, base, seq, binding.SubscriberSlots, ctx, 0)
+	if hasQueue {
+		payloadOffset, payloadSize, ok := interruptQueuePayloadRangeForBinding(e, binding, ctx)
+		if ok {
+			emitInterruptQueuePushPayload(e, queue, binding.EventStorageSymbol, payloadOffset, payloadSize)
+		}
+	}
 	e.bindLabel(skipPublish)
 }
 
@@ -2142,12 +2185,6 @@ func emitArenaReserveArray(e *Emitter, op *ir.ArenaReserveArray, frame Frame) {
 	}
 	emitStoreSlotFromReg(e, address, objectSlot+addressOffset, 64)
 	emitStoreSlotFromReg(e, countReg, objectSlot+capacityOffset, 64)
-	emitMovImmToReg(e, elementReg, int64(capacityOffset))
-	if info, ok := e.ctx.typeInfo(valueType(op.Arena)); ok {
-		if field, ok := info.Fields["next_offset"]; ok {
-			emitMovImmToReg(e, elementReg, int64(fieldStorageOffset(field)))
-		}
-	}
 	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), objectSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("rdi"), slot, 64)
 }
@@ -2680,7 +2717,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
 		return
 	}
-	if layout.Kind != "reliable_u64" {
+	if !isReliableTopicKind(layout.Kind) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + layout.Kind})
 		return
 	}
@@ -2746,8 +2783,8 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, producer, 1)
 	emitStoreMemFromReg(e, slot, 0, producer, 64)
-	emitLoadValue(e, frame, publish.Value, value)
-	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitCopyValueToMemoryRange(e, frame, publish.Value, slot, 8, e.ctx.storageSizeForType(valueType(publish.Value)))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), producer, 64)
 	emitMovImmToReg(e, value, topicWaitlineDisarmed)
@@ -2977,7 +3014,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+fieldStorageOffset(optionPayloadField)), slot, 8, fieldStorageSize(e.ctx, optionPayloadField))
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
-	if layout.Kind == "reliable_u64" {
+	if isReliableTopicKind(layout.Kind) {
 		emitWakeProducerSlots(e, layout, cursor, e.ctx)
 	}
 	e.emitJmp(done)
@@ -2985,7 +3022,7 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitStoreSlotImm(e, optionTagOffset, optionNoneDiscriminant, 64)
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, head, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
-	if layout.Kind == "reliable_u64" {
+	if isReliableTopicKind(layout.Kind) {
 		emitWakeProducerSlots(e, layout, head, e.ctx)
 	}
 	e.emitJmp(done)

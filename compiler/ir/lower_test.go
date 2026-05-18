@@ -368,16 +368,16 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 
 func TestLowerInterruptTopicBindingMetadata(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.topic_payload
+module wrela.lang.core
 
-data SerialPathInterrupt { byte: U8 }
+enum Option<T> { None Some(value: T) }
 
 module machine.x86_64.serial
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 driver path SerialConsolePath {
-    interrupt receiver -> SerialPathInterrupt {
-        return SerialPathInterrupt(byte = 1)
+    interrupt receiver -> Option<U8> {
+        return Option.Some(value = 1)
     }
 }
 `)
@@ -389,7 +389,7 @@ driver path SerialConsolePath {
 		PathFieldOffset:     24,
 		TopicLabel:          "console.com1.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
+		EventType:           "wrela.lang.core.Option[U8]",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 		SubscriberSlots:     []string{"console"},
 	}}
@@ -435,7 +435,7 @@ driver path SerialConsolePath {
 	if binding.PathFieldOffset != 24 {
 		t.Fatalf("binding path offset = %d, want route offset 24", binding.PathFieldOffset)
 	}
-	wantEventStorageSize := program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"].StorageSize
+	wantEventStorageSize := program.Types["wrela.lang.core.Option[U8]"].StorageSize
 	if binding.EventStorageSize != wantEventStorageSize {
 		t.Fatalf("binding event storage size = %d, want %d", binding.EventStorageSize, wantEventStorageSize)
 	}
@@ -458,23 +458,23 @@ driver path SerialConsolePath {
 
 func TestLowerInterruptTopicRouteMissingVectorDiagnostic(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.topic_payload
+module wrela.lang.core
 
-data SerialPathInterrupt { byte: U8 }
+enum Option<T> { None Some(value: T) }
 
 module machine.x86_64.serial
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 driver path SerialConsolePath {
-    interrupt receiver -> SerialPathInterrupt {
-        return SerialPathInterrupt(byte = 0)
+    interrupt receiver -> Option<U8> {
+        return Option.None()
     }
 }
 `)
 	checked.ImageGraph.InterruptTopicRoutes = []sem.InterruptTopicRouteNode{{
 		TopicLabel:          "console.com1.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
+		EventType:           "wrela.lang.core.Option[U8]",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}}
 
@@ -489,16 +489,16 @@ driver path SerialConsolePath {
 
 func TestLowerInterruptTopicRouteAmbiguousVectorDiagnostic(t *testing.T) {
 	checked := checkedProgramForTest(t, `
-module machine.x86_64.topic_payload
+module wrela.lang.core
 
-data SerialPathInterrupt { byte: U8 }
+enum Option<T> { None Some(value: T) }
 
 module machine.x86_64.serial
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 driver path SerialConsolePath {
-    interrupt receiver -> SerialPathInterrupt {
-        return SerialPathInterrupt(byte = 0)
+    interrupt receiver -> Option<U8> {
+        return Option.None()
     }
 }
 `)
@@ -508,7 +508,7 @@ driver path SerialConsolePath {
 		PathBinding:         "serial_a",
 		TopicLabel:          "console.a.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
+		EventType:           "wrela.lang.core.Option[U8]",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}, {
 		Vector:              0x40,
@@ -516,7 +516,7 @@ driver path SerialConsolePath {
 		PathBinding:         "serial_b",
 		TopicLabel:          "console.b.rx",
 		TopicKind:           "serial_rx",
-		EventType:           "machine.x86_64.topic_payload.SerialPathInterrupt",
+		EventType:           "wrela.lang.core.Option[U8]",
 		EventFunctionSymbol: "_wrela_event_machine_x86_64_serial_SerialConsolePath_interrupt",
 	}}
 

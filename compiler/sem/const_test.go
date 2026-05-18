@@ -26,6 +26,25 @@ static_assert(EVENT_ALIGN == 8, message = "event align")
 	}
 }
 
+func TestConstSizeofAlignofEnum(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.consts
+enum Maybe<T> {
+    None
+    Some(value: T)
+}
+const MAYBE_SIZE: U64 = sizeof(Maybe<U8>)
+const MAYBE_ALIGN: U64 = alignof(Maybe<U8>)
+static_assert(MAYBE_SIZE >= 8, message = "enum size")
+static_assert(MAYBE_ALIGN == 8, message = "enum align")
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+}
+
 func TestConstOverflowDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.consts

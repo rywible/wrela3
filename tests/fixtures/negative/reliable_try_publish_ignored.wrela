@@ -1,8 +1,17 @@
 // expect: SEM0045: reliable try_publish result must be observed
 module negative.reliable_try_publish_ignored
 
+module wrela.lang.core
+data Unit {}
+enum Result<T, E> {
+    Ok(value: T)
+    Err(error: E)
+}
+
 module machine.x86_64.topic
-class ReliablePublisher<T> { fn try_publish(self, value: T) -> Bool { return true } }
+use { Result, Unit } from wrela.lang.core
+data TopicFull {}
+class ReliablePublisher<T> { fn try_publish(self, value: T) -> Result<Unit, TopicFull> { return Result.Ok(value = Unit()) } }
 
 executor Producer {
     pub: ReliablePublisher<U64>

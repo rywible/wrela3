@@ -218,14 +218,14 @@ image Img {
 func TestLowerNestedPayloadFieldUsesIRHandleOffset(t *testing.T) {
 	checked := checkedProgramFromSourcesForTest(t, `
 module machine.x86_64.serial
-data SerialPathInterrupt {
-    has_byte: Bool
+data SerialByte {
+    present: Bool
     byte: U8
 }
 
 data SerialEnvelope {
     present: Bool
-    payload: SerialPathInterrupt
+    payload: SerialByte
 }
 
 module test.serial_next

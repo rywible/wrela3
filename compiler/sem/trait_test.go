@@ -34,6 +34,23 @@ data Root { drain: Drain<EventSub, Event> }
 	}
 }
 
+func TestTraitRefRejectedAsValueType(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.traits
+trait Publisher<T> {
+	fn publish(self, value: T)
+}
+data Holder {
+	publisher: Publisher<U64>
+}
+`)
+	_, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if !hasCode(ds, diag.SEM0080) {
+		t.Fatalf("diagnostics = %#v, want SEM0080", ds)
+	}
+}
+
 func TestMissingTraitImplDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.traits

@@ -101,21 +101,27 @@ type Type struct {
 	Where                 []TraitBound
 	GenericOrigin         *Type
 	InstantiationComplete bool
+	keyCache              string
 }
 
 func (t *Type) Key() string {
 	if t == nil {
 		return ""
 	}
+	if t.keyCache != "" {
+		return t.keyCache
+	}
 	base := qualifiedTypeName(t)
 	if len(t.TypeArgs) == 0 {
+		t.keyCache = base
 		return base
 	}
 	parts := make([]string, 0, len(t.TypeArgs))
 	for _, arg := range t.TypeArgs {
 		parts = append(parts, arg.Key())
 	}
-	return base + "[" + strings.Join(parts, ",") + "]"
+	t.keyCache = base + "[" + strings.Join(parts, ",") + "]"
+	return t.keyCache
 }
 
 func (t *Type) Display() string {
@@ -133,19 +139,36 @@ func (t *Type) Display() string {
 }
 
 func (t *Type) MangledName() string {
-	name := t.Name
-	if len(t.TypeArgs) > 0 {
-		parts := make([]string, 0, len(t.TypeArgs))
-		for _, arg := range t.TypeArgs {
-			if arg != nil && len(arg.TypeArgs) == 0 && (arg.Module == "" || arg.Module == t.Module) {
-				parts = append(parts, arg.Name)
-				continue
-			}
-			parts = append(parts, arg.Key())
-		}
-		name += "[" + strings.Join(parts, ",") + "]"
+	name := mangleSymbolPart(t.Name)
+	if len(t.TypeArgs) == 0 {
+		return name
 	}
-	return strings.NewReplacer("<", "_", ">", "", ", ", "_", ",", "_", ".", "_", "[", "_", "]", "").Replace(name)
+	parts := make([]string, 0, len(t.TypeArgs))
+	for _, arg := range t.TypeArgs {
+		if arg != nil && len(arg.TypeArgs) == 0 && (arg.Module == "" || arg.Module == t.Module) {
+			parts = append(parts, arg.Name)
+			continue
+		}
+		parts = append(parts, arg.Key())
+	}
+	return name + "_g" + mangleSymbolPart("["+strings.Join(parts, ",")+"]")
+}
+
+func mangleSymbolPart(s string) string {
+	const hex = "0123456789abcdef"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteString("_x")
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+		b.WriteByte('_')
+	}
+	return b.String()
 }
 
 type CheckedProgram struct {

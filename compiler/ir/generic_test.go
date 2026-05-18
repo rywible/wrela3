@@ -26,7 +26,8 @@ executor Worker {
     }
 }
 `)
-	fn := findFunction(program, "_wrela_method_ir_generics_Holder_Event_read")
+	holderEvent := &sem.Type{Module: "ir.generics", Name: "Holder", TypeArgs: []*sem.Type{{Module: "ir.generics", Name: "Event"}}}
+	fn := findFunction(program, symbolName("method", "ir.generics", holderEvent.MangledName(), "read"))
 	if fn == nil {
 		t.Fatal("missing concrete Holder<Event>.read function")
 	}
@@ -155,7 +156,15 @@ executor Worker {
 }
 `
 	program := lowerSourceForTest(t, src)
-	fn := findFunction(program, "_wrela_method_ir_traits_Drain_EventSub_Event_poll")
+	drainEvent := &sem.Type{
+		Module: "ir.traits",
+		Name:   "Drain",
+		TypeArgs: []*sem.Type{
+			{Module: "ir.traits", Name: "EventSub"},
+			{Module: "ir.traits", Name: "Event"},
+		},
+	}
+	fn := findFunction(program, symbolName("method", "ir.traits", drainEvent.MangledName(), "poll"))
 	if fn == nil {
 		t.Fatal("missing Drain<EventSub, Event>.poll")
 	}

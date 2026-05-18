@@ -14,7 +14,7 @@ use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_
 use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } from machine.x86_64.ivshmem
 use { SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -56,8 +56,8 @@ image ProductionSubstrate {
             length = 0x200000,
             align = 4096
         )
-        let serial_irq_slots = console_memory_seed.reserve_array(SerialPathInterrupt, count = 64)
-        let serial_irq_queue = InterruptQueue<SerialPathInterrupt>(
+        let serial_irq_slots = console_memory_seed.reserve_array(U8, count = 64)
+        let serial_irq_queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = console_slot_seed,
             slots = serial_irq_slots,
@@ -137,7 +137,7 @@ image ProductionSubstrate {
             owner = console_slot,
             memory = hardware.hardware_plan.console_memory
         )
-        let serial_rx_topic = Topic<SerialPathInterrupt>(
+        let serial_rx_topic = Topic<U8>(
             identity = TopicIdentity(label = "production.console.rx"),
             id = 0,
             depth = 64

@@ -83,10 +83,10 @@ func interruptQueueByVector(program *ir.Program) map[uint8]ir.InterruptQueueLayo
 }
 
 func emitInterruptQueuePush(e *Emitter, q ir.InterruptQueueLayout) {
-	emitInterruptQueuePushPayload(e, q, "", 0)
+	emitInterruptQueuePushPayload(e, q, "", 0, 0)
 }
 
-func emitInterruptQueuePushPayload(e *Emitter, q ir.InterruptQueueLayout, payloadSymbol string, payloadSize uint64) {
+func emitInterruptQueuePushPayload(e *Emitter, q ir.InterruptQueueLayout, payloadSymbol string, payloadOffset uint64, payloadSize uint64) {
 	base := asm.MustLookup("r8")
 	head := asm.MustLookup("rcx")
 	tail := asm.MustLookup("rdx")
@@ -106,7 +106,7 @@ func emitInterruptQueuePushPayload(e *Emitter, q ir.InterruptQueueLayout, payloa
 	e.emitJcc(0x82, enqueue)
 	emitInterruptQueueFullPolicy(e, q, base, head, tail, enqueue, done)
 	e.bindLabel(enqueue)
-	emitInterruptQueueStoreEntry(e, q, base, tail, capacity, payloadSymbol, payloadSize)
+	emitInterruptQueueStoreEntry(e, q, base, tail, capacity, payloadSymbol, payloadOffset, payloadSize)
 	emitMfence(e)
 	emitAddImm(e, tail, 1)
 	emitStoreMemFromReg(e, base, interruptQueueTailOffset, tail, 64)
@@ -142,7 +142,7 @@ func emitInterruptQueueFullPolicy(e *Emitter, q ir.InterruptQueueLayout, base as
 	}
 }
 
-func emitInterruptQueueStoreEntry(e *Emitter, q ir.InterruptQueueLayout, base asm.Reg, tail asm.Reg, capacity asm.Reg, payloadSymbol string, payloadSize uint64) {
+func emitInterruptQueueStoreEntry(e *Emitter, q ir.InterruptQueueLayout, base asm.Reg, tail asm.Reg, capacity asm.Reg, payloadSymbol string, payloadOffset uint64, payloadSize uint64) {
 	slot := asm.MustLookup("r9")
 	originalTail := asm.MustLookup("r11")
 	emitRegRegMove(e, originalTail, tail)
@@ -157,7 +157,7 @@ func emitInterruptQueueStoreEntry(e *Emitter, q ir.InterruptQueueLayout, base as
 	if payloadSymbol != "" && payloadSize != 0 {
 		emitMovDataAddressToReg(e, asm.MustLookup("rax"), payloadSymbol)
 		emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
-		emitCopyBytes(e, slot, 0, asm.MustLookup("r10"), 0, int(minUint64(q.PayloadSize, payloadSize)))
+		emitCopyBytes(e, slot, 0, asm.MustLookup("r10"), int64(payloadOffset), int(minUint64(q.PayloadSize, payloadSize)))
 		if payloadSize < q.PayloadSize {
 			emitZeroInterruptQueuePayloadRemainder(e, slot, payloadSize, q.PayloadSize-payloadSize)
 		}

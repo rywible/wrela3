@@ -83,7 +83,7 @@ func (c *checker) checkMatchStmt(moduleName string, scope *Scope, expectedReturn
 			}
 			seen[variant.Name] = arm.Span
 			armScope := NewScope(scope)
-			if c.bindPatternFields(armScope, variant, p.Bindings, arm.Span) {
+			if c.bindPatternFieldsFailed(armScope, variant, p.Bindings, arm.Span) {
 				allArmsTerminate = false
 				continue
 			}
@@ -116,14 +116,14 @@ func (c *checker) checkIfLetStmt(moduleName string, scope *Scope, expectedReturn
 		return false
 	}
 	bodyScope := NewScope(scope)
-	if c.bindPatternFields(bodyScope, variant, pattern.Bindings, stmt.SpanV) {
+	if c.bindPatternFieldsFailed(bodyScope, variant, pattern.Bindings, stmt.SpanV) {
 		return false
 	}
 	c.checkStmtList(moduleName, stmt.Body, bodyScope, expectedReturn, ctx)
 	return false
 }
 
-func (c *checker) bindPatternFields(scope *Scope, variant EnumVariant, bindings []ast.PatternBinding, span source.Span) bool {
+func (c *checker) bindPatternFieldsFailed(scope *Scope, variant EnumVariant, bindings []ast.PatternBinding, span source.Span) bool {
 	byName := map[string]Field{}
 	for _, field := range variant.Fields {
 		byName[field.Name] = field

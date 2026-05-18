@@ -12,7 +12,6 @@ use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_
 use { SerialConsolePath, SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
 use { Option, Result } from wrela.lang.core
 use { Topic, TopicPublisher, TopicSubscription, ReliableTopic, ReliablePublisher, ReliableSubscription } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -22,7 +21,6 @@ executor Producer {
     memory: ExecutorMemory
     interrupts: ApicInterruptController
     serial: SerialConsolePath
-    serial_rx: TopicSubscription<SerialPathInterrupt>
     out: TopicPublisher<U64>
     result_in: ReliableSubscription<U64>
 
@@ -147,8 +145,8 @@ image MultiVcpuTopics {
         let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
         let shared_serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
         let serial_irq_source = shared_serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_irq_slots = producer_memory_seed.reserve_array(SerialPathInterrupt, count = 64)
-        let serial_irq_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = producer_slot_seed, slots = serial_irq_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let serial_irq_slots = producer_memory_seed.reserve_array(U8, count = 64)
+        let serial_irq_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = producer_slot_seed, slots = serial_irq_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let timer = discovery.timers.require_periodic(period_us = 1000)
         let wake_strategy = discovery.cpus.wake_strategy(features = discovery.cpus.features)
         let hardware_plan = HardwarePlan(
@@ -190,7 +188,7 @@ image MultiVcpuTopics {
             registers = SerialWriterRegisters(port_base = com1.port_base),
             memory = DriverMemory(region = hardware.memory.arena)
         ).initialize()
-        let serial_rx_topic = Topic<SerialPathInterrupt>(
+        let serial_rx_topic = Topic<U8>(
             identity = TopicIdentity(label = "multi.console.rx"),
             id = 2,
             depth = 64
@@ -220,7 +218,6 @@ image MultiVcpuTopics {
 
         let counter_topic = Topic<U64>(identity = TopicIdentity(label = "multi.counter"), id = 0, depth = 64)
         let result_topic = ReliableTopic<U64>(identity = TopicIdentity(label = "multi.result"), id = 1, depth = 4)
-        let producer_serial_rx = serial_rx_topic.subscribe(subscriber = producer_slot)
         let producer_result_in = result_topic.subscribe(subscriber = producer_slot)
         let consumer_input = counter_topic.subscribe(subscriber = consumer_slot)
 
@@ -232,7 +229,6 @@ image MultiVcpuTopics {
                 local_apic = hardware.hardware_plan.interrupts.local_apic
             ),
             serial = serial_path,
-            serial_rx = producer_serial_rx,
             out = counter_topic.publisher(),
             result_in = producer_result_in
         )

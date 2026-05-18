@@ -232,6 +232,7 @@ type checker struct {
 	cpuFeatureLoopFallback   string
 	hardwarePlanWakeStrategy string
 	hardwarePlanWakeFallback string
+	typeParamMaps            map[*Type]map[string]*Type
 }
 
 type driverPathOwner struct {
@@ -241,9 +242,10 @@ type driverPathOwner struct {
 
 func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnostic) {
 	c := &checker{
-		index:        index,
-		modules:      modules,
-		currentPhase: "",
+		index:         index,
+		modules:       modules,
+		currentPhase:  "",
+		typeParamMaps: map[*Type]map[string]*Type{},
 	}
 	if c.index == nil {
 		return &CheckedProgram{
@@ -374,6 +376,16 @@ func (c *checker) checkUnresolvedTypes() {
 				for _, variant := range d.Variants {
 					c.checkFieldsResolved(mod.Name, variant.Fields, params)
 				}
+			case *ast.TraitDecl:
+				params := typeParamMapForCheck(d.TypeParams)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, params)
+			case *ast.ImplDecl:
+				params := map[string]*Type{}
+				for _, name := range freeImplTypeParams(c.index, mod.Name, d.Trait, d.For) {
+					params[name] = &Type{Name: name, Kind: KindTypeParam}
+				}
+				c.checkTraitRefResolved(mod.Name, d.Trait, params, d.SpanV)
+				c.checkTypeRefResolved(mod.Name, d.For, params, d.SpanV)
 			case *ast.ClassDecl:
 				params := typeParamMapForCheck(d.TypeParams)
 				c.checkFieldsResolved(mod.Name, d.Fields, params)
@@ -386,29 +398,20 @@ func (c *checker) checkUnresolvedTypes() {
 				c.checkFieldsResolved(mod.Name, d.Fields, nil)
 				c.checkMethodTypesResolved(mod.Name, d.Methods, nil)
 				for _, event := range d.InterruptEvents {
-					eventType := legacyTypeName(event.EventType)
-					if c.resolveType(mod.Name, eventType) == nil {
-						c.error(event.SpanV, diag.SEM0002, "unknown type "+eventType)
-					}
+					c.checkTypeRefResolved(mod.Name, event.EventType, nil, event.SpanV)
 				}
 			case *ast.ExecutorDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields, nil)
 				c.checkMethodTypesResolved(mod.Name, d.Methods, nil)
 				for _, handler := range d.OnHandlers {
-					paramTypeName := legacyTypeName(handler.ParamType)
-					if c.resolveType(mod.Name, paramTypeName) == nil {
-						c.error(handler.SpanV, diag.SEM0002, "unknown type "+paramTypeName)
-					}
+					c.checkTypeRefResolved(mod.Name, handler.ParamType, nil, handler.SpanV)
 				}
 			case *ast.ConstDecl:
 				c.checkTypeRefResolved(mod.Name, d.Type, nil, d.SpanV)
 			case *ast.ImageDecl:
 				for _, phase := range d.Phases {
 					c.checkParamsResolved(mod.Name, phase.Params, nil)
-					returnType := legacyTypeName(phase.Return)
-					if c.resolveType(mod.Name, returnType) == nil {
-						c.error(phase.SpanV, diag.SEM0002, "unknown type "+returnType)
-					}
+					c.checkTypeRefResolved(mod.Name, phase.Return, nil, phase.SpanV)
 				}
 			}
 		}
@@ -552,20 +555,27 @@ func (c *checker) currentTypeParamMap() map[string]*Type {
 	if c == nil || c.currentType == nil {
 		return nil
 	}
+	if cached, ok := c.typeParamMaps[c.currentType]; ok {
+		return cached
+	}
+	var out map[string]*Type
 	if c.currentType.GenericOrigin != nil && len(c.currentType.GenericOrigin.TypeParams) == len(c.currentType.TypeArgs) {
-		out := map[string]*Type{}
+		out = map[string]*Type{}
 		for i, param := range c.currentType.GenericOrigin.TypeParams {
 			out[param.Name] = c.currentType.TypeArgs[i]
 		}
+		c.typeParamMaps[c.currentType] = out
 		return out
 	}
 	if len(c.currentType.TypeParams) == 0 {
+		c.typeParamMaps[c.currentType] = nil
 		return nil
 	}
-	out := map[string]*Type{}
+	out = map[string]*Type{}
 	for _, param := range c.currentType.TypeParams {
 		out[param.Name] = &Type{Name: param.Name, Kind: KindTypeParam}
 	}
+	c.typeParamMaps[c.currentType] = out
 	return out
 }
 
@@ -575,6 +585,21 @@ func (c *checker) checkTypeRefResolved(moduleName string, ref ast.TypeRef, param
 	}
 	typ, ds := c.index.LookupTypeRef(moduleName, ref, params)
 	if len(ds) != 0 {
+		c.diags = append(c.diags, ds...)
+		return
+	}
+	if typ == nil {
+		c.error(span, diag.SEM0002, "unknown type "+ref.String())
+	}
+}
+
+func (c *checker) checkTraitRefResolved(moduleName string, ref ast.TypeRef, params map[string]*Type, span source.Span) {
+	if ref.Name == "" {
+		return
+	}
+	typ, ds := c.index.LookupTraitRef(moduleName, ref, params)
+	if len(ds) != 0 {
+		c.diags = append(c.diags, ds...)
 		return
 	}
 	if typ == nil {
@@ -640,14 +665,17 @@ func (c *checker) checkInterruptEvents(moduleName string, path *Type, events []a
 		return
 	}
 	for _, event := range events {
-		eventType := legacyTypeName(event.EventType)
-		retType := c.resolveType(moduleName, eventType)
-		if retType == nil {
-			c.error(event.SpanV, diag.SEM0002, "unknown type "+eventType)
+		retType, ds := c.index.LookupTypeRef(moduleName, event.EventType, nil)
+		if len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
 			continue
 		}
-		if retType.Kind != KindData {
-			c.error(event.SpanV, diag.SEM0015, "interrupt event type must be a data record")
+		if retType == nil {
+			c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType.String())
+			continue
+		}
+		if retType.Kind != KindData && retType.Kind != KindEnum {
+			c.error(event.SpanV, diag.SEM0015, "interrupt event type must be a data record or enum")
 			continue
 		}
 		scope := NewScope(nil)
@@ -2248,7 +2276,9 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 		if publisher := c.pathPublisherOrigin(moduleName, expr, scope); publisher.Type != nil {
 			origin.PublishesInterrupts = true
 			origin.TopicLabel = publisher.TopicLabel
-			origin.TopicKind = publisher.TopicKind
+			if origin.TopicKind == "" {
+				origin.TopicKind = publisher.TopicKind
+			}
 		}
 	}
 	if typ.Kind == KindExecutor {
@@ -2444,7 +2474,9 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		if publisher := c.publisherOriginForArg(moduleName, namedArgExpr(expr.Args, "rx"), scope); publisher.Type != nil {
 			origin.PublishesInterrupts = true
 			origin.TopicLabel = publisher.TopicLabel
-			origin.TopicKind = publisher.TopicKind
+			if origin.TopicKind == "" {
+				origin.TopicKind = publisher.TopicKind
+			}
 		}
 	case IsVcpuType(receiverType) && (expr.Method == "start" || expr.Method == "enter"):
 		origin = c.vcpuOrigin(expr, scope)
@@ -3083,7 +3115,7 @@ func topicKindForType(typ *Type) string {
 func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) {
 	switch qualifiedTypeName(typ) {
 	case "machine.x86_64.serial.SerialConsolePath":
-		return "serial_rx", "machine.x86_64.topic_payload.SerialPathInterrupt", "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt"
+		return "serial_rx", "wrela.lang.core.Option[U8]", "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt"
 	case "machine.x86_64.edu.EduMsiPath":
 		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_fn_machine_x86_64_edu_EduMsiPath_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
@@ -3219,9 +3251,6 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		c.error(expr.SpanV, diag.SEM0016, "on handler can only construct data values")
 	}
 
-	if isProtectedViewType(constructed) && !isTrustedAuthorityModule(moduleName) {
-		c.error(expr.SpanV, diag.SEM0092, "protected memory-region view construction is not allowed here")
-	}
 	c.checkConstructorPermissions(moduleName, expr, constructed, scope, ctx)
 	if c.currentPhase == "owned_hardware" && c.hasDelegatedField(constructed) {
 		c.error(expr.SpanV, diag.SEM0009, "delegated-only value cannot be constructed in owned_hardware phase")
@@ -3375,10 +3404,15 @@ func (c *checker) rememberCpuFeatureOrigin(strategy string, fallback string) {
 }
 
 func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope, ctx ContextKind) {
-	_ = scope
 	if typ.Module == "machine.x86_64.executor_memory" && typ.Name == "ArenaFrame" {
 		c.error(expr.SpanV, diag.SEM0029, "ArenaFrame can only be created by with arena.frame(length = ...)")
 		return
+	}
+	if isProtectedViewType(typ) {
+		if !isTrustedAuthorityModule(moduleName) || !c.protectedViewConstructorHasProvenance(moduleName, expr, typ, scope) {
+			c.error(expr.SpanV, diag.SEM0092, "protected memory-region view construction is not allowed here")
+			return
+		}
 	}
 	if IsTopicPublisherType(typ) {
 		if c.topicCapabilityFactoryAllowed("publisher") {
@@ -3431,6 +3465,78 @@ func (c *checker) checkConstructorPermissions(moduleName string, expr *ast.Const
 		return
 	}
 	c.error(expr.SpanV, diag.SEM0006, typ.Kind.String()+" construction is allowed only directly inside image phase bodies")
+}
+
+func (c *checker) protectedViewConstructorHasProvenance(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) bool {
+	switch qualifiedTypeName(typ) {
+	case "platform.hardware.bytes.Mmio", "platform.hardware.bytes.Volatile":
+		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope)
+	case "platform.uefi.types.FirmwareSlice":
+		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope) &&
+			c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "length"), scope)
+	case "platform.hardware.memory.DmaBuffer":
+		return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "owner"), scope) &&
+			c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "slots"), scope)
+	default:
+		if isSlotsType(typ) {
+			return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope) &&
+				c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "capacity"), scope)
+		}
+		if isSliceType(typ) {
+			return c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "address"), scope) &&
+				c.exprHasAuthorityProvenance(moduleName, constructorArg(expr, "length"), scope)
+		}
+		return false
+	}
+}
+
+func (c *checker) exprHasAuthorityProvenance(moduleName string, expr ast.Expr, scope *Scope) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.IntLiteral, *ast.BoolLiteral, *ast.StringLiteral, *ast.SizeOfExpr, *ast.AlignOfExpr:
+		return false
+	case *ast.NameExpr:
+		if scope == nil {
+			return false
+		}
+		if origin, ok := scope.LookupOrigin(e.Name); ok && isAuthorityProvenanceType(origin.Type) {
+			return true
+		}
+		typ, ok := scope.Lookup(e.Name)
+		return ok && isAuthorityProvenanceType(typ)
+	case *ast.FieldExpr:
+		baseType := c.exprStaticType(moduleName, e.Base, scope)
+		return isAuthorityProvenanceType(baseType) || c.exprHasAuthorityProvenance(moduleName, e.Base, scope)
+	case *ast.CallExpr:
+		receiverType := c.exprStaticType(moduleName, e.Receiver, scope)
+		return isAuthorityProvenanceType(receiverType)
+	case *ast.ConstructorExpr:
+		if len(e.Args) == 0 {
+			return false
+		}
+		for _, arg := range e.Args {
+			if !c.exprHasAuthorityProvenance(moduleName, arg.Value, scope) {
+				return false
+			}
+		}
+		return true
+	case *ast.BinaryExpr:
+		return c.exprHasAuthorityProvenance(moduleName, e.Left, scope) ||
+			c.exprHasAuthorityProvenance(moduleName, e.Right, scope)
+	default:
+		return false
+	}
+}
+
+func isAuthorityProvenanceType(typ *Type) bool {
+	return isProtectedViewType(typ) ||
+		IsPhysicalRegionAuthorityType(typ) ||
+		IsArenaAuthorityType(typ) ||
+		IsDMABufferAuthorityType(typ) ||
+		isHardwareAuthorityType(typ) ||
+		qualifiedTypeName(typ) == "platform.uefi.types.FirmwareAddress"
 }
 
 func (c *checker) topicCapabilityFactoryAllowed(method string) bool {

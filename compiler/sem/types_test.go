@@ -974,16 +974,12 @@ func TestExecutorTopicSourceSurface(t *testing.T) {
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.cpu_state", "PathIdentity"), map[string]string{
 		"label": "StringLiteral",
 	})
-	assertTypeFields(t, moduleType(t, index, "machine.x86_64.topic_payload", "SerialPathInterrupt"), map[string]string{
-		"has_byte": "Bool",
-		"byte":     "U8",
-	})
 	serialPath := moduleType(t, index, "machine.x86_64.serial", "SerialConsolePath")
 	assertTypeFields(t, serialPath, map[string]string{
 		"identity":  "PathIdentity",
 		"registers": "SerialWriterRegisters",
 		"route":     "IoApicRoute",
-		"rx":        "TopicPublisher<SerialPathInterrupt>",
+		"rx":        "TopicPublisher<U8>",
 	})
 	assertTypeFields(t, moduleType(t, index, "machine.x86_64.edu", "EduMsiPath"), map[string]string{
 		"identity": "PathIdentity",

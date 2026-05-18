@@ -16,7 +16,8 @@ use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { Topic } from machine.x86_64.topic
-use { SerialPathInterrupt, TimerTickPayload } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
+use { TimerTickPayload } from machine.x86_64.topic_payload
 use { TopicIdentity } from machine.x86_64.topic_u64
 image TimerTopicImage {
     transitions { delegated_hardware -> owned_hardware }
@@ -31,8 +32,8 @@ image TimerTopicImage {
         let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
         let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
-        let queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let queue_slots = console_memory.reserve_array(U8, count = 64)
+        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let arena = MutableBytes(address = 0, length = 0)
         return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = arena), executor_arena = arena, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = shared.route, serial_shared_irq4 = shared, serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))), pci = ClaimedPciPlanBuilder(panic = panic).empty(), timer = discovery.timers.require_periodic(period_us = 1000), serial_irq_queue = queue, console_memory = console_memory, worker_memory = worker_memory, wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = true))))
     }

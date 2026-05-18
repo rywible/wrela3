@@ -555,7 +555,6 @@ func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 func TestProductionSourcesUseTypedInterruptQueues(t *testing.T) {
 	forbidden := []string{
 		".interrupt_queue(",
-		"serial_irq_queue: InterruptQueue<U8>",
 		"payload = InterruptPayloadKind(",
 	}
 	for _, root := range []string{"examples", filepath.Join("tests", "e2e", "fixtures"), "wrela"} {
@@ -596,7 +595,7 @@ func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 			t.Fatalf("%s.interrupt_queue should not keep the old manual payload queue helper", typeName)
 		}
 	}
-	if strings.Contains(source, "InterruptPayloadKind") || strings.Contains(source, "InterruptQueue<U8>") {
+	if strings.Contains(source, "InterruptPayloadKind") {
 		t.Fatal("memory source should not expose manual interrupt queue payload metadata")
 	}
 }

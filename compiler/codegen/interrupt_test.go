@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -10,23 +11,22 @@ import (
 
 func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	t.Helper()
-	boolType := ir.Type{Name: "Bool", Module: "builtin", Kind: ir.TypeKindPrimitive}
+	u64 := ir.Type{Name: "U64", Module: "builtin", Kind: ir.TypeKindPrimitive}
 	u8 := ir.Type{Name: "U8", Module: "builtin", Kind: ir.TypeKindPrimitive}
-	eventType := ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.topic_payload", Kind: ir.TypeKindData}
+	eventType := ir.Type{Name: "wrela.lang.core.Option[U8]", Module: "wrela.lang.core", Kind: ir.TypeKindEnum}
 	executorType := ir.Type{Name: "HelloWorld", Module: "examples.hello.program", Kind: ir.TypeKindExecutor}
 
-	eventHasByte := &ir.ConstInt{Symbol: "event_has_byte", Value: 1, Type: boolType}
 	eventByte := &ir.ConstInt{Symbol: "event_byte", Value: 0, Type: u8}
-	eventRet := &ir.Construct{
-		Symbol: "event_value",
-		Type:   eventType,
-		Fields: []ir.FieldValue{{Name: "has_byte", Value: eventHasByte}, {Name: "byte", Value: eventByte}},
+	eventRet := &ir.EnumConstruct{
+		Symbol:  "event_value",
+		Type:    eventType,
+		Variant: "Some",
+		Fields:  []ir.FieldValue{{Name: "value", Value: eventByte}},
 	}
 	eventFn := ir.Function{
 		Symbol: "_wrela_event_fn_machine_x86_64_serial_SerialConsolePath_interrupt",
 		Return: eventType,
 		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
-			eventHasByte,
 			eventByte,
 			eventRet,
 			&ir.Return{Value: eventRet},
@@ -41,34 +41,35 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 	return &ir.Program{
 		Functions: []ir.Function{eventFn, handlerFn},
 		Types: map[string]ir.TypeInfo{
-			"machine.x86_64.topic_payload.SerialPathInterrupt": {
-				Name:        "SerialPathInterrupt",
-				Module:      "machine.x86_64.topic_payload",
-				Kind:        ir.TypeKindData,
-				Size:        8,
+			"wrela.lang.core.Option[U8]": {
+				Name:        "wrela.lang.core.Option[U8]",
+				Module:      "wrela.lang.core",
+				Kind:        ir.TypeKindEnum,
+				Size:        16,
 				Align:       8,
-				StorageSize: 8,
+				StorageSize: 16,
 				Fields: map[string]ir.FieldInfo{
-					"has_byte": {
-						Name:          "has_byte",
-						Type:          boolType,
+					"$tag": {
+						Name:          "$tag",
+						Type:          u64,
 						Offset:        0,
 						StorageOffset: 0,
-						Size:          1,
-						StorageSize:   1,
-						Align:         1,
+						Size:          8,
+						StorageSize:   8,
+						Align:         8,
 					},
-					"byte": {
-						Name:          "byte",
+					"Some.value": {
+						Name:          "Some.value",
 						Type:          u8,
-						Offset:        1,
-						StorageOffset: 1,
+						Offset:        8,
+						StorageOffset: 8,
 						Size:          1,
 						StorageSize:   1,
 						Align:         1,
 					},
 				},
-				FieldOrder: []string{"has_byte", "byte"},
+				FieldOrder:   []string{"$tag", "Some.value"},
+				EnumVariants: []ir.EnumVariantInfo{{Name: "None", Discriminant: 0}, {Name: "Some", Discriminant: 1, Fields: []string{"Some.value"}}},
 			},
 			"HelloWorld": {
 				Name:        "HelloWorld",
@@ -99,10 +100,11 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				HandlerFunctionSymbol: handlerFn.Symbol,
 				ExecutorType:          executorType,
 				PathField:             "serial_path",
+				EventType:             eventType,
 				PathFieldOffset:       16,
 				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_40",
-				EventStorageSize:      8,
+				EventStorageSize:      16,
 				Vector:                0x40,
 			},
 			{
@@ -112,10 +114,11 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				HandlerFunctionSymbol: handlerFn.Symbol,
 				ExecutorType:          executorType,
 				PathField:             "edu_path",
+				EventType:             eventType,
 				PathFieldOffset:       16,
 				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_41",
-				EventStorageSize:      8,
+				EventStorageSize:      16,
 				Vector:                0x41,
 			},
 			{
@@ -125,10 +128,11 @@ func interruptProgramForCodegenTest(t *testing.T) *ir.Program {
 				HandlerFunctionSymbol: handlerFn.Symbol,
 				ExecutorType:          executorType,
 				PathField:             "ivshmem_rx",
+				EventType:             eventType,
 				PathFieldOffset:       16,
 				ContextSymbol:         "_wrela_interrupt_context_0",
 				EventStorageSymbol:    "_wrela_interrupt_event_42",
-				EventStorageSize:      8,
+				EventStorageSize:      16,
 				Vector:                0x42,
 			},
 		},
@@ -149,10 +153,12 @@ func interruptTopicProgramForCodegenTest(t *testing.T) *ir.Program {
 	t.Helper()
 	program := interruptProgramForCodegenTest(t)
 	program.Topics = []ir.TopicLayout{{
-		Label:       "console.com1.rx",
-		Kind:        "serial_rx",
-		Depth:       64,
-		Subscribers: []string{"console"},
+		Label:        "console.com1.rx",
+		Kind:         "serial_rx",
+		Depth:        64,
+		PayloadSize:  1,
+		PayloadAlign: 1,
+		Subscribers:  []string{"console"},
 	}}
 	program.VcpuStarts = []ir.VcpuStartPlan{{
 		VcpuID:    2,
@@ -428,6 +434,68 @@ func TestInterruptTopicDispatchPushesSharedInterruptQueue(t *testing.T) {
 	}
 }
 
+func TestSerialRxInterruptQueuePushSkipsOptionNone(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.InterruptQueues = []ir.InterruptQueueLayout{{
+		Label:        "irq.serial.rx",
+		SourceLabel:  "serial.rx",
+		Vector:       0x40,
+		Owner:        "console",
+		Capacity:     64,
+		PayloadSize:  1,
+		PayloadAlign: 1,
+		Overflow:     "drop_newest_and_set_flag",
+	}}
+	info := program.Types["wrela.lang.core.Option[U8]"]
+	tag := info.Fields["$tag"]
+	tag.Offset = 8
+	tag.StorageOffset = 8
+	info.Fields["$tag"] = tag
+	value := info.Fields["Some.value"]
+	value.Offset = 0
+	value.StorageOffset = 0
+	info.Fields["Some.value"] = value
+	info.FieldOrder = []string{"Some.value", "$tag"}
+	program.Types["wrela.lang.core.Option[U8]"] = info
+
+	layouts, ds := topicLayoutMap(program)
+	if len(ds) != 0 {
+		t.Fatalf("topicLayoutMap diagnostics = %#v", ds)
+	}
+	unit, ds := buildInterruptDispatchUnit(interruptVectorSymbol(0x40), program.InterruptBindings[0], compileContext{
+		types:           program.Types,
+		topicLayouts:    layouts,
+		interruptQueues: interruptQueueByVector(program),
+		SlotVcpu:        slotVcpuMap(program),
+	})
+	if len(ds) != 0 {
+		t.Fatalf("buildInterruptDispatchUnit diagnostics = %#v", ds)
+	}
+	tagLoad := bytes.Index(unit.Bytes, []byte{0x48, 0x8b, 0x56, 0x08})
+	if tagLoad < 0 {
+		t.Fatalf("serial rx dispatch missing option tag load at offset 8: %#x", unit.Bytes)
+	}
+	branchRel := bytes.Index(unit.Bytes[tagLoad:], []byte{0x0f, 0x85})
+	if branchRel < 0 {
+		t.Fatalf("serial rx dispatch missing Option.None skip branch after tag load: %#x", unit.Bytes[tagLoad:])
+	}
+	branch := tagLoad + branchRel
+	target := branch + 6 + int(int32(binary.LittleEndian.Uint32(unit.Bytes[branch+2:branch+6])))
+	queueReloc := -1
+	for _, rel := range unit.DataReloc {
+		if rel.Symbol == interruptQueueDataSymbol("irq.serial.rx") {
+			queueReloc = int(rel.Offset)
+			break
+		}
+	}
+	if queueReloc < 0 {
+		t.Fatalf("serial rx dispatch missing interrupt queue data relocation: %#v", unit.DataReloc)
+	}
+	if target <= queueReloc {
+		t.Fatalf("Option.None branch target %d must skip interrupt queue push at data reloc %d: %#x", target, queueReloc, unit.Bytes)
+	}
+}
+
 func TestInterruptTopicDispatchWakesNonBspSubscriber(t *testing.T) {
 	img, diags := Compile(interruptTopicProgramForCodegenTest(t))
 	if len(diags) != 0 {
@@ -474,27 +542,27 @@ func TestInterruptTopicDispatchResolvesConditionalJumps(t *testing.T) {
 	}
 }
 
-func TestSerialRxInterruptTopicDispatchChecksHasByteField(t *testing.T) {
+func TestSerialRxInterruptTopicDispatchChecksOptionTagField(t *testing.T) {
 	program := interruptTopicProgramForCodegenTest(t)
-	info := program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"]
-	hasByte := info.Fields["has_byte"]
-	hasByte.Offset = 1
-	hasByte.StorageOffset = 1
-	info.Fields["has_byte"] = hasByte
-	eventByte := info.Fields["byte"]
-	eventByte.Offset = 0
-	eventByte.StorageOffset = 0
-	info.Fields["byte"] = eventByte
-	info.FieldOrder = []string{"byte", "has_byte"}
-	program.Types["machine.x86_64.topic_payload.SerialPathInterrupt"] = info
+	info := program.Types["wrela.lang.core.Option[U8]"]
+	tag := info.Fields["$tag"]
+	tag.Offset = 8
+	tag.StorageOffset = 8
+	info.Fields["$tag"] = tag
+	value := info.Fields["Some.value"]
+	value.Offset = 0
+	value.StorageOffset = 0
+	info.Fields["Some.value"] = value
+	info.FieldOrder = []string{"Some.value", "$tag"}
+	program.Types["wrela.lang.core.Option[U8]"] = info
 
 	img, diags := Compile(program)
 	if len(diags) != 0 {
 		t.Fatalf("Compile() diagnostics = %#v", diags)
 	}
 	code := symbolBytes(t, img, "_wrela_interrupt_vector40_serial")
-	if !containsBytes(code, []byte{0x8a, 0x56, 0x01}) {
-		t.Fatalf("serial rx dispatch must load has_byte at payload offset 1 before publishing: %#x", code)
+	if !containsBytes(code, []byte{0x48, 0x8b, 0x56, 0x08}) {
+		t.Fatalf("serial rx dispatch must load the option tag at payload offset 8 before publishing: %#x", code)
 	}
 	if containsBytes(code, []byte{0x8a, 0x16}) {
 		t.Fatalf("serial rx dispatch must not guard against zero byte payloads at offset 0: %#x", code)

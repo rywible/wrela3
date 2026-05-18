@@ -8,8 +8,8 @@ import (
 
 func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "missing-overflow-policy.wrela", interruptQueueSource(`
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
-        let queue = InterruptQueue<SerialPathInterrupt>(
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
             slots = queue_slots,
@@ -26,8 +26,8 @@ func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 
 func TestInterruptQueueSourceShapeIsGeneric(t *testing.T) {
 	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-shape.wrela", interruptQueueSource(`
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
-        let queue = InterruptQueue<SerialPathInterrupt>(
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
             slots = queue_slots,
@@ -59,8 +59,8 @@ func TestInterruptQueueSourceShapeIsGeneric(t *testing.T) {
 
 func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 4)
-        let queue = InterruptQueue<SerialPathInterrupt>(
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
             slots = queue_slots,
@@ -78,7 +78,7 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
 	}
 	queue := checked.ImageGraph.InterruptQueues[0]
-	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "machine.x86_64.topic_payload.SerialPathInterrupt" || queue.PayloadSize != 2 || queue.PayloadAlign != 1 || queue.Overflow != "set_flag_and_wake" {
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "U8" || queue.PayloadSize != 1 || queue.PayloadAlign != 1 || queue.Overflow != "set_flag_and_wake" {
 		t.Fatalf("interrupt queue node = %#v", queue)
 	}
 }
@@ -86,7 +86,7 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 func TestInterruptQueueRejectsMismatchedSlotType(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-slot-mismatch.wrela", interruptQueueSource(`
         let queue_slots = console_memory.reserve_array(U64, count = 4)
-        let queue = InterruptQueue<SerialPathInterrupt>(
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
             slots = queue_slots,
@@ -104,12 +104,12 @@ func TestInterruptQueueRejectsMismatchedSlotType(t *testing.T) {
 
 func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-overflow.wrela", interruptQueueSource(`
-        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 1)
-        let queue = InterruptQueue<SerialPathInterrupt>(
+	        let queue_slots = console_memory.reserve_array(U64, count = 1)
+	        let queue = InterruptQueue<U64>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
             slots = queue_slots,
-            capacity = 0x8000000000000000,
+	            capacity = 0x4000000000000000,
             overflow = InterruptOverflowPolicy(mode = 2),
             head = 0,
             tail = 0,
@@ -179,7 +179,7 @@ use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { QueueIdentity, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 image InterruptQueueTest {
     transitions { delegated_hardware -> owned_hardware }
@@ -248,7 +248,7 @@ use { ExecutorSlot } from machine.x86_64.executor_slot
 use { QueueIdentity, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 image SharedIrqTest {
     transitions { delegated_hardware -> owned_hardware }
@@ -264,8 +264,8 @@ image SharedIrqTest {
         let worker_slot_seed = ExecutorSlot(id = 1)
         let console_memory = root.executor_memory(owner = console_slot_seed, length = 0x100000, align = 4096)
         let worker_memory = root.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
-        let serial_queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
-        let serial_queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
+        let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let plan_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let plan_source = plan_route.claim_source(identity = InterruptSourceIdentity(label = "serial.plan"))
 ` + claims + `

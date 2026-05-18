@@ -22,8 +22,6 @@ func topicKindFromPayload(payload *Type, reliable bool) string {
 		return "gap_u64"
 	case "machine.x86_64.topic_payload.TimerTickPayload":
 		return "timer_tick"
-	case "machine.x86_64.topic_payload.SerialPathInterrupt":
-		return "serial_rx"
 	case "machine.x86_64.edu.EduInterrupt":
 		return "edu_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt":
@@ -41,19 +39,29 @@ func resolveBuiltinTopicPayload(moduleName string, typeName string) *Type {
 }
 
 func payloadLayoutFromType(t *Type) (size uint64, align uint64, ok bool) {
+	return payloadLayoutFromTypeSeen(t, map[string]bool{})
+}
+
+func payloadLayoutFromTypeSeen(t *Type, visiting map[string]bool) (size uint64, align uint64, ok bool) {
 	if t == nil {
 		return 0, 0, false
 	}
 	if t.Kind == KindPrimitive {
 		return primitivePayloadLayout(t.Name)
 	}
+	key := t.Key()
+	if visiting[key] {
+		return 0, 0, false
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
 	if t.Kind == KindEnum {
 		enumSize, enumAlign := uint64(8), uint64(8)
 		for _, variant := range t.EnumVariants {
 			var offset uint64
 			var maxAlign uint64 = 1
 			for _, field := range variant.Fields {
-				fieldSize, fieldAlign, ok := semanticSizeAlign(field.Type)
+				fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
 				if !ok {
 					return 0, 0, false
 				}
@@ -79,7 +87,7 @@ func payloadLayoutFromType(t *Type) (size uint64, align uint64, ok bool) {
 	var offset uint64
 	var maxAlign uint64
 	for _, field := range t.Fields {
-		fieldSize, fieldAlign, ok := payloadLayoutFromType(field.Type)
+		fieldSize, fieldAlign, ok := payloadLayoutFromTypeSeen(field.Type, visiting)
 		if !ok {
 			return 0, 0, false
 		}
@@ -111,11 +119,47 @@ func primitivePayloadLayout(name string) (size uint64, align uint64, ok bool) {
 }
 
 func semanticSizeAlign(t *Type) (size uint64, align uint64, ok bool) {
+	return semanticSizeAlignSeen(t, map[string]bool{})
+}
+
+func semanticSizeAlignSeen(t *Type, visiting map[string]bool) (size uint64, align uint64, ok bool) {
 	if t == nil {
 		return 0, 0, false
 	}
 	if t.Kind == KindPrimitive {
 		return primitivePayloadLayout(t.Name)
+	}
+	key := t.Key()
+	if visiting[key] {
+		return 0, 0, false
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+	if t.Kind == KindEnum {
+		enumSize, enumAlign := uint64(8), uint64(8)
+		for _, variant := range t.EnumVariants {
+			var offset uint64
+			var maxAlign uint64 = 1
+			for _, field := range variant.Fields {
+				fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
+				if !ok {
+					return 0, 0, false
+				}
+				offset = alignPayloadOffset(offset, fieldAlign)
+				offset += fieldSize
+				if fieldAlign > maxAlign {
+					maxAlign = fieldAlign
+				}
+			}
+			payload := alignPayloadOffset(offset, maxAlign)
+			if 8+payload > enumSize {
+				enumSize = 8 + payload
+			}
+			if maxAlign > enumAlign {
+				enumAlign = maxAlign
+			}
+		}
+		return alignPayloadOffset(enumSize, enumAlign), enumAlign, true
 	}
 	if t.Kind != KindData && t.Kind != KindClass {
 		return 0, 0, false
@@ -123,7 +167,7 @@ func semanticSizeAlign(t *Type) (size uint64, align uint64, ok bool) {
 	var offset uint64
 	var maxAlign uint64 = 1
 	for _, field := range t.Fields {
-		fieldSize, fieldAlign, ok := semanticSizeAlign(field.Type)
+		fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
 		if !ok {
 			return 0, 0, false
 		}

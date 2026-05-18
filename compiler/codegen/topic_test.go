@@ -194,6 +194,32 @@ func TestReliableTopicPublishChecksSlowestSubscriber(t *testing.T) {
 	}
 }
 
+func TestReliableTopicPublishReloadsTopicBaseAfterPayloadCopy(t *testing.T) {
+	program := topicProgramForCodegenTest()
+	program.Topics[0].Kind = "reliable_u64"
+	program.Topics[0].Subscribers = []string{"worker"}
+	program.Functions[0].Blocks[0].Ops = []ir.Operation{
+		program.Functions[0].Blocks[0].Ops[0],
+		&ir.ReliableTopicTryPublish{
+			TopicLabel: "counter",
+			Value:      program.Functions[0].Blocks[0].Ops[0].(ir.Value),
+			Type:       ir.Type{Name: "Result<Unit, TopicFull>", Kind: ir.TypeKindEnum},
+		},
+		&ir.Return{},
+	}
+	layouts, ds := topicLayoutMap(program)
+	if len(ds) != 0 {
+		t.Fatalf("topicLayoutMap diagnostics = %#v", ds)
+	}
+	unit, ds := compileFunction(program.Functions[0], compileContext{types: program.Types, topicLayouts: layouts})
+	if len(ds) != 0 {
+		t.Fatalf("compileFunction diagnostics = %#v", ds)
+	}
+	if got := countDataRelocs(unit, topicDataSymbol("counter")); got < 2 {
+		t.Fatalf("reliable publish must reload topic base after payload copy, got %d topic data relocs: %#v", got, unit.DataReloc)
+	}
+}
+
 func TestReliableTopicPublishRejectsLegacyDataResultLayout(t *testing.T) {
 	program := topicProgramForCodegenTest()
 	program.Topics[0].Kind = "reliable_u64"
@@ -372,10 +398,12 @@ func TestTopicWaitIfArmedChecksAllGuardsBeforeHlt(t *testing.T) {
 	alertSub := &ir.Param{Symbol: "alert_input", Type: ir.Type{Name: "TopicSubscription<U64>", Kind: ir.TypeKindClass}}
 	program := topicProgramForCodegenTest()
 	program.Topics = append(program.Topics, ir.TopicLayout{
-		Label:       "alerts",
-		Kind:        "gap_u64",
-		Depth:       8,
-		Subscribers: []string{"worker"},
+		Label:        "alerts",
+		Kind:         "gap_u64",
+		Depth:        8,
+		PayloadSize:  8,
+		PayloadAlign: 8,
+		Subscribers:  []string{"worker"},
 	})
 	program.Functions[0] = ir.Function{
 		Symbol: "wait_all_if_armed",
@@ -649,9 +677,11 @@ func TestTypedTopicDataUsesPayloadSlotSize(t *testing.T) {
 
 func TestReliableTopicRequiresSubscriber(t *testing.T) {
 	_, diags := planTopicDataChecked(ir.TopicLayout{
-		Label: "commands",
-		Kind:  "reliable_u64",
-		Depth: 8,
+		Label:        "commands",
+		Kind:         "reliable_u64",
+		Depth:        8,
+		PayloadSize:  8,
+		PayloadAlign: 8,
 	})
 	if len(diags) != 1 || diags[0].Code != diag.CG0001 {
 		t.Fatalf("subscriberless reliable topic diagnostics = %#v, want CG0001", diags)
@@ -729,10 +759,12 @@ func topicProgramForCodegenTest() *ir.Program {
 	value := &ir.ConstInt{Symbol: "value", Value: 42, Type: ir.Type{Name: "U64"}}
 	return &ir.Program{
 		Topics: []ir.TopicLayout{{
-			Label:       "counter",
-			Kind:        "gap_u64",
-			Depth:       8,
-			Subscribers: []string{"worker"},
+			Label:        "counter",
+			Kind:         "gap_u64",
+			Depth:        8,
+			PayloadSize:  8,
+			PayloadAlign: 8,
+			Subscribers:  []string{"worker"},
 		}},
 		Types: map[string]ir.TypeInfo{
 			"Option<U64>": {

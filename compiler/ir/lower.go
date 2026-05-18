@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 	"strconv"
@@ -22,6 +23,25 @@ type lowerBinding struct {
 type concreteMethodRef struct {
 	Owner      *sem.Type
 	MethodName string
+	Key        string
+}
+
+type concreteMethodHeap []concreteMethodRef
+
+func (h concreteMethodHeap) Len() int           { return len(h) }
+func (h concreteMethodHeap) Less(i, j int) bool { return h[i].Key < h[j].Key }
+func (h concreteMethodHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *concreteMethodHeap) Push(x any) {
+	*h = append(*h, x.(concreteMethodRef))
+}
+
+func (h *concreteMethodHeap) Pop() any {
+	old := *h
+	n := len(old)
+	ref := old[n-1]
+	*h = old[:n-1]
+	return ref
 }
 
 type intrinsicKind int
@@ -88,6 +108,8 @@ type lowerContext struct {
 	diags     []diag.Diagnostic
 
 	activeFrames []*FrameBegin
+
+	typeParamMaps map[*sem.Type]map[string]*sem.Type
 }
 
 func (ctx *lowerContext) enqueueConcreteMethod(owner *sem.Type, methodName string) {
@@ -96,10 +118,7 @@ func (ctx *lowerContext) enqueueConcreteMethod(owner *sem.Type, methodName strin
 		return
 	}
 	ctx.queuedConcreteMethod[key] = true
-	ctx.concreteMethodQueue = append(ctx.concreteMethodQueue, concreteMethodRef{Owner: owner, MethodName: methodName})
-	sort.Slice(ctx.concreteMethodQueue, func(i, j int) bool {
-		return ctx.concreteMethodQueue[i].Owner.Key()+"."+ctx.concreteMethodQueue[i].MethodName < ctx.concreteMethodQueue[j].Owner.Key()+"."+ctx.concreteMethodQueue[j].MethodName
-	})
+	heap.Push((*concreteMethodHeap)(&ctx.concreteMethodQueue), concreteMethodRef{Owner: owner, MethodName: methodName, Key: key})
 }
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
@@ -158,6 +177,7 @@ func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 		queuedConcreteMethod:  map[string]bool{},
 		emittedConcreteMethod: map[string]bool{},
 		valueBindings:         map[Value]string{},
+		typeParamMaps:         map[*sem.Type]map[string]*sem.Type{},
 	}
 	for _, mod := range checked.Modules {
 		ctx.modules[mod.Name] = mod
@@ -520,9 +540,8 @@ func (ctx *lowerContext) lowerSourceMethods() {
 
 func (ctx *lowerContext) lowerConcreteMethodQueue() {
 	for len(ctx.concreteMethodQueue) != 0 {
-		ref := ctx.concreteMethodQueue[0]
-		ctx.concreteMethodQueue = ctx.concreteMethodQueue[1:]
-		key := ref.Owner.Key() + "." + ref.MethodName
+		ref := heap.Pop((*concreteMethodHeap)(&ctx.concreteMethodQueue)).(concreteMethodRef)
+		key := ref.Key
 		if ctx.emittedConcreteMethod[key] {
 			continue
 		}
@@ -594,7 +613,7 @@ func (ctx *lowerContext) lowerInterruptEvent(moduleName string, pathType *sem.Ty
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(pathType)}
 	scope.define("self", lowerBinding{value: self, typ: pathType})
-	retType := ctx.resolveType(moduleName, event.EventType.Name)
+	retType := ctx.resolveTypeRef(moduleName, event.EventType)
 	prevReturn := ctx.currentReturn
 	ctx.currentReturn = retType
 	ops := ctx.lowerStmtList(moduleName, pathType, scope, assignedNames(event.Body), event.Body)
@@ -676,6 +695,7 @@ func (ctx *lowerContext) lowerInterruptBindings() {
 		ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, InterruptBinding{
 			EventSymbol:         logicalSymbol("interrupt_event", pathModule(route.EventType), pathName(route.EventType), "interrupt"),
 			EventFunctionSymbol: route.EventFunctionSymbol,
+			EventType:           eventType,
 			PathFieldOffset:     route.PathFieldOffset,
 			ContextSymbol:       route.ContextSymbol,
 			EventStorageSymbol:  fmt.Sprintf("_wrela_interrupt_event_%02x", route.Vector),
@@ -2277,6 +2297,10 @@ func (ctx *lowerContext) enumTypeForConstructor(moduleName string, scope *lowerS
 		if argType == nil {
 			continue
 		}
+		if existing := inferred[field.Type.Name]; existing != nil && existing.Key() != argType.Key() {
+			ctx.errorf("conflicting inferred type for %s in %s.%s", field.Type.Name, expr.Enum, expr.Variant)
+			return nil
+		}
 		inferred[field.Type.Name] = argType
 	}
 	args := make([]*sem.Type, 0, len(base.TypeParams))
@@ -2319,21 +2343,10 @@ func (ctx *lowerContext) findInstantiation(base *sem.Type, args []*sem.Type) *se
 	if ctx.checked == nil || ctx.checked.Index == nil || base == nil {
 		return nil
 	}
-	for _, candidate := range ctx.checked.Index.Instantiations {
-		if candidate == nil || candidate.GenericOrigin != base || len(candidate.TypeArgs) != len(args) {
-			continue
-		}
-		matched := true
-		for i := range args {
-			if candidate.TypeArgs[i].Key() != args[i].Key() {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			ctx.ensureTypeInfo(candidate, map[string]bool{})
-			return candidate
-		}
+	key := (&sem.Type{Module: base.Module, Name: base.Name, Kind: base.Kind, TypeArgs: args}).Key()
+	if candidate := ctx.checked.Index.Instantiations[key]; candidate != nil {
+		ctx.ensureTypeInfo(candidate, map[string]bool{})
+		return candidate
 	}
 	return nil
 }
@@ -2517,20 +2530,27 @@ func (ctx *lowerContext) currentTypeParamMap() map[string]*sem.Type {
 	if ctx == nil || ctx.currentReceiver == nil {
 		return nil
 	}
+	if cached, ok := ctx.typeParamMaps[ctx.currentReceiver]; ok {
+		return cached
+	}
+	var out map[string]*sem.Type
 	if ctx.currentReceiver.GenericOrigin != nil && len(ctx.currentReceiver.GenericOrigin.TypeParams) == len(ctx.currentReceiver.TypeArgs) {
-		out := map[string]*sem.Type{}
+		out = map[string]*sem.Type{}
 		for i, param := range ctx.currentReceiver.GenericOrigin.TypeParams {
 			out[param.Name] = ctx.currentReceiver.TypeArgs[i]
 		}
+		ctx.typeParamMaps[ctx.currentReceiver] = out
 		return out
 	}
 	if len(ctx.currentReceiver.TypeParams) == 0 {
+		ctx.typeParamMaps[ctx.currentReceiver] = nil
 		return nil
 	}
-	out := map[string]*sem.Type{}
+	out = map[string]*sem.Type{}
 	for _, param := range ctx.currentReceiver.TypeParams {
 		out[param.Name] = &sem.Type{Name: param.Name, Kind: sem.KindTypeParam}
 	}
+	ctx.typeParamMaps[ctx.currentReceiver] = out
 	return out
 }
 
@@ -2539,6 +2559,10 @@ func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {
 		return ctx.resolveType(moduleName, "void")
 	}
 	if ctx.checked != nil && ctx.checked.Index != nil {
+		if typ := ctx.checked.Index.Instantiations[raw]; typ != nil {
+			ctx.ensureTypeInfo(typ, map[string]bool{})
+			return typ
+		}
 		if typ, ok := ctx.checked.Index.Lookup(moduleName, raw); ok && typ != nil {
 			ctx.ensureTypeInfo(typ, map[string]bool{})
 			return typ

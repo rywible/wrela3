@@ -6,11 +6,18 @@ data SlotIdentity { label: StringLiteral }
 data ExecutorSlot { id: U64 }
 class ExecutorRegistry { asm fn claim(self, identity: SlotIdentity) -> ExecutorSlot { ret } }
 
+module wrela.lang.core
+enum Option<T> {
+    None
+    Some(value: T)
+}
+
 module machine.x86_64.topic
+use { Option } from wrela.lang.core
 use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
 class Topic<T> { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret } }
-class TopicSubscription<T> { subscriber: ExecutorSlot; asm fn poll(self) -> Bool { ret } }
+class TopicSubscription<T> { subscriber: ExecutorSlot; asm fn try_next(self) -> Option<T> { ret } }
 
 module negative.subscription_used_by_wrong_executor.app
 use { ExecutorRegistry, ExecutorSlot, SlotIdentity } from machine.x86_64.cpu_state
@@ -20,7 +27,7 @@ executor Other {
     slot: ExecutorSlot
     input: TopicSubscription<U64>
     start fn run(self) -> never {
-        let ready = self.input.poll()
+        let next = self.input.try_next()
         while true {}
     }
 }

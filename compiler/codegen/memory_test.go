@@ -185,7 +185,6 @@ func TestArenaReserveArrayEmitsOverflowAndBoundsTrap(t *testing.T) {
 	}
 	for name, want := range map[string][]byte{
 		"ArenaFrame.arena_length offset": {0x08, 0x00, 0x00, 0x00},
-		"ArenaFrame.next_offset offset":  {0x10, 0x00, 0x00, 0x00},
 		"Slots.capacity offset":          {0x08, 0x00, 0x00, 0x00},
 		"Event storage size":             {0x08, 0x00, 0x00, 0x00},
 		"requested capacity count":       {0x03, 0x00, 0x00, 0x00},

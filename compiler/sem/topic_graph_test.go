@@ -835,7 +835,7 @@ use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, IoApicD
 use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { SerialConsolePath, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic, TopicSubscription } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -843,7 +843,7 @@ executor Worker {
     slot: ExecutorSlot
     loop: HotPollPolicy
     interrupts: ApicInterruptController
-    serial_rx: TopicSubscription<SerialPathInterrupt>
+    serial_rx: TopicSubscription<U8>
 
     start fn run(self) -> never {
         `+test.configure+`
@@ -876,8 +876,8 @@ image ExplicitInterruptConfigurator {
 	        let console_memory = root.executor_memory(owner = console_seed, length = 0x100000, align = 4096)
 	        let worker_memory = root.executor_memory(owner = worker_seed, length = 0x100000, align = 4096)
 	        let shared = discovery.interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
-	        let queue_slots = console_memory.reserve_array(SerialPathInterrupt, count = 64)
-	        let queue = InterruptQueue<SerialPathInterrupt>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+	        let queue_slots = console_memory.reserve_array(U8, count = 64)
+	        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
 	        let hardware_plan = HardwarePlan(
 	            cpus = discovery.cpus.require_min_count(count = 2),
 	            interrupts = InterruptRoutingPlan(
@@ -898,7 +898,7 @@ image ExplicitInterruptConfigurator {
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot = hardware.executors.claim(identity = SlotIdentity(label = "worker"))
-        let topic = Topic<SerialPathInterrupt>(identity = TopicIdentity(label = "serial.rx"), id = 0, depth = 64)
+        let topic = Topic<U8>(identity = TopicIdentity(label = "serial.rx"), id = 0, depth = 64)
         let path = SerialConsolePath(
             identity = PathIdentity(label = "serial"),
             registers = SerialWriterRegisters(port_base = 0x03f8),
@@ -959,7 +959,7 @@ class TopicPublisher<T> {
 module machine.x86_64.serial
 use { PathIdentity } from machine.x86_64.cpu_state
 use { TopicPublisher } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 driver path SerialWriterRegisters {
     port_base: U16
@@ -968,22 +968,22 @@ driver path SerialWriterRegisters {
 driver path SerialConsolePath {
     identity: PathIdentity
     registers: SerialWriterRegisters
-    rx: TopicPublisher<SerialPathInterrupt>
+    rx: TopicPublisher<U8>
 
-    interrupt receiver -> SerialPathInterrupt {
-        return SerialPathInterrupt(has_byte = false, byte = 0)
+    interrupt receiver -> Option<U8> {
+        return Option.None()
     }
 }
 `, `
-module machine.x86_64.topic_payload
+module wrela.lang.core
 
-data SerialPathInterrupt { has_byte: Bool; byte: U8 }
+enum Option<T> { None Some(value: T) }
 `, `
 module test.path_topic_identity
 use { PathIdentity } from machine.x86_64.cpu_state
 use { SerialConsolePath, SerialWriterRegisters } from machine.x86_64.serial
 use { Topic } from machine.x86_64.topic
-use { SerialPathInterrupt } from machine.x86_64.topic_payload
+use { Option } from wrela.lang.core
 
 unique class OwnedHardware {}
 unique class DelegatedHardware {
@@ -1000,7 +1000,7 @@ image Img {
     }
 
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let topic = Topic<SerialPathInterrupt>(id = 0)
+        let topic = Topic<U8>(id = 0)
         let path = SerialConsolePath(
             identity = PathIdentity(label = "serial"),
             registers = SerialWriterRegisters(port_base = 0x03f8),
