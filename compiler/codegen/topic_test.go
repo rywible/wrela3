@@ -43,6 +43,26 @@ func TestGapTopicPublishStoresSequenceAndValue(t *testing.T) {
 	}
 }
 
+func TestGapTopicPublishPreservesTopicBaseAcrossPayloadCopy(t *testing.T) {
+	program := topicProgramForCodegenTest()
+
+	image, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := symbolBytes(t, image, "publish_counter")
+	topicAddress, ok := image.Symbols["_wrela_topic_counter"]
+	if !ok {
+		t.Fatal("Compile() symbols missing _wrela_topic_counter")
+	}
+	addressBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(addressBytes, runtimeImageBase+topicAddress)
+	if got := bytes.Count(code, addressBytes); got < 2 {
+		t.Fatalf("publish_counter must reload topic base after generic payload copy, address loads = %d: %#x", got, code)
+	}
+}
+
 func TestGapTopicPublishDerivesSlotStrideFromTopicLayoutSlotSize(t *testing.T) {
 	program := topicProgramForCodegenTest()
 	program.Topics[0].PayloadSize = 184

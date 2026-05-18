@@ -80,6 +80,7 @@ type lowerContext struct {
 
 	valueBindings   map[Value]string
 	currentExecutor *sem.ExecutorNode
+	currentReceiver *sem.Type
 	currentReturn   *sem.Type
 
 	stringSeq int
@@ -313,6 +314,11 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 	ctx.program.Types[infoKey] = info
 	if len(typ.TypeArgs) == 0 {
 		ctx.program.Types[typ.Name] = info
+	} else {
+		ctx.program.Types[info.Name] = info
+		if typ.Module != "" {
+			ctx.program.Types[typ.Module+"."+info.Name] = info
+		}
 	}
 	delete(visiting, key)
 	return info
@@ -373,6 +379,11 @@ func (ctx *lowerContext) ensureEnumTypeInfo(typ *sem.Type, visiting map[string]b
 	ctx.program.Types[infoKey] = info
 	if len(typ.TypeArgs) == 0 {
 		ctx.program.Types[typ.Name] = info
+	} else {
+		ctx.program.Types[info.Name] = info
+		if typ.Module != "" {
+			ctx.program.Types[typ.Module+"."+info.Name] = info
+		}
 	}
 	return info
 }
@@ -732,6 +743,12 @@ func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, 
 }
 
 func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *sem.Type, method *ast.MethodDecl, symbol string) Function {
+	prevReceiver := ctx.currentReceiver
+	ctx.currentReceiver = receiverType
+	defer func() {
+		ctx.currentReceiver = prevReceiver
+	}()
+
 	params := []Value{}
 	scope := newLowerScope(nil)
 
@@ -767,6 +784,12 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 }
 
 func (ctx *lowerContext) lowerSemanticMethodWithSymbol(moduleName string, receiverType *sem.Type, method *sem.Method, symbol string) Function {
+	prevReceiver := ctx.currentReceiver
+	ctx.currentReceiver = receiverType
+	defer func() {
+		ctx.currentReceiver = prevReceiver
+	}()
+
 	params := []Value{}
 	scope := newLowerScope(nil)
 
@@ -1789,7 +1812,7 @@ func (ctx *lowerContext) typeOperandArg(moduleName string, args []ast.NamedArg) 
 	}
 	switch value := args[0].Value.(type) {
 	case *ast.NameExpr:
-		return ctx.resolveType(moduleName, value.Name)
+		return ctx.resolveTypeRef(moduleName, ast.TypeRef{Name: value.Name, SpanV: value.SpanV})
 	case *ast.TypeOperandExpr:
 		return ctx.resolveTypeRef(moduleName, value.Type)
 	default:
@@ -2520,7 +2543,7 @@ func (ctx *lowerContext) resolveTypeRef(moduleName string, ref ast.TypeRef) *sem
 	if ref.Name == "" {
 		return ctx.resolveType(moduleName, "void")
 	}
-	typ, ds := ctx.checked.Index.LookupTypeRef(moduleName, ref, nil)
+	typ, ds := ctx.checked.Index.LookupTypeRef(moduleName, ref, ctx.currentTypeParamMap())
 	if len(ds) != 0 {
 		ctx.errorf("could not resolve type %s in %s", ref.String(), moduleName)
 		return ctx.resolveType(moduleName, "void")
@@ -2529,6 +2552,27 @@ func (ctx *lowerContext) resolveTypeRef(moduleName string, ref ast.TypeRef) *sem
 		return ctx.resolveType(moduleName, ref.Name)
 	}
 	return typ
+}
+
+func (ctx *lowerContext) currentTypeParamMap() map[string]*sem.Type {
+	if ctx == nil || ctx.currentReceiver == nil {
+		return nil
+	}
+	if ctx.currentReceiver.GenericOrigin != nil && len(ctx.currentReceiver.GenericOrigin.TypeParams) == len(ctx.currentReceiver.TypeArgs) {
+		out := map[string]*sem.Type{}
+		for i, param := range ctx.currentReceiver.GenericOrigin.TypeParams {
+			out[param.Name] = ctx.currentReceiver.TypeArgs[i]
+		}
+		return out
+	}
+	if len(ctx.currentReceiver.TypeParams) == 0 {
+		return nil
+	}
+	out := map[string]*sem.Type{}
+	for _, param := range ctx.currentReceiver.TypeParams {
+		out[param.Name] = &sem.Type{Name: param.Name, Kind: sem.KindTypeParam}
+	}
+	return out
 }
 
 func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {
@@ -2635,6 +2679,12 @@ func assignedNames(stmts []ast.Stmt) map[string]bool {
 			case *ast.IfStmt:
 				walk(s.Then)
 				walk(s.Else)
+			case *ast.IfLetStmt:
+				walk(s.Body)
+			case *ast.MatchStmt:
+				for _, arm := range s.Arms {
+					walk(arm.Body)
+				}
 			case *ast.WhileStmt:
 				walk(s.Body)
 			case *ast.ForStmt:

@@ -853,12 +853,16 @@ func (c *checker) firstArgAsType(moduleName string, args []ast.NamedArg) (*Type,
 	if len(args) == 0 || args[0].Name != "" {
 		return nil, false
 	}
+	params := c.currentTypeParamMap()
 	switch value := args[0].Value.(type) {
 	case *ast.NameExpr:
+		if typ := params[value.Name]; typ != nil {
+			return typ, true
+		}
 		typ, ok := c.index.lookupBaseType(moduleName, value.Name)
 		return typ, ok
 	case *ast.TypeOperandExpr:
-		typ, ds := c.index.LookupTypeRef(moduleName, value.Type, nil)
+		typ, ds := c.index.LookupTypeRef(moduleName, value.Type, params)
 		if len(ds) != 0 {
 			c.diags = append(c.diags, ds...)
 			return nil, false

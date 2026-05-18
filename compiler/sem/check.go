@@ -45,11 +45,16 @@ type localOrigin struct {
 	ArenaBytes                uint64
 	ArenaAlign                uint64
 	TopicLabel                string
+	TopicType                 string
+	TopicTypeKey              string
 	TopicKind                 string
 	TopicDepth                uint64
 	TopicPayloadType          string
+	TopicPayloadKey           string
 	TopicPayloadSize          uint64
 	TopicPayloadAlign         uint64
+	TopicNextType             string
+	TopicNextKey              string
 	TimerLabel                string
 	TimerSource               string
 	TimerPeriodUS             uint64
@@ -539,6 +544,27 @@ func mergeTypeParamMap(base map[string]*Type, params []ast.TypeParam) map[string
 	methodParams, _ := buildTypeParamMap(params)
 	for name, typ := range methodParams {
 		out[name] = typ
+	}
+	return out
+}
+
+func (c *checker) currentTypeParamMap() map[string]*Type {
+	if c == nil || c.currentType == nil {
+		return nil
+	}
+	if c.currentType.GenericOrigin != nil && len(c.currentType.GenericOrigin.TypeParams) == len(c.currentType.TypeArgs) {
+		out := map[string]*Type{}
+		for i, param := range c.currentType.GenericOrigin.TypeParams {
+			out[param.Name] = c.currentType.TypeArgs[i]
+		}
+		return out
+	}
+	if len(c.currentType.TypeParams) == 0 {
+		return nil
+	}
+	out := map[string]*Type{}
+	for _, param := range c.currentType.TypeParams {
+		out[param.Name] = &Type{Name: param.Name, Kind: KindTypeParam}
 	}
 	return out
 }
@@ -2081,6 +2107,23 @@ func (c *checker) originForLetValue(moduleName string, expr ast.Expr, valueType 
 	return c.originForExprValue(moduleName, expr, valueType, scope)
 }
 
+func (c *checker) recordTopicTypeOrigin(origin *localOrigin, topicType *Type, payloadType *Type) {
+	if origin == nil || topicType == nil {
+		return
+	}
+	origin.TopicType = topicType.Display()
+	origin.TopicTypeKey = topicType.Key()
+	if payloadType != nil {
+		origin.TopicPayloadKey = payloadType.Key()
+	}
+	if payloadType != nil {
+		if optionType := c.index.instantiateByName("wrela.lang.core", "Option", []*Type{payloadType}); optionType != nil {
+			origin.TopicNextType = optionType.Display()
+			origin.TopicNextKey = optionType.Key()
+		}
+	}
+}
+
 func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) localOrigin {
 	origin := localOrigin{
 		Type:          typ,
@@ -2161,8 +2204,10 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 	if IsTopicType(typ) {
 		if payloadType, kind, ok := TopicPayloadTypeForTopic(typ); ok {
 			payloadType = c.resolvePayloadType(moduleName, payloadType)
+			c.recordTopicTypeOrigin(&origin, typ, payloadType)
 			origin.TopicKind = kind
 			origin.TopicPayloadType = qualifiedTypeName(payloadType)
+			origin.TopicPayloadKey = payloadType.Key()
 			origin.TopicPayloadSize, origin.TopicPayloadAlign, _ = payloadLayoutFromType(payloadType)
 		} else {
 			origin.TopicKind = topicKindForType(typ)
@@ -2340,7 +2385,10 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		origin.TopicLabel = "timer.periodic"
 		origin.TopicKind = "timer_tick"
 		payloadType := c.resolvePayloadType(moduleName, resolveBuiltinTopicPayload("machine.x86_64.topic_payload", "TimerTickPayload"))
+		topicType := c.index.instantiateByName("machine.x86_64.topic", "Topic", []*Type{payloadType})
+		c.recordTopicTypeOrigin(&origin, topicType, payloadType)
 		origin.TopicPayloadType = qualifiedTypeName(payloadType)
+		origin.TopicPayloadKey = payloadType.Key()
 		origin.TopicPayloadSize, origin.TopicPayloadAlign, _ = payloadLayoutFromType(payloadType)
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case receiverType.Module == "machine.x86_64.interrupts" && receiverType.Name == "InterruptAuthority" && expr.Method == "route_shared_irq":
@@ -2363,18 +2411,28 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
+		origin.TopicType = receiverOrigin.TopicType
+		origin.TopicTypeKey = receiverOrigin.TopicTypeKey
 		origin.TopicKind = receiverOrigin.TopicKind
 		origin.TopicPayloadType = receiverOrigin.TopicPayloadType
+		origin.TopicPayloadKey = receiverOrigin.TopicPayloadKey
 		origin.TopicPayloadSize = receiverOrigin.TopicPayloadSize
 		origin.TopicPayloadAlign = receiverOrigin.TopicPayloadAlign
+		origin.TopicNextType = receiverOrigin.TopicNextType
+		origin.TopicNextKey = receiverOrigin.TopicNextKey
 		origin.SlotLabel = c.slotLabelForExpr(moduleName, namedArgExpr(expr.Args, "subscriber"), scope)
 	case IsTopicType(receiverType) && expr.Method == "publisher":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
+		origin.TopicType = receiverOrigin.TopicType
+		origin.TopicTypeKey = receiverOrigin.TopicTypeKey
 		origin.TopicKind = receiverOrigin.TopicKind
 		origin.TopicPayloadType = receiverOrigin.TopicPayloadType
+		origin.TopicPayloadKey = receiverOrigin.TopicPayloadKey
 		origin.TopicPayloadSize = receiverOrigin.TopicPayloadSize
 		origin.TopicPayloadAlign = receiverOrigin.TopicPayloadAlign
+		origin.TopicNextType = receiverOrigin.TopicNextType
+		origin.TopicNextKey = receiverOrigin.TopicNextKey
 	case receiverType.Module == "machine.x86_64.serial" && receiverType.Name == "SerialDriver" && expr.Method == "create_console_path" && valueType != nil && valueType.Kind == KindDriverPath:
 		origin.FieldBindings = map[string]string{}
 		if identity := namedArgExpr(expr.Args, "identity"); identity != nil {
@@ -2508,18 +2566,23 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case IsExecutorSlotType(origin.Type) && origin.RecordsExecutorSlot:
 		c.graph.ExecutorSlots = append(c.graph.ExecutorSlots, ExecutorSlotNode{Label: origin.SlotLabel, Binding: name, Span: span})
 	case IsTopicType(origin.Type):
-		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Kind: origin.TopicKind, Depth: origin.TopicDepth, PayloadType: origin.TopicPayloadType, PayloadSize: origin.TopicPayloadSize, PayloadAlign: origin.TopicPayloadAlign, Binding: name, Span: span})
+		c.graph.Topics = append(c.graph.Topics, TopicNode{Label: origin.TopicLabel, Type: origin.TopicType, TypeKey: origin.TopicTypeKey, Kind: origin.TopicKind, Depth: origin.TopicDepth, PayloadType: origin.TopicPayloadType, PayloadKey: origin.TopicPayloadKey, PayloadSize: origin.TopicPayloadSize, PayloadAlign: origin.TopicPayloadAlign, NextType: origin.TopicNextType, NextKey: origin.TopicNextKey, Binding: name, Span: span})
 	case IsTopicPublisherType(origin.Type):
 		c.graph.TopicPublishers = append(c.graph.TopicPublishers, TopicPublisherNode{TopicLabel: origin.TopicLabel, Binding: name, Span: span})
 	case IsTopicSubscriptionType(origin.Type):
 		if origin.IsTimerRoute && c.graph.TopicByLabel(origin.TopicLabel).Label == "" {
 			c.graph.Topics = append(c.graph.Topics, TopicNode{
 				Label:        origin.TopicLabel,
+				Type:         origin.TopicType,
+				TypeKey:      origin.TopicTypeKey,
 				Kind:         origin.TopicKind,
 				Depth:        64,
 				PayloadType:  origin.TopicPayloadType,
+				PayloadKey:   origin.TopicPayloadKey,
 				PayloadSize:  origin.TopicPayloadSize,
 				PayloadAlign: origin.TopicPayloadAlign,
+				NextType:     origin.TopicNextType,
+				NextKey:      origin.TopicNextKey,
 				Binding:      name + ".topic",
 				Span:         span,
 			})
@@ -3100,10 +3163,14 @@ func (c *checker) typeExprNoExpected(moduleName string, expr ast.Expr, scope *Sc
 	case *ast.BoolLiteral:
 		return c.mustType(moduleName, "Bool")
 	case *ast.SizeOfExpr:
-		c.constValueOfExpr(moduleName, e)
+		if _, ds := c.index.LookupTypeRef(moduleName, e.Type, c.currentTypeParamMap()); len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
+		}
 		return c.mustType(moduleName, "U64")
 	case *ast.AlignOfExpr:
-		c.constValueOfExpr(moduleName, e)
+		if _, ds := c.index.LookupTypeRef(moduleName, e.Type, c.currentTypeParamMap()); len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
+		}
 		return c.mustType(moduleName, "U64")
 	case *ast.FieldExpr:
 		baseType := c.typeExpr(moduleName, e.Base, scope, ctx)
@@ -3151,7 +3218,7 @@ func (c *checker) typeExprNoExpected(moduleName string, expr ast.Expr, scope *Sc
 
 func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorExpr, scope *Scope, ctx ContextKind) *Type {
 	typeName := expr.Type.String()
-	constructed, typeDiags := c.index.LookupTypeRef(moduleName, expr.Type, nil)
+	constructed, typeDiags := c.index.LookupTypeRef(moduleName, expr.Type, c.currentTypeParamMap())
 	for _, d := range typeDiags {
 		c.diags = append(c.diags, d)
 	}

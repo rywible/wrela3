@@ -2660,6 +2660,7 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitAddImm(e, seq, 1)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
 	emitCopyValueToMemoryRange(e, frame, publish.Value, slot, 8, e.ctx.storageSizeForType(valueType(publish.Value)))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
 	wakeSlots := make([]string, 0, len(layout.Subscribers))

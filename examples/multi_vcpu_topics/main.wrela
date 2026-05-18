@@ -9,8 +9,10 @@ use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { SerialConsolePath, SerialDriver, SerialRxSubscription, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
-use { TopicIdentity, U64GapPublisher, U64GapSubscription, U64GapTopic, U64ReliablePublisher, U64ReliableSubscription, U64ReliableTopic } from machine.x86_64.topic_u64
+use { SerialConsolePath, SerialDriver, SerialPathInterrupt, SerialWriterRegisters } from machine.x86_64.serial
+use { Option, Result } from wrela.lang.core
+use { Topic, TopicPublisher, TopicSubscription, ReliableTopic, ReliablePublisher, ReliableSubscription } from machine.x86_64.topic
+use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
 executor Producer {
@@ -19,9 +21,9 @@ executor Producer {
     memory: ExecutorMemory
     interrupts: ApicInterruptController
     serial: SerialConsolePath
-    serial_rx: SerialRxSubscription
-    out: U64GapPublisher
-    result_in: U64ReliableSubscription
+    serial_rx: TopicSubscription<SerialPathInterrupt>
+    out: TopicPublisher<U64>
+    result_in: ReliableSubscription<U64>
 
     start fn run(self) -> never {
         self.interrupts.initialize_for_com1_receive()
@@ -34,21 +36,25 @@ executor Producer {
 
         let done = false
         while done == false {
-            let result = self.result_in.try_next()
-            if result.has_message {
-                if result.message.value == 64 {
-                    self.serial.write(self.memory.bytes(value = "consumer received 64\n"))
-                    done = true
-                }
-            }
-            if done == false {
-                self.result_in.arm_wait()
-                let retry = self.result_in.try_next()
-                if retry.has_message {
-                    if retry.message.value == 64 {
+            match self.result_in.try_next() {
+                Option.Some(value = result) => {
+                    if result == 64 {
                         self.serial.write(self.memory.bytes(value = "consumer received 64\n"))
                         done = true
                     }
+                }
+                Option.None => {}
+            }
+            if done == false {
+                self.result_in.arm_wait()
+                match self.result_in.try_next() {
+                    Option.Some(value = retry) => {
+                        if retry == 64 {
+                            self.serial.write(self.memory.bytes(value = "consumer received 64\n"))
+                            done = true
+                        }
+                    }
+                    Option.None => {}
                 }
                 if done == false {
                     if self.result_in.is_wait_armed() {
@@ -65,22 +71,34 @@ executor Consumer {
     slot: ExecutorSlot
     loop: EventSleepPolicy
     memory: ExecutorMemory
-    input: U64GapSubscription
-    result_out: U64ReliablePublisher
+    input: TopicSubscription<U64>
+    result_out: ReliablePublisher<U64>
 
     start fn run(self) -> never {
         let received = 0
         while received < 64 {
-            let next = self.input.try_next()
-            while next.has_message {
-                received = received + 1
-                next = self.input.try_next()
+            let keep_polling = true
+            while keep_polling {
+                match self.input.try_next() {
+                    Option.Some(value = value) => {
+                        received = received + 1
+                    }
+                    Option.None => {
+                        keep_polling = false
+                    }
+                }
             }
             self.input.arm_wait()
-            let retry = self.input.try_next()
-            while retry.has_message {
-                received = received + 1
-                retry = self.input.try_next()
+            let keep_retrying = true
+            while keep_retrying {
+                match self.input.try_next() {
+                    Option.Some(value = value) => {
+                        received = received + 1
+                    }
+                    Option.None => {
+                        keep_retrying = false
+                    }
+                }
             }
             if received < 64 {
                 if self.input.is_wait_armed() {
@@ -88,7 +106,15 @@ executor Consumer {
                 }
             }
         }
-        self.result_out.publish_or_wait(value = received)
+        let published = false
+        while published == false {
+            match self.result_out.try_publish(value = received) {
+                Result.Ok(value = unit) => {
+                    published = true
+                }
+                Result.Err(error = full) => {}
+            }
+        }
         self.memory.halt_forever()
     }
 }
@@ -162,9 +188,10 @@ image MultiVcpuTopics {
             registers = SerialWriterRegisters(port_base = com1.port_base),
             memory = DriverMemory(region = hardware.memory.arena)
         ).initialize()
-        let serial_rx_topic = SerialRxTopic(
+        let serial_rx_topic = Topic<SerialPathInterrupt>(
             identity = TopicIdentity(label = "multi.console.rx"),
-            id = 2
+            id = 2,
+            depth = 64
         )
         let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "multi.console"),
@@ -189,8 +216,8 @@ image MultiVcpuTopics {
         )
         serial_path.write(producer_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
 
-        let counter_topic = U64GapTopic(identity = TopicIdentity(label = "multi.counter"), id = 0, depth = 64)
-        let result_topic = U64ReliableTopic(identity = TopicIdentity(label = "multi.result"), id = 1, depth = 4)
+        let counter_topic = Topic<U64>(identity = TopicIdentity(label = "multi.counter"), id = 0, depth = 64)
+        let result_topic = ReliableTopic<U64>(identity = TopicIdentity(label = "multi.result"), id = 1, depth = 4)
         let producer_serial_rx = serial_rx_topic.subscribe(subscriber = producer_slot)
         let producer_result_in = result_topic.subscribe(subscriber = producer_slot)
         let consumer_input = counter_topic.subscribe(subscriber = consumer_slot)
