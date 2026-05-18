@@ -42,6 +42,10 @@ behavior before TCP, TLS, DNS, or HTTP enter the system.
   controller, preferably an 82574L-class card if available.
 - The first image uses static IPv4 configuration. DHCP is a later step.
 - Networking owns a dedicated executor on its own core.
+- Networking targets modern x86_64 machines with AVX2-class SIMD and crypto
+  instructions as the supported fallback tier.
+- The preferred performance target is AVX-512 with VAES, VPCLMULQDQ, and SHA
+  extensions.
 - Applications do not directly touch NIC MMIO, descriptor rings, DMA buffers,
   or raw mutable packet memory.
 - TLS crypto is Wrela-owned, not imported from a C TLS stack.
@@ -63,6 +67,7 @@ This design does not add:
 - Wi-Fi
 - packet capture tooling beyond small debug reports
 - production CA-bundle management in the first TLS milestone
+- production networking crypto on CPUs below the AVX2 fallback tier
 - QUIC before HTTP/1.1 compatibility exists
 
 The design should not block those features. It should make each one an explicit
@@ -130,6 +135,26 @@ The first stack computes checksums and performs protocol work in Wrela source.
 NIC offloads are intentionally deferred. This makes packet bytes, checksums,
 and protocol state visible during bring-up and reduces the number of device
 features that can hide bugs.
+
+### SIMD Is Part Of The Platform Contract
+
+Networking is allowed to rely on a modern SIMD baseline. The supported fallback
+tier is AVX2 plus AES-NI, PCLMULQDQ, and SHA extensions. The preferred fast tier
+is AVX-512 with VAES, VPCLMULQDQ, and SHA extensions.
+
+This requires Wrela to make vector state explicit before TLS is considered
+complete:
+
+- discover CPU SIMD and crypto features
+- enable OSXSAVE and the required XCR0 state bits
+- define which executors may execute vector code
+- define interrupt save/restore behavior for XMM, YMM, opmask, and ZMM state
+- report the selected crypto backend in the image report
+
+The dedicated networking core makes this tractable: the network executor owns
+long-lived crypto state on one core. Interrupt handlers still need a clear rule.
+They should not execute vector crypto code unless the interrupt path has an
+explicit vector-state save policy.
 
 ### Compatibility Before Fancy Protocols
 
@@ -483,28 +508,65 @@ TLS 1.2 and older versions are out of scope unless compatibility forces them
 later. Starting at TLS 1.3 avoids legacy cipher suites, renegotiation, and many
 old protocol hazards.
 
-### First Cipher Suite
+### Vector State And Crypto Backends
+
+TLS depends on a CPU feature and vector-state contract.
+
+Required CPU feature tiers:
+
+```text
+fallback tier:
+  AVX2
+  AES-NI
+  PCLMULQDQ
+  SHA extensions
+  OSXSAVE/XGETBV support for XMM and YMM state
+
+fast tier:
+  AVX-512F
+  AVX-512BW
+  AVX-512VL
+  VAES
+  VPCLMULQDQ
+  SHA extensions
+  OSXSAVE/XGETBV support for opmask and ZMM state
+```
+
+The compiler and platform source should expose these as source-visible CPU
+feature facts. The image chooses a required tier for the networking stack. If
+the required tier is absent, the image boot-fails with a clear report instead
+of silently falling back to slow or untested crypto.
+
+The runtime must also define vector-state ownership:
+
+- the network executor may use vector crypto on its dedicated core
+- ordinary interrupt receivers do not use vector instructions by default
+- any interrupt path that uses vector instructions must opt into explicit
+  XSAVE/XRSTOR or equivalent save policy
+- the image report records enabled XCR0 bits and selected crypto backend
+
+### First Cipher Suites
 
 The first recommended cipher suite is:
 
 ```text
+TLS_AES_128_GCM_SHA256
+```
+
+Reason: the networking target explicitly assumes modern x86_64 crypto
+acceleration. AES-GCM maps well to AES-NI/PCLMULQDQ on the AVX2 fallback tier
+and to VAES/VPCLMULQDQ on the AVX-512 fast tier.
+
+The first TLS milestone should also implement:
+
+```text
+TLS_AES_256_GCM_SHA384
 TLS_CHACHA20_POLY1305_SHA256
 ```
 
-Reason: it can be implemented as a fast scalar path without requiring XMM state
-management. Wrela's current runtime has not yet made a broad interrupt save
-policy for FPU/SSE/AVX state. AES-NI and PCLMULQDQ are desirable later, but
-they use vector registers and should wait until the CPU/interrupt policy can
-save and restore that state safely.
-
-Later cipher suites:
-
-```text
-TLS_AES_128_GCM_SHA256
-TLS_AES_256_GCM_SHA384
-```
-
-These become attractive after Wrela has an explicit SIMD/AES state policy.
+`TLS_AES_256_GCM_SHA384` verifies the wider SHA-384/HMAC path. ChaCha20-Poly1305
+is still useful for comparison, interop, and CPUs where AES acceleration is not
+the chosen policy, but it is not the primary performance target for this design.
 
 ### Required Crypto Primitives
 
@@ -514,13 +576,24 @@ First TLS milestone:
   supported backend
 - HKDF-SHA256
 - SHA-256
+- SHA-384
 - HMAC-SHA256
+- HMAC-SHA384
+- AES-128
+- AES-256
+- GHASH
+- AEAD AES-128-GCM
+- AEAD AES-256-GCM
 - ChaCha20
 - Poly1305
 - AEAD ChaCha20-Poly1305
 - transcript hashing
 - TLS 1.3 key schedule
 - certificate signature verification for one chosen signature family
+
+The crypto package should contain a small scalar reference path for known-answer
+tests and differential checks. That reference path is not the production
+networking target.
 
 Certificate verification can start with a pinned certificate or pinned public
 key. A public CA trust store is a separate milestone.
@@ -728,6 +801,9 @@ The image report should include:
 - static or DHCP configuration mode
 - supported protocols
 - supported TLS cipher suites
+- required SIMD tier
+- selected crypto backend
+- enabled XCR0 vector-state bits
 - supported HTTP versions
 
 Runtime diagnostics should include bounded counters:
@@ -763,6 +839,9 @@ Runtime diagnostics should include bounded counters:
 - DNS message parser bounds
 - TCP state transitions
 - TLS primitive test vectors
+- SIMD backend selection tests
+- scalar-versus-AVX2 crypto differential tests
+- AVX2-versus-AVX-512 crypto differential tests when host support exists
 - HTTP parser bounds
 
 ### QEMU End-to-End Tests
@@ -807,11 +886,14 @@ The stack should be implemented in small gates:
 10. Add DHCP, or keep static config if the next target is DNS/TCP.
 11. Add DNS.
 12. Add TCP.
-13. Add TLS 1.3 with Wrela crypto.
-14. Add HTTP/1.1.
-15. Add HTTP/2.
-16. Add QUIC.
-17. Add HTTP/3.
+13. Add CPU feature discovery and vector-state policy for networking crypto.
+14. Add AVX2 fallback crypto backends.
+15. Add AVX-512 fast crypto backends.
+16. Add TLS 1.3 with Wrela crypto.
+17. Add HTTP/1.1.
+18. Add HTTP/2.
+19. Add QUIC.
+20. Add HTTP/3.
 
 Every gate must have a QEMU or unit-test success criterion before the next layer
 depends on it.
@@ -823,6 +905,9 @@ depends on it.
   TAP, or passt.
 - Whether DHCP comes before DNS/TCP or static config remains the only path until
   HTTPS works.
+- Which first real hardware target satisfies the AVX-512 fast tier.
+- Whether vector code is permitted only in the network executor or also inside
+  selected interrupt handlers with explicit XSAVE/XRSTOR policy.
 - Whether the first TLS verification target is a pinned local test server or a
   known external endpoint.
 - Which real e1000e-family card is the first hardware target after QEMU.
@@ -837,6 +922,9 @@ The design is successful when:
 - Wrela can complete a UDP exchange with a controlled host service.
 - Wrela can resolve a hostname through DNS.
 - Wrela can complete a TCP exchange with a controlled host service.
+- Wrela reports the selected AVX2 or AVX-512 crypto backend.
+- Wrela has passing AES-GCM, SHA, HKDF, and TLS key-schedule tests for each
+  supported backend.
 - Wrela can complete a TLS 1.3 handshake using Wrela-owned crypto.
 - Wrela can perform an HTTP/1.1 HTTPS request.
 - Later, Wrela can negotiate HTTP/2.
