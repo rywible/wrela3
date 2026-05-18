@@ -710,6 +710,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitFrameBegin(e, v, frame)
 			case *ir.ArenaReserve:
 				emitArenaReserve(e, v, frame)
+			case *ir.ArenaReserveArray:
+				emitArenaReserveArray(e, v, frame)
 			case *ir.ArenaPlace:
 				emitArenaPlace(e, v, frame)
 			case *ir.FrameEnd:
@@ -952,7 +954,7 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 		return true
 	case *ir.EnumPayloadExtract:
 		return ctx.isHandleTypeKind(valueType(v).Kind) || ctx.isHandleType(valueType(v).Name)
-	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaPlace:
+	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaReserveArray, *ir.ArenaPlace:
 		return true
 	case *ir.Call:
 		return ctx.shouldPassRecordReturn(v.Type)
@@ -1065,6 +1067,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case *ir.FrameBegin:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaReserve:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.ArenaReserveArray:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaPlace:
 		return ctx.representationSize(v.Type.Name)
@@ -1689,6 +1693,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitFrameBegin(e, v, frame)
 		case *ir.ArenaReserve:
 			emitArenaReserve(e, v, frame)
+		case *ir.ArenaReserveArray:
+			emitArenaReserveArray(e, v, frame)
 		case *ir.ArenaPlace:
 			emitArenaPlace(e, v, frame)
 		case *ir.FrameEnd:
@@ -2053,6 +2059,69 @@ func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
 	emitStoreSlotFromReg(e, length, objectSlot+8, 64)
 	emitSlotFromBase(e, arena, asm.MustLookup("rbp"), objectSlot)
 	emitStoreSlotFromReg(e, arena, slot, 64)
+}
+
+func emitArenaReserveArray(e *Emitter, op *ir.ArenaReserveArray, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing reserve_array object slot"})
+		return
+	}
+	elementInfo, elementOK := e.ctx.typeInfo(op.Element)
+	elementStorageSize := e.ctx.storageSizeForType(op.Element)
+	if elementStorageSize <= 0 {
+		elementStorageSize = 1
+	}
+	elementAlign := 8
+	if elementOK && elementInfo.Align > 0 {
+		elementAlign = elementInfo.Align
+	}
+	slotsInfo, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown reserve_array slots type: " + op.Type.Name})
+		return
+	}
+	addressOffset := 0
+	if field, ok := slotsInfo.Fields["address"]; ok {
+		addressOffset = fieldStorageOffset(field)
+	}
+	capacityOffset := 8
+	if field, ok := slotsInfo.Fields["capacity"]; ok {
+		capacityOffset = fieldStorageOffset(field)
+	}
+
+	countReg := asm.MustLookup("r8")
+	byteCountReg := asm.MustLookup("r10")
+	alignReg := asm.MustLookup("r9")
+	elementReg := asm.MustLookup("rcx")
+
+	emitLoadValue(e, frame, op.Count, countReg)
+	emitRegRegMove(e, byteCountReg, countReg)
+	emitMovImmToReg(e, elementReg, int64(elementStorageSize))
+	emitUnsignedMulInto(e, byteCountReg, elementReg)
+	if op.Align != nil {
+		emitLoadValue(e, frame, op.Align, alignReg)
+	} else {
+		emitMovImmToReg(e, alignReg, int64(elementAlign))
+	}
+	address, ok := emitArenaBump(e, frame, op.Arena, byteCountReg, alignReg)
+	if !ok {
+		return
+	}
+	emitStoreSlotFromReg(e, address, objectSlot+addressOffset, 64)
+	emitStoreSlotFromReg(e, countReg, objectSlot+capacityOffset, 64)
+	emitMovImmToReg(e, elementReg, int64(capacityOffset))
+	if info, ok := e.ctx.typeInfo(valueType(op.Arena)); ok {
+		if field, ok := info.Fields["next_offset"]; ok {
+			emitMovImmToReg(e, elementReg, int64(fieldStorageOffset(field)))
+		}
+	}
+	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, asm.MustLookup("rdi"), slot, 64)
 }
 
 func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
@@ -3169,6 +3238,8 @@ func valueType(value ir.Value) ir.Type {
 		return v.Type
 	case *ir.ArenaReserve:
 		return v.Type
+	case *ir.ArenaReserveArray:
+		return v.Type
 	case *ir.ArenaPlace:
 		return v.Type
 	case *ir.ReliableTopicTryPublish:
@@ -3290,6 +3361,28 @@ func emitCmpRegImm(e *Emitter, left asm.Reg, value int64) {
 		asm.RegOperand{Reg: left},
 		asm.ImmOperand{Value: value},
 	}})
+}
+
+func emitUnsignedMulInto(e *Emitter, dst asm.Reg, rhs asm.Reg) {
+	rax := asm.MustLookup("rax")
+	rdx := asm.MustLookup("rdx")
+	emitRegRegMove(e, rax, dst)
+	emitUnsignedMulReg(e, rhs)
+	ok := e.newLabel("mul_no_overflow")
+	emitMovImmToReg(e, rhs, 0)
+	emitCmpRegReg(e, rdx, rhs)
+	e.emitJcc(0x84, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+	emitRegRegMove(e, dst, rax)
+}
+
+func emitUnsignedMulReg(e *Emitter, rhs asm.Reg) {
+	rex := byte(0x48)
+	if rhs.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0xF7, encodeModRM(3, 4, rhs.Low3))
 }
 
 func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {

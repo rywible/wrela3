@@ -132,6 +132,68 @@ func countBytes(haystack, needle []byte) int {
 	return count
 }
 
+func genericMemoryTypeInfos() map[string]ir.TypeInfo {
+	u64 := ir.Type{Name: "U64", Kind: ir.TypeKindPrimitive}
+	phys := ir.Type{Name: "PhysicalAddress", Kind: ir.TypeKindPrimitive}
+	return map[string]ir.TypeInfo{
+		"Event": {Name: "Event", Kind: ir.TypeKindData, Size: 8, Align: 8, StorageSize: 8, Fields: map[string]ir.FieldInfo{
+			"kind": {Name: "kind", Type: u64, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+		}},
+		"ArenaFrame": {Name: "ArenaFrame", Kind: ir.TypeKindClass, Size: 24, Align: 8, StorageSize: 24, Fields: map[string]ir.FieldInfo{
+			"arena_base":   {Name: "arena_base", Type: phys, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+			"arena_length": {Name: "arena_length", Type: u64, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+			"next_offset":  {Name: "next_offset", Type: u64, Offset: 16, Size: 8, Align: 8, StorageOffset: 16, StorageSize: 8},
+		}, FieldOrder: []string{"arena_base", "arena_length", "next_offset"}},
+		"Slots<Event>": {Name: "Slots<Event>", Kind: ir.TypeKindData, Size: 16, Align: 8, StorageSize: 16, Fields: map[string]ir.FieldInfo{
+			"address":  {Name: "address", Type: phys, Offset: 0, Size: 8, Align: 8, StorageOffset: 0, StorageSize: 8},
+			"capacity": {Name: "capacity", Type: u64, Offset: 8, Size: 8, Align: 8, StorageOffset: 8, StorageSize: 8},
+		}, FieldOrder: []string{"address", "capacity"}},
+	}
+}
+
+func testProgramWithArenaReserveArray(t *testing.T) *ir.Program {
+	t.Helper()
+	arena := &ir.Local{Symbol: "arena", Type: ir.Type{Name: "ArenaFrame"}}
+	count := &ir.ConstInt{Symbol: "count", Value: 3, Type: ir.Type{Name: "U64"}}
+	return &ir.Program{Types: genericMemoryTypeInfos(), Functions: []ir.Function{{
+		Symbol: "_wrela_test_reserve_array",
+		Blocks: []ir.Block{{Label: "entry", Ops: []ir.Operation{
+			arena,
+			count,
+			&ir.ArenaReserveArray{Arena: arena, Element: ir.Type{Name: "Event"}, Count: count, Type: ir.Type{Name: "Slots<Event>"}},
+		}}},
+	}}}
+}
+
+func TestArenaReserveArrayEmitsOverflowAndBoundsTrap(t *testing.T) {
+	program := testProgramWithArenaReserveArray(t)
+	image, ds := Compile(program)
+	if len(ds) != 0 {
+		t.Fatalf("Compile diagnostics: %#v", ds)
+	}
+	code := symbolBytes(t, image, "_wrela_test_reserve_array")
+	if !bytes.Contains(code, []byte{0x48, 0xF7}) {
+		t.Fatalf("reserve_array must multiply count by sizeof(element), got %#x", code)
+	}
+	for name, want := range map[string][]byte{
+		"ArenaFrame.arena_length offset": {0x08, 0x00, 0x00, 0x00},
+		"ArenaFrame.next_offset offset":  {0x10, 0x00, 0x00, 0x00},
+		"Slots.capacity offset":          {0x08, 0x00, 0x00, 0x00},
+		"Event storage size":             {0x08, 0x00, 0x00, 0x00},
+		"requested capacity count":       {0x03, 0x00, 0x00, 0x00},
+	} {
+		if !containsBytes(code, want) {
+			t.Fatalf("reserve_array missing %s constant %x in %x", name, want, code)
+		}
+	}
+	if got := countBytes(code, []byte{0x0F, 0x83}); got < 2 {
+		t.Fatalf("reserve_array must include unsigned overflow/bounds branches, got %d jae branches in %x", got, code)
+	}
+	if !codeCallsSymbol(t, image, "_wrela_test_reserve_array", "_wrela_memory_oom") {
+		t.Fatal("reserve_array must branch/call to _wrela_memory_oom on overflow or arena exhaustion")
+	}
+}
+
 func testProgramWithArenaReserve(t *testing.T) *ir.Program {
 	t.Helper()
 	memoryType := ir.Type{Name: "ExecutorMemory", Module: "machine.x86_64.executor_memory", Kind: ir.TypeKindClass}
