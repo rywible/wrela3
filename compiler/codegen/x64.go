@@ -700,6 +700,12 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitStringLiteral(e, v, frame)
 			case *ir.Construct:
 				emitConstruct(e, v, frame)
+			case *ir.EnumConstruct:
+				emitEnumConstruct(e, v, frame)
+			case *ir.EnumVariantTest:
+				emitEnumVariantTest(e, v, frame)
+			case *ir.EnumPayloadExtract:
+				emitEnumPayloadExtract(e, v, frame)
 			case *ir.FrameBegin:
 				emitFrameBegin(e, v, frame)
 			case *ir.ArenaReserve:
@@ -942,6 +948,10 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 	switch v := value.(type) {
 	case *ir.Construct, *ir.StringLiteral:
 		return true
+	case *ir.EnumConstruct:
+		return true
+	case *ir.EnumPayloadExtract:
+		return ctx.isHandleTypeKind(valueType(v).Kind) || ctx.isHandleType(valueType(v).Name)
 	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaPlace:
 		return true
 	case *ir.Call:
@@ -1044,6 +1054,12 @@ func valueSize(ctx compileContext, value ir.Value) int {
 		return ctx.representationSize(v.Type.Name)
 	case *ir.Construct:
 		return ctx.representationSize(v.Type.Name)
+	case *ir.EnumConstruct:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.EnumVariantTest:
+		return 1
+	case *ir.EnumPayloadExtract:
+		return ctx.representationSize(v.Type.Name)
 	case *ir.StringLiteral:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.FrameBegin:
@@ -1132,6 +1148,10 @@ func (ctx compileContext) isDataType(typ ir.Type) bool {
 	return ok && info.Kind == ir.TypeKindData
 }
 
+func (ctx compileContext) isHandleTypeKind(kind ir.TypeKind) bool {
+	return isHandleTypeKind(kind)
+}
+
 func (ctx compileContext) isHandleType(name string) bool {
 	if name == "StringLiteral" {
 		return true
@@ -1152,7 +1172,7 @@ func (ctx compileContext) isHandleType(name string) bool {
 
 func isHandleTypeKind(kind ir.TypeKind) bool {
 	switch kind {
-	case ir.TypeKindData, ir.TypeKindClass, ir.TypeKindDriver, ir.TypeKindDriverPath, ir.TypeKindExecutor:
+	case ir.TypeKindData, ir.TypeKindClass, ir.TypeKindDriver, ir.TypeKindDriverPath, ir.TypeKindExecutor, ir.TypeKindEnum:
 		return true
 	default:
 		return false
@@ -1164,7 +1184,7 @@ func (ctx compileContext) shouldPassRecordReturn(typ ir.Type) bool {
 		return false
 	}
 	if info, ok := ctx.typeInfo(typ); ok {
-		return info.Kind == ir.TypeKindData
+		return info.Kind == ir.TypeKindData || info.Kind == ir.TypeKindEnum
 	}
 	return false
 }
@@ -1659,6 +1679,12 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitStringLiteral(e, v, frame)
 		case *ir.Construct:
 			emitConstruct(e, v, frame)
+		case *ir.EnumConstruct:
+			emitEnumConstruct(e, v, frame)
+		case *ir.EnumVariantTest:
+			emitEnumVariantTest(e, v, frame)
+		case *ir.EnumPayloadExtract:
+			emitEnumPayloadExtract(e, v, frame)
 		case *ir.FrameBegin:
 			emitFrameBegin(e, v, frame)
 		case *ir.ArenaReserve:
@@ -1828,6 +1854,131 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 	}
 	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
 	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitEnumConstruct(e *Emitter, op *ir.EnumConstruct, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing enum constructor object slot"})
+		return
+	}
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum constructor type: " + op.Type.Name})
+		return
+	}
+	variant, ok := enumVariantInfo(info, op.Variant)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum variant: " + op.Variant})
+		return
+	}
+	tag, ok := info.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "enum type missing $tag field: " + op.Type.Name})
+		return
+	}
+	size := info.StorageSize
+	if size <= 0 {
+		size = info.Size
+	}
+	if size <= 0 {
+		size = e.ctx.storageSizeForType(op.Type)
+	}
+	emitZeroSlotRange(e, objectSlot, size)
+	emitStoreSlotImm(e, objectSlot+fieldStorageOffset(tag), int64(variant.Discriminant), fieldStorageWidthBits(e.ctx, tag))
+	for _, field := range op.Fields {
+		fieldInfo, ok := info.Fields[op.Variant+"."+field.Name]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload field: " + op.Variant + "." + field.Name})
+			continue
+		}
+		emitMovImmToReg(e, scratchRegs[1], int64(fieldStorageOffset(fieldInfo)))
+		offset := objectSlot + fieldStorageOffset(fieldInfo)
+		size := fieldStorageSize(e.ctx, fieldInfo)
+		if e.ctx.isDataType(fieldInfo.Type) {
+			emitDeepCopyValueToTypedStorage(e, frame, field.Value, fieldInfo.Type, asm.MustLookup("rbp"), int64(offset))
+			continue
+		}
+		emitCopyValueToStackRange(e, frame, field.Value, offset, size)
+	}
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitEnumVariantTest(e *Emitter, op *ir.EnumVariantTest, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum test type: " + op.Type.Name})
+		return
+	}
+	variant, ok := enumVariantInfo(info, op.Variant)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum variant: " + op.Variant})
+		return
+	}
+	tag, ok := info.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "enum type missing $tag field: " + op.Type.Name})
+		return
+	}
+	base, disp, ok := emitValueAddress(e, frame, op.Value)
+	if !ok {
+		return
+	}
+	tagReg := asm.MustLookup("rcx")
+	emitLoadMemToReg(e, tagReg, base, disp+int64(fieldStorageOffset(tag)), fieldStorageWidthBits(e.ctx, tag))
+	emitMovImmToReg(e, scratchRegs[0], 0)
+	emitCmpRegImm(e, tagReg, int64(variant.Discriminant))
+	done := e.newLabel("enum_variant_test_done")
+	e.emitJcc(0x85, done)
+	emitMovImmToReg(e, scratchRegs[0], 1)
+	e.bindLabel(done)
+	emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 8)
+}
+
+func emitEnumPayloadExtract(e *Emitter, op *ir.EnumPayloadExtract, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	enumType := valueType(op.Value)
+	info, ok := e.ctx.typeInfo(enumType)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload type: " + enumType.Name})
+		return
+	}
+	fieldInfo, ok := info.Fields[op.Variant+"."+op.Field]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload field: " + op.Variant + "." + op.Field})
+		return
+	}
+	base, disp, ok := emitValueAddress(e, frame, op.Value)
+	if !ok {
+		return
+	}
+	offset := disp + int64(fieldStorageOffset(fieldInfo))
+	size := fieldStorageSize(e.ctx, fieldInfo)
+	emitMovImmToReg(e, scratchRegs[1], int64(fieldStorageOffset(fieldInfo)))
+	if e.ctx.isDataType(fieldInfo.Type) {
+		objectSlot, ok := frame.ObjectSlots[op]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing enum payload object slot"})
+			return
+		}
+		emitDeepCopyObjectToAddressAsType(e, fieldInfo.Type, base, offset, asm.MustLookup("rbp"), int64(objectSlot))
+		emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+		emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+		return
+	}
+	emitCopyMemoryToStackRange(e, base, offset, outSlot, size)
 }
 
 func emitFrameBegin(e *Emitter, op *ir.FrameBegin, frame Frame) {
@@ -3006,6 +3157,12 @@ func valueType(value ir.Value) ir.Type {
 		return v.Type
 	case *ir.Construct:
 		return v.Type
+	case *ir.EnumConstruct:
+		return v.Type
+	case *ir.EnumVariantTest:
+		return ir.Type{Name: "Bool", Kind: ir.TypeKindPrimitive}
+	case *ir.EnumPayloadExtract:
+		return v.Type
 	case *ir.StringLiteral:
 		return v.Type
 	case *ir.FrameBegin:
@@ -3065,6 +3222,13 @@ func emitStoreSlotFromReg(e *Emitter, reg asm.Reg, slot int, width int) {
 	}})
 }
 
+func emitStoreSlotImm(e *Emitter, slot int, value int64, width int) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
+		asm.ImmOperand{Value: value},
+	}})
+}
+
 func emitPushReg(e *Emitter, reg asm.Reg) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "push", Operands: []asm.Operand{
 		asm.RegOperand{Reg: reg},
@@ -3119,6 +3283,13 @@ func registerForWidth(reg asm.Reg, width int) asm.Reg {
 
 func emitCmpRegReg(e *Emitter, left asm.Reg, right asm.Reg) {
 	emitRegRegOp(e, 0x39, left, right)
+}
+
+func emitCmpRegImm(e *Emitter, left asm.Reg, value int64) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: left},
+		asm.ImmOperand{Value: value},
+	}})
 }
 
 func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {
@@ -3194,4 +3365,43 @@ func alignUpLen(value, align uint64) uint64 {
 		return value
 	}
 	return (value + align - 1) &^ (align - 1)
+}
+
+func enumVariantInfo(info ir.TypeInfo, name string) (ir.EnumVariantInfo, bool) {
+	for _, variant := range info.EnumVariants {
+		if variant.Name == name {
+			return variant, true
+		}
+	}
+	return ir.EnumVariantInfo{}, false
+}
+
+func fieldStorageOffset(field ir.FieldInfo) int {
+	if field.StorageOffset >= 0 {
+		return field.StorageOffset
+	}
+	return field.Offset
+}
+
+func fieldStorageSize(ctx compileContext, field ir.FieldInfo) int {
+	if field.StorageSize > 0 {
+		return field.StorageSize
+	}
+	if field.Size > 0 {
+		return field.Size
+	}
+	return ctx.storageSizeForType(field.Type)
+}
+
+func fieldStorageWidthBits(ctx compileContext, field ir.FieldInfo) int {
+	switch fieldStorageSize(ctx, field) {
+	case 1:
+		return 8
+	case 2:
+		return 16
+	case 4:
+		return 32
+	default:
+		return 64
+	}
 }
