@@ -296,7 +296,7 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	params := make([]Value, 0, len(phase.Params))
 	scope := newLowerScope(nil)
 	for _, param := range phase.Params {
-		typ := ctx.resolveType(moduleName, param.Type)
+		typ := ctx.resolveType(moduleName, param.Type.Name)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
@@ -305,7 +305,7 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	ops := ctx.lowerStmtList(moduleName, nil, scope, assigned, phase.Body)
 	return Function{
 		Symbol:              symbol,
-		Return:              ctx.irType(ctx.resolveType(moduleName, phase.Return)),
+		Return:              ctx.irType(ctx.resolveType(moduleName, phase.Return.Name)),
 		Params:              params,
 		Blocks:              []Block{{Label: "entry", Ops: ops}},
 		PreserveStackReturn: phase.Name == "delegated_hardware",
@@ -403,7 +403,7 @@ func (ctx *lowerContext) lowerInterruptEvent(moduleName string, pathType *sem.Ty
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(pathType)}
 	scope.define("self", lowerBinding{value: self, typ: pathType})
-	retType := ctx.resolveType(moduleName, event.EventType)
+	retType := ctx.resolveType(moduleName, event.EventType.Name)
 	ops := ctx.lowerStmtList(moduleName, pathType, scope, assignedNames(event.Body), event.Body)
 	fnSymbol := symbolName("event_fn", moduleName, pathType.Name, "interrupt")
 	ctx.program.Functions = append(ctx.program.Functions, Function{
@@ -424,7 +424,7 @@ func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Typ
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(executorType)}
 	scope.define("self", lowerBinding{value: self, typ: executorType})
-	eventType := ctx.resolveType(moduleName, handler.ParamType)
+	eventType := ctx.resolveType(moduleName, handler.ParamType.Name)
 	event := &Param{Symbol: handler.ParamName, Type: ctx.irType(eventType)}
 	scope.define(handler.ParamName, lowerBinding{value: event, typ: eventType})
 	ops := ctx.lowerStmtList(moduleName, executorType, scope, assignedNames(handler.Body), handler.Body)
@@ -558,7 +558,7 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 		if param.Name == "self" {
 			continue
 		}
-		typ := ctx.resolveType(moduleName, param.Type)
+		typ := ctx.resolveType(moduleName, param.Type.Name)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
@@ -1462,7 +1462,8 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		}
 		return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
 	case *ast.ConstructorExpr:
-		typ := ctx.resolveType(moduleName, e.Type)
+		typName := e.Type.Name
+		typ := ctx.resolveType(moduleName, typName)
 		var ops []Operation
 		fields := make([]FieldValue, 0, len(e.Args))
 		for _, arg := range e.Args {
@@ -1470,7 +1471,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, valueOps...)
 			fields = append(fields, FieldValue{Name: arg.Name, Value: value})
 		}
-		construct := &Construct{Symbol: e.Type, Type: ctx.irType(typ), Fields: fields}
+		construct := &Construct{Symbol: typName, Type: ctx.irType(typ), Fields: fields}
 		ops = append(ops, construct)
 		return construct, ops, typ
 	case *ast.CallExpr:
@@ -1734,7 +1735,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 					ctx.errorf("place argument was not a constructor")
 					return receiver, receiverOps, recvType
 				}
-				placedType := ctx.resolveType(moduleName, cons.Type)
+				placedType := ctx.resolveType(moduleName, cons.Type.Name)
 				fields := make([]FieldValue, 0, len(cons.Args))
 				ops := append([]Operation{}, receiverOps...)
 				for _, arg := range cons.Args {
@@ -1897,10 +1898,10 @@ func (ctx *lowerContext) methodReturn(moduleName string, method *sem.Method) *se
 }
 
 func (ctx *lowerContext) methodDeclReturn(moduleName string, method *ast.MethodDecl) *sem.Type {
-	if method == nil || method.Return == "" {
+	if method == nil || method.Return.Name == "" {
 		return ctx.resolveType(moduleName, "void")
 	}
-	return ctx.resolveType(moduleName, method.Return)
+	return ctx.resolveType(moduleName, method.Return.Name)
 }
 
 func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {

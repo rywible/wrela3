@@ -223,7 +223,7 @@ executor HelloWorld {
 		t.Fatalf("driver path methods = %d, want 2", len(path.Methods))
 	}
 	exec := mod.Decls[1].(*ast.ExecutorDecl)
-	if got := exec.Methods[0].Return; got != "never" {
+	if got := exec.Methods[0].Return.Name; got != "never" {
 		t.Fatalf("start fn return = %q, want never", got)
 	}
 	expr := exec.Methods[0].Body[0].(*ast.ExprStmt).Expr.(*ast.CallExpr)
@@ -249,7 +249,7 @@ driver path SerialConsolePath {
 		t.Fatalf("events = %d, want 1", len(path.InterruptEvents))
 	}
 	ev := path.InterruptEvents[0]
-	if ev.EventType != "SerialPathInterrupt" || len(ev.Body) != 1 {
+	if ev.EventType.Name != "SerialPathInterrupt" || len(ev.Body) != 1 {
 		t.Fatalf("event = %#v", ev)
 	}
 }
@@ -285,7 +285,7 @@ executor HelloWorld {
 		t.Fatalf("on handlers = %d, want 1", len(exec.OnHandlers))
 	}
 	got := exec.OnHandlers[0]
-	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType != "SerialPathInterrupt" {
+	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType.Name != "SerialPathInterrupt" {
 		t.Fatalf("on handler = %#v", got)
 	}
 }

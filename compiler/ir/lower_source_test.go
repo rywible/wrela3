@@ -20,8 +20,8 @@ func TestLowerImagePhaseBodiesFromSourceCallsInOrder(t *testing.T) {
 				Phases: []ast.PhaseDecl{
 					{
 						Name:   "delegated_hardware",
-						Params: []ast.Param{{Name: "hardware", Type: "DelegatedHardware"}},
-						Return: "OwnedHardware",
+						Params: []ast.Param{{Name: "hardware", Type: ast.TypeRef{Name: "DelegatedHardware"}}},
+						Return: ast.TypeRef{Name: "OwnedHardware"},
 						Body: []ast.Stmt{
 							&ast.LetStmt{
 								Name: "owned",
@@ -35,8 +35,8 @@ func TestLowerImagePhaseBodiesFromSourceCallsInOrder(t *testing.T) {
 					},
 					{
 						Name:   "owned_hardware",
-						Params: []ast.Param{{Name: "hardware", Type: "OwnedHardware"}},
-						Return: "never",
+						Params: []ast.Param{{Name: "hardware", Type: ast.TypeRef{Name: "OwnedHardware"}}},
+						Return: ast.TypeRef{Name: "never"},
 						Body: []ast.Stmt{
 							&ast.ExprStmt{Expr: &ast.CallExpr{
 								Receiver: &ast.NameExpr{Name: "hardware"},
@@ -96,7 +96,7 @@ func TestLowerExecutorStartMethodFromSourceBody(t *testing.T) {
 				Methods: []ast.MethodDecl{{
 					Name:    "run",
 					IsStart: true,
-					Return:  "never",
+					Return:  ast.TypeRef{Name: "never"},
 					Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.CallExpr{
 						Receiver: &ast.NameExpr{Name: "self"},
 						Method:   "source_start_marker",
@@ -157,7 +157,7 @@ func TestLowerNoReturnMethodCallUsesVoidType(t *testing.T) {
 					Name: "OwnedHardware",
 					Fields: []ast.Field{{
 						Name: "console",
-						Type: "Console",
+						Type: ast.TypeRef{Name: "Console"},
 					}},
 					Methods: []ast.MethodDecl{{
 						Name: "launch",
@@ -416,9 +416,9 @@ func TestLowerMarksOwnershipTransferReturnIndependentOfMethodName(t *testing.T) 
 				Unique: true,
 				Methods: []ast.MethodDecl{{
 					Name:   "claim",
-					Return: "OwnedHardware",
+					Return: ast.TypeRef{Name: "OwnedHardware"},
 					Body: []ast.Stmt{&ast.ReturnStmt{Value: &ast.ConstructorExpr{
-						Type: "OwnedHardware",
+						Type: ast.TypeRef{Name: "OwnedHardware"},
 					}}},
 				}},
 			}},
@@ -462,9 +462,9 @@ func TestLowerDoesNotPreserveStackForNonAuthorityNamedExitMethod(t *testing.T) {
 				Name: "DelegatedHardware",
 				Methods: []ast.MethodDecl{{
 					Name:   "exit_to_owned_hardware",
-					Return: "OtherHardware",
+					Return: ast.TypeRef{Name: "OtherHardware"},
 					Body: []ast.Stmt{&ast.ReturnStmt{Value: &ast.ConstructorExpr{
-						Type: "OtherHardware",
+						Type: ast.TypeRef{Name: "OtherHardware"},
 					}}},
 				}},
 			}},
@@ -501,8 +501,8 @@ func TestLowerUnsupportedImagePhaseStatementReturnsCG0001(t *testing.T) {
 				Name: "BootImage",
 				Phases: []ast.PhaseDecl{{
 					Name:   "owned_hardware",
-					Params: []ast.Param{{Name: "hardware", Type: "OwnedHardware"}},
-					Return: "never",
+					Params: []ast.Param{{Name: "hardware", Type: ast.TypeRef{Name: "OwnedHardware"}}},
+					Return: ast.TypeRef{Name: "never"},
 					Body: []ast.Stmt{&ast.WhileStmt{
 						Cond: &ast.BoolLiteral{Value: true},
 						Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.NameExpr{Name: "hardware"}}},

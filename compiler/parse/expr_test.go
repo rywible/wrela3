@@ -42,7 +42,7 @@ func TestParseNamedArgsUseEquals(t *testing.T) {
 	if !ok {
 		t.Fatalf("expr = %#v, want *ast.ConstructorExpr", expr)
 	}
-	if con.Type != "Device" || len(con.Args) != 1 || con.Args[0].Name != "x" {
+	if con.Type.Name != "Device" || len(con.Args) != 1 || con.Args[0].Name != "x" {
 		t.Fatalf("constructor = %#v", con)
 	}
 

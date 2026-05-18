@@ -31,6 +31,10 @@ func NewIndex() *Index {
 	}
 }
 
+func legacyTypeName(ref ast.TypeRef) string {
+	return ref.Name
+}
+
 func (idx *Index) Lookup(moduleName, name string) (*Type, bool) {
 	if idx == nil {
 		return nil, false
@@ -446,7 +450,7 @@ func buildFields(idx *Index, moduleName string, fields []ast.Field) []Field {
 	for _, field := range fields {
 		out = append(out, Field{
 			Name: field.Name,
-			Type: idx.lookupType(moduleName, field.Type),
+			Type: idx.lookupType(moduleName, legacyTypeName(field.Type)),
 			Span: field.Span,
 		})
 	}
@@ -459,7 +463,7 @@ func buildMethods(idx *Index, moduleName string, methods []ast.MethodDecl) []Met
 		out = append(out, Method{
 			Name:    m.Name,
 			Params:  buildFields(idx, moduleName, convertParams(m.Params)),
-			Return:  idx.lookupType(moduleName, m.Return),
+			Return:  idx.lookupType(moduleName, legacyTypeName(m.Return)),
 			IsAsm:   m.IsAsm,
 			IsStart: m.IsStart,
 			Span:    m.SpanV,

@@ -373,10 +373,11 @@ func (p *Parser) parsePhaseDecl() (*ast.PhaseDecl, []diag.Diagnostic) {
 	if !p.match(lex.Arrow) {
 		return nil, p.err(p.peek(), diag.PAR0001, "expected '->' in phase declaration")
 	}
-	ret, ds := p.parseTypeName()
+	retName, ds := p.parseTypeName()
 	if len(ds) != 0 {
 		return nil, ds
 	}
+	ret := ast.TypeRef{Name: retName}
 
 	body, ds := p.parseBlockStmts()
 	if len(ds) != 0 {
@@ -476,10 +477,11 @@ func (p *Parser) parseInterruptEventDecl() (ast.InterruptEventDecl, []diag.Diagn
 	if _, ds := p.consume(lex.Arrow); len(ds) != 0 {
 		return ast.InterruptEventDecl{}, ds
 	}
-	eventType, ds := p.parseTypeName()
+	eventTypeName, ds := p.parseTypeName()
 	if len(ds) != 0 {
 		return ast.InterruptEventDecl{}, ds
 	}
+	eventType := ast.TypeRef{Name: eventTypeName}
 	body, ds := p.parseBlockStmts()
 	if len(ds) != 0 {
 		return ast.InterruptEventDecl{}, ds
@@ -513,10 +515,11 @@ func (p *Parser) parseOnHandlerDecl() (ast.OnHandlerDecl, []diag.Diagnostic) {
 	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 		return ast.OnHandlerDecl{}, ds
 	}
-	paramType, ds := p.parseTypeName()
+	paramTypeName, ds := p.parseTypeName()
 	if len(ds) != 0 {
 		return ast.OnHandlerDecl{}, ds
 	}
+	paramType := ast.TypeRef{Name: paramTypeName}
 	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
 		return ast.OnHandlerDecl{}, ds
 	}
@@ -577,11 +580,11 @@ func (p *Parser) parseFieldDecl() (ast.Field, []diag.Diagnostic) {
 	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 		return ast.Field{}, ds
 	}
-	typ, ds := p.parseDottedName()
+	typ, ds := p.parseTypeName()
 	if len(ds) != 0 {
 		return ast.Field{}, ds
 	}
-	return ast.Field{Name: name.Text, Type: typ, Span: p.span(name.Start, p.previous().End)}, nil
+	return ast.Field{Name: name.Text, Type: ast.TypeRef{Name: typ}, Span: p.span(name.Start, p.previous().End)}, nil
 }
 
 func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
@@ -623,13 +626,13 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 		return ast.MethodDecl{}, ds
 	}
 
-	ret := ""
+	ret := ast.TypeRef{}
 	if p.match(lex.Arrow) {
 		retType, ds := p.parseTypeName()
 		if len(ds) != 0 {
 			return ast.MethodDecl{}, ds
 		}
-		ret = retType
+		ret = ast.TypeRef{Name: retType}
 	}
 
 	if isAsm {
@@ -676,7 +679,7 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 			return nil, ds
 		}
 		if name.Text == "self" && len(params) == 0 && p.peek().Kind != lex.Colon {
-			params = append(params, ast.Param{Name: name.Text, Type: "", Span: p.span(name.Start, name.End)})
+			params = append(params, ast.Param{Name: name.Text, Type: ast.TypeRef{}, Span: p.span(name.Start, name.End)})
 			p.skipSeparators()
 			if !p.match(lex.Comma) {
 				return params, nil
@@ -690,11 +693,11 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 		if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 			return nil, ds
 		}
-		typ, ds := p.parseDottedName()
+		typ, ds := p.parseTypeName()
 		if len(ds) != 0 {
 			return nil, ds
 		}
-		params = append(params, ast.Param{Name: name.Text, Type: typ, Span: p.span(name.Start, p.previous().End)})
+		params = append(params, ast.Param{Name: name.Text, Type: ast.TypeRef{Name: typ}, Span: p.span(name.Start, p.previous().End)})
 		p.skipSeparators()
 		if !p.match(lex.Comma) {
 			return params, nil

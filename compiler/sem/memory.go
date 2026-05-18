@@ -123,7 +123,7 @@ func isCanonicalFrameIntrinsic(moduleName string, typ *Type, method ast.MethodDe
 	if len(params) > 0 && params[0].Name == "self" {
 		params = params[1:]
 	}
-	return len(params) == 1 && params[0].Name == "length" && params[0].Type == "U64"
+	return len(params) == 1 && params[0].Name == "length" && legacyTypeName(params[0].Type) == "U64"
 }
 
 func (c *checker) registerMethodLifetimeTargets() {
@@ -152,7 +152,7 @@ func (c *checker) registerMethodLifetimeTargets() {
 					continue
 				}
 				marker := ContextNormalMethod
-				returnType := c.mustType(mod.Name, method.Return)
+				returnType := c.mustType(mod.Name, legacyTypeName(method.Return))
 				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
 					marker = ContextOwnershipTransferAuthorityMethod
 				}
@@ -234,7 +234,7 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		if p.Name == "self" {
 			continue
 		}
-		paramType := c.mustType(moduleName, p.Type)
+		paramType := c.mustType(moduleName, legacyTypeName(p.Type))
 		scope.Define(p.Name, paramType)
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})

@@ -103,7 +103,7 @@ func (p *Parser) parsePrimary() (ast.Expr, []diag.Diagnostic) {
 				return nil, ds
 			}
 			return &ast.ConstructorExpr{
-				Type:  tok.Text,
+				Type:  ast.TypeRef{Name: tok.Text},
 				Args:  args,
 				SpanV: p.span(tok.Start, close.End),
 			}, nil

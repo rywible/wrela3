@@ -327,23 +327,23 @@ func (c *checker) checkImageSignatures() {
 			continue
 		}
 		signatureValid := true
-		delegatedParamType := c.resolveType(imageModule, delegated.Params[0].Type)
+		delegatedParamType := c.resolveType(imageModule, legacyTypeName(delegated.Params[0].Type))
 		if delegatedParamType != c.resolveType(imageModule, "DelegatedHardware") {
 			c.error(delegated.Params[0].Span, diag.SEM0005, "delegated_hardware phase must accept DelegatedHardware")
 			signatureValid = false
 		}
 
-		ownedParam := c.mustType(imageModule, delegated.Return)
+		ownedParam := c.mustType(imageModule, legacyTypeName(delegated.Return))
 		if ownedParam == nil {
 			c.error(delegated.SpanV, diag.SEM0005, "unknown delegated_hardware return type")
 			continue
 		}
 
-		if ownedParam != c.resolveType(imageModule, owned.Params[0].Type) {
+		if ownedParam != c.resolveType(imageModule, legacyTypeName(owned.Params[0].Type)) {
 			c.error(owned.Params[0].Span, diag.SEM0005, "owned_hardware phase must receive the same type returned by delegated_hardware")
 			continue
 		}
-		if c.resolveType(imageModule, owned.Return) != c.resolveType(imageModule, "never") {
+		if c.resolveType(imageModule, legacyTypeName(owned.Return)) != c.resolveType(imageModule, "never") {
 			c.error(owned.SpanV, diag.SEM0005, "owned_hardware phase must return never")
 			continue
 		}
@@ -371,23 +371,26 @@ func (c *checker) checkUnresolvedTypes() {
 				c.checkFieldsResolved(mod.Name, d.Fields)
 				c.checkMethodTypesResolved(mod.Name, d.Methods)
 				for _, event := range d.InterruptEvents {
-					if c.resolveType(mod.Name, event.EventType) == nil {
-						c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType)
+					eventType := legacyTypeName(event.EventType)
+					if c.resolveType(mod.Name, eventType) == nil {
+						c.error(event.SpanV, diag.SEM0002, "unknown type "+eventType)
 					}
 				}
 			case *ast.ExecutorDecl:
 				c.checkFieldsResolved(mod.Name, d.Fields)
 				c.checkMethodTypesResolved(mod.Name, d.Methods)
 				for _, handler := range d.OnHandlers {
-					if c.resolveType(mod.Name, handler.ParamType) == nil {
-						c.error(handler.SpanV, diag.SEM0002, "unknown type "+handler.ParamType)
+					paramTypeName := legacyTypeName(handler.ParamType)
+					if c.resolveType(mod.Name, paramTypeName) == nil {
+						c.error(handler.SpanV, diag.SEM0002, "unknown type "+paramTypeName)
 					}
 				}
 			case *ast.ImageDecl:
 				for _, phase := range d.Phases {
 					c.checkParamsResolved(mod.Name, phase.Params)
-					if c.resolveType(mod.Name, phase.Return) == nil {
-						c.error(phase.SpanV, diag.SEM0002, "unknown type "+phase.Return)
+					returnType := legacyTypeName(phase.Return)
+					if c.resolveType(mod.Name, returnType) == nil {
+						c.error(phase.SpanV, diag.SEM0002, "unknown type "+returnType)
 					}
 				}
 			}
@@ -397,16 +400,18 @@ func (c *checker) checkUnresolvedTypes() {
 
 func (c *checker) checkFieldsResolved(moduleName string, fields []ast.Field) {
 	for _, field := range fields {
-		if c.resolveType(moduleName, field.Type) == nil {
-			c.error(field.Span, diag.SEM0002, "unknown type "+field.Type)
+		typeName := legacyTypeName(field.Type)
+		if c.resolveType(moduleName, typeName) == nil {
+			c.error(field.Span, diag.SEM0002, "unknown type "+typeName)
 		}
 	}
 }
 
 func (c *checker) checkParamsResolved(moduleName string, params []ast.Param) {
 	for _, param := range params {
-		if param.Type != "" && c.resolveType(moduleName, param.Type) == nil {
-			c.error(param.Span, diag.SEM0002, "unknown type "+param.Type)
+		typeName := legacyTypeName(param.Type)
+		if typeName != "" && c.resolveType(moduleName, typeName) == nil {
+			c.error(param.Span, diag.SEM0002, "unknown type "+typeName)
 		}
 	}
 }
@@ -414,8 +419,9 @@ func (c *checker) checkParamsResolved(moduleName string, params []ast.Param) {
 func (c *checker) checkMethodTypesResolved(moduleName string, methods []ast.MethodDecl) {
 	for _, method := range methods {
 		c.checkParamsResolved(moduleName, method.Params)
-		if method.Return != "" && c.resolveType(moduleName, method.Return) == nil {
-			c.error(method.SpanV, diag.SEM0002, "unknown type "+method.Return)
+		returnType := legacyTypeName(method.Return)
+		if returnType != "" && c.resolveType(moduleName, returnType) == nil {
+			c.error(method.SpanV, diag.SEM0002, "unknown type "+returnType)
 		}
 	}
 }
@@ -454,9 +460,10 @@ func (c *checker) checkInterruptEvents(moduleName string, path *Type, events []a
 		return
 	}
 	for _, event := range events {
-		retType := c.resolveType(moduleName, event.EventType)
+		eventType := legacyTypeName(event.EventType)
+		retType := c.resolveType(moduleName, eventType)
 		if retType == nil {
-			c.error(event.SpanV, diag.SEM0002, "unknown type "+event.EventType)
+			c.error(event.SpanV, diag.SEM0002, "unknown type "+eventType)
 			continue
 		}
 		if retType.Kind != KindData {
@@ -495,12 +502,13 @@ func (c *checker) checkOnHandlers(moduleName string, exec *Type, handlers []ast.
 			c.error(handler.SpanV, diag.SEM0018, "on handler must reference a driver path field with an interrupt event")
 			continue
 		}
-		paramType := c.resolveType(moduleName, handler.ParamType)
+		paramTypeName := legacyTypeName(handler.ParamType)
+		paramType := c.resolveType(moduleName, paramTypeName)
 		if paramType == nil {
-			c.error(handler.SpanV, diag.SEM0002, "unknown type "+handler.ParamType)
+			c.error(handler.SpanV, diag.SEM0002, "unknown type "+paramTypeName)
 			continue
 		}
-		eventType := c.resolveType(field.Type.Module, event.EventType)
+		eventType := c.resolveType(field.Type.Module, legacyTypeName(event.EventType))
 		if eventType == nil || !typesCompatible(eventType, paramType) || eventType.Module != paramType.Module || eventType.Name != paramType.Name {
 			c.error(handler.SpanV, diag.SEM0016, "on handler parameter type must match interrupt event type")
 		}
@@ -523,13 +531,13 @@ func (c *checker) checkImageDecl(moduleName string, image *ast.ImageDecl) {
 			c.error(phase.SpanV, diag.SEM0013, "too many explicit parameters")
 		}
 
-		retType := c.mustType(moduleName, phase.Return)
+		retType := c.mustType(moduleName, legacyTypeName(phase.Return))
 		scope := NewScope(nil)
 		for _, p := range phase.Params {
 			if p.Name == "" {
 				continue
 			}
-			scope.Define(p.Name, c.mustType(moduleName, p.Type))
+			scope.Define(p.Name, c.mustType(moduleName, legacyTypeName(p.Type)))
 		}
 		prevPhase := c.currentPhase
 		c.currentPhase = phase.Name
@@ -555,7 +563,7 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 			continue
 		}
 
-		returnType := c.mustType(moduleName, method.Return)
+		returnType := c.mustType(moduleName, legacyTypeName(method.Return))
 		if method.IsAsm {
 			continue
 		}
@@ -870,7 +878,7 @@ func (c *checker) checkDelegatedOnlyCrossing() {
 			if len(phase.Params) != 1 {
 				continue
 			}
-			pt := c.resolveType(c.lookupImageModule(image), phase.Params[0].Type)
+			pt := c.resolveType(c.lookupImageModule(image), legacyTypeName(phase.Params[0].Type))
 			if pt == nil {
 				continue
 			}
@@ -1625,7 +1633,7 @@ func copyDriverPathFields(fields map[string]string) map[string]string {
 }
 
 func (c *checker) driverPathFieldKeysForConstructor(moduleName string, expr *ast.ConstructorExpr, scope *Scope) map[string]string {
-	constructed := c.resolveType(moduleName, expr.Type)
+	constructed := c.resolveType(moduleName, legacyTypeName(expr.Type))
 	if constructed == nil {
 		return nil
 	}
@@ -1658,7 +1666,7 @@ func (c *checker) exprStaticType(moduleName string, expr ast.Expr, scope *Scope)
 		}
 		return c.resolveType(moduleName, e.Name)
 	case *ast.ConstructorExpr:
-		return c.resolveType(moduleName, e.Type)
+		return c.resolveType(moduleName, legacyTypeName(e.Type))
 	case *ast.FieldExpr:
 		baseType := c.exprStaticType(moduleName, e.Base, scope)
 		if baseType == nil {
@@ -1861,7 +1869,7 @@ func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 func interruptVectorArgKey(expr *ast.CallExpr) string {
 	arg := namedArgExpr(expr.Args, "vector")
 	cons, ok := arg.(*ast.ConstructorExpr)
-	if !ok || cons.Type != "InterruptVector" {
+	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return "<nonliteral>"
 	}
 	for _, named := range cons.Args {
@@ -2634,7 +2642,7 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 func interruptVectorValueArg(call *ast.CallExpr) (int, bool) {
 	arg := namedArgExpr(call.Args, "vector")
 	cons, ok := arg.(*ast.ConstructorExpr)
-	if !ok || cons.Type != "InterruptVector" {
+	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return 0, false
 	}
 	value := constructorArg(cons, "value")
@@ -2942,9 +2950,10 @@ func (c *checker) typeExpr(moduleName string, expr ast.Expr, scope *Scope, ctx C
 }
 
 func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorExpr, scope *Scope, ctx ContextKind) *Type {
-	constructed := c.resolveType(moduleName, expr.Type)
+	typeName := legacyTypeName(expr.Type)
+	constructed := c.resolveType(moduleName, typeName)
 	if constructed == nil {
-		c.error(expr.SpanV, diag.SEM0002, "unknown constructor type "+expr.Type)
+		c.error(expr.SpanV, diag.SEM0002, "unknown constructor type "+typeName)
 		return nil
 	}
 	if ctx == ContextOnHandler && constructed.Kind != KindData {

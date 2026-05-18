@@ -71,7 +71,7 @@ func TestLowerUsesSourceVisiblePhaseAndExecutorPath(t *testing.T) {
 				Methods: []ast.MethodDecl{{
 					Name:    "run",
 					IsStart: true,
-					Return:  "never",
+					Return:  ast.TypeRef{Name: "never"},
 					Body: []ast.Stmt{&ast.ExprStmt{Expr: &ast.CallExpr{
 						Receiver: &ast.NameExpr{Name: "self"},
 						Method:   "source_marker",
@@ -210,7 +210,7 @@ func TestLowerFieldAssignmentEvaluatesTargetObjectBeforeValue(t *testing.T) {
 				Name: "Tester",
 				Methods: []ast.MethodDecl{{
 					Name:   "run",
-					Return: "void",
+					Return: ast.TypeRef{Name: "void"},
 					Body: []ast.Stmt{&ast.AssignStmt{
 						Target: &ast.FieldExpr{
 							Base:  &ast.CallExpr{Receiver: &ast.NameExpr{Name: "self"}, Method: "target_marker"},
@@ -299,10 +299,10 @@ func TestLowerBitwiseAndShiftOperatorsMapToIRShiftAndBitOr(t *testing.T) {
 				Name: "OperatorSuite",
 				Methods: []ast.MethodDecl{{
 					Name:   "run",
-					Return: "U64",
+					Return: ast.TypeRef{Name: "U64"},
 					Params: []ast.Param{
-						{Name: "left", Type: "U64"},
-						{Name: "right", Type: "U64"},
+						{Name: "left", Type: ast.TypeRef{Name: "U64"}},
+						{Name: "right", Type: ast.TypeRef{Name: "U64"}},
 					},
 					Body: []ast.Stmt{
 						&ast.LetStmt{
