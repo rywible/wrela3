@@ -61,16 +61,18 @@ type Field struct {
 }
 
 type Method struct {
-	Name       string
-	TypeParams []TypeParam
-	Where      []TraitBound
-	Params     []Field
-	Return     *Type
-	IsAsm      bool
-	IsStart    bool
-	Span       source.Span
-	Body       []ast.Stmt
-	AsmBody    *ast.AsmBody
+	Name               string
+	TypeParams         []TypeParam
+	Where              []TraitBound
+	Params             []Field
+	Return             *Type
+	IsAsm              bool
+	IsStart            bool
+	Span               source.Span
+	Body               []ast.Stmt
+	AsmBody            *ast.AsmBody
+	GenericOrigin      *Method
+	MonomorphizedOwner *Type
 }
 
 type Type struct {
@@ -115,6 +117,10 @@ func (t *Type) Display() string {
 		parts = append(parts, arg.Display())
 	}
 	return t.Name + "<" + strings.Join(parts, ", ") + ">"
+}
+
+func (t *Type) MangledName() string {
+	return strings.NewReplacer("<", "_", ">", "", ", ", "_", ".", "_", "[", "_", "]", "").Replace(t.Display())
 }
 
 type CheckedProgram struct {

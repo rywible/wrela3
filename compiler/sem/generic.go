@@ -204,7 +204,7 @@ func (idx *Index) completeInstantiation(key string, visiting map[string]bool) []
 	base := concrete.GenericOrigin
 	subst := substitutionFor(base, concrete.TypeArgs)
 	concrete.Fields = substituteFields(idx, base.Fields, subst)
-	concrete.Methods = substituteMethods(idx, base.Methods, subst)
+	concrete.Methods = substituteMethods(idx, base.Methods, subst, concrete)
 	concrete.Where = substituteBounds(idx, base.Where, subst)
 	for _, field := range concrete.Fields {
 		if field.Type != nil && field.Type.GenericOrigin != nil {
@@ -228,9 +228,10 @@ func substituteFields(idx *Index, fields []Field, subst substitution) []Field {
 	return out
 }
 
-func substituteMethods(idx *Index, methods []Method, subst substitution) []Method {
+func substituteMethods(idx *Index, methods []Method, subst substitution, owner *Type) []Method {
 	out := make([]Method, 0, len(methods))
-	for _, method := range methods {
+	for i := range methods {
+		method := methods[i]
 		outMethod := Method{
 			Name:       method.Name,
 			TypeParams: append([]TypeParam(nil), method.TypeParams...),
@@ -238,10 +239,12 @@ func substituteMethods(idx *Index, methods []Method, subst substitution) []Metho
 			IsAsm:      method.IsAsm,
 			IsStart:    method.IsStart,
 			Span:       method.Span,
-			Body:       method.Body,
+			Body:       append([]ast.Stmt(nil), method.Body...),
 			AsmBody:    method.AsmBody,
 			Return:     idx.substituteType(method.Return, subst),
 		}
+		outMethod.GenericOrigin = &methods[i]
+		outMethod.MonomorphizedOwner = owner
 		outMethod.Params = append([]Field(nil), method.Params...)
 		for i := range outMethod.Params {
 			outMethod.Params[i].Type = idx.substituteType(outMethod.Params[i].Type, subst)

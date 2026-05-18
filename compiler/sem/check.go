@@ -359,17 +359,20 @@ func (c *checker) checkUnresolvedTypes() {
 		for _, decl := range mod.Decls {
 			switch d := decl.(type) {
 			case *ast.DataDecl:
-				c.checkFieldsResolved(mod.Name, d.Fields)
-				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				params := typeParamMapForCheck(d.TypeParams)
+				c.checkFieldsResolved(mod.Name, d.Fields, params)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, params)
 			case *ast.ClassDecl:
-				c.checkFieldsResolved(mod.Name, d.Fields)
-				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				params := typeParamMapForCheck(d.TypeParams)
+				c.checkFieldsResolved(mod.Name, d.Fields, params)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, params)
 			case *ast.DriverDecl:
-				c.checkFieldsResolved(mod.Name, d.Fields)
-				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				params := typeParamMapForCheck(d.TypeParams)
+				c.checkFieldsResolved(mod.Name, d.Fields, params)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, params)
 			case *ast.DriverPathDecl:
-				c.checkFieldsResolved(mod.Name, d.Fields)
-				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				c.checkFieldsResolved(mod.Name, d.Fields, nil)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, nil)
 				for _, event := range d.InterruptEvents {
 					eventType := legacyTypeName(event.EventType)
 					if c.resolveType(mod.Name, eventType) == nil {
@@ -377,8 +380,8 @@ func (c *checker) checkUnresolvedTypes() {
 					}
 				}
 			case *ast.ExecutorDecl:
-				c.checkFieldsResolved(mod.Name, d.Fields)
-				c.checkMethodTypesResolved(mod.Name, d.Methods)
+				c.checkFieldsResolved(mod.Name, d.Fields, nil)
+				c.checkMethodTypesResolved(mod.Name, d.Methods, nil)
 				for _, handler := range d.OnHandlers {
 					paramTypeName := legacyTypeName(handler.ParamType)
 					if c.resolveType(mod.Name, paramTypeName) == nil {
@@ -387,7 +390,7 @@ func (c *checker) checkUnresolvedTypes() {
 				}
 			case *ast.ImageDecl:
 				for _, phase := range d.Phases {
-					c.checkParamsResolved(mod.Name, phase.Params)
+					c.checkParamsResolved(mod.Name, phase.Params, nil)
 					returnType := legacyTypeName(phase.Return)
 					if c.resolveType(mod.Name, returnType) == nil {
 						c.error(phase.SpanV, diag.SEM0002, "unknown type "+returnType)
@@ -398,30 +401,62 @@ func (c *checker) checkUnresolvedTypes() {
 	}
 }
 
-func (c *checker) checkFieldsResolved(moduleName string, fields []ast.Field) {
+func typeParamMapForCheck(params []ast.TypeParam) map[string]*Type {
+	if len(params) == 0 {
+		return nil
+	}
+	out, _ := buildTypeParamMap(params)
+	return out
+}
+
+func mergeTypeParamMap(base map[string]*Type, params []ast.TypeParam) map[string]*Type {
+	if len(base) == 0 && len(params) == 0 {
+		return nil
+	}
+	out := map[string]*Type{}
+	for name, typ := range base {
+		out[name] = typ
+	}
+	methodParams, _ := buildTypeParamMap(params)
+	for name, typ := range methodParams {
+		out[name] = typ
+	}
+	return out
+}
+
+func (c *checker) checkTypeRefResolved(moduleName string, ref ast.TypeRef, params map[string]*Type, span source.Span) {
+	if ref.Name == "" {
+		return
+	}
+	typ, ds := c.index.LookupTypeRef(moduleName, ref, params)
+	if len(ds) != 0 {
+		return
+	}
+	if typ == nil {
+		c.error(span, diag.SEM0002, "unknown type "+ref.String())
+	}
+}
+
+func (c *checker) checkFieldsResolved(moduleName string, fields []ast.Field, params map[string]*Type) {
 	for _, field := range fields {
-		typeName := legacyTypeName(field.Type)
-		if c.resolveType(moduleName, typeName) == nil {
-			c.error(field.Span, diag.SEM0002, "unknown type "+typeName)
-		}
+		c.checkTypeRefResolved(moduleName, field.Type, params, field.Span)
 	}
 }
 
-func (c *checker) checkParamsResolved(moduleName string, params []ast.Param) {
+func (c *checker) checkParamsResolved(moduleName string, params []ast.Param, typeParams map[string]*Type) {
 	for _, param := range params {
-		typeName := legacyTypeName(param.Type)
-		if typeName != "" && c.resolveType(moduleName, typeName) == nil {
-			c.error(param.Span, diag.SEM0002, "unknown type "+typeName)
+		if param.Type.Name != "" {
+			c.checkTypeRefResolved(moduleName, param.Type, typeParams, param.Span)
 		}
 	}
 }
 
-func (c *checker) checkMethodTypesResolved(moduleName string, methods []ast.MethodDecl) {
+func (c *checker) checkMethodTypesResolved(moduleName string, methods []ast.MethodDecl, ownerParams map[string]*Type) {
 	for _, method := range methods {
-		c.checkParamsResolved(moduleName, method.Params)
-		returnType := legacyTypeName(method.Return)
-		if returnType != "" && c.resolveType(moduleName, returnType) == nil {
-			c.error(method.SpanV, diag.SEM0002, "unknown type "+returnType)
+		params := mergeTypeParamMap(ownerParams, method.TypeParams)
+		c.checkParamsResolved(moduleName, method.Params, params)
+		if method.Return.Name != "" {
+			c.checkTypeRefResolved(moduleName, method.Return, params, method.SpanV)
 		}
 	}
 }
@@ -560,6 +595,12 @@ func (c *checker) checkMethods(moduleName string, typ *Type, methods []ast.Metho
 			c.error(method.SpanV, diag.SEM0032, "asm raw memory access requires edge-capability module")
 		}
 		if isCanonicalFrameIntrinsic(moduleName, typ, method) {
+			continue
+		}
+		if typ != nil && len(typ.TypeParams) != 0 {
+			continue
+		}
+		if len(method.TypeParams) != 0 {
 			continue
 		}
 

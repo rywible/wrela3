@@ -19,6 +19,11 @@ type lowerBinding struct {
 	bindingName string
 }
 
+type concreteMethodRef struct {
+	Owner      *sem.Type
+	MethodName string
+}
+
 type lowerScope struct {
 	parent *lowerScope
 	values map[string]lowerBinding
@@ -58,6 +63,10 @@ type lowerContext struct {
 	types   map[string]*sem.Type
 	pseudo  map[string]*sem.Type
 
+	concreteMethodQueue   []concreteMethodRef
+	queuedConcreteMethod  map[string]bool
+	emittedConcreteMethod map[string]bool
+
 	valueBindings   map[Value]string
 	currentExecutor *sem.ExecutorNode
 
@@ -66,6 +75,18 @@ type lowerContext struct {
 	diags     []diag.Diagnostic
 
 	activeFrames []*FrameBegin
+}
+
+func (ctx *lowerContext) enqueueConcreteMethod(owner *sem.Type, methodName string) {
+	key := owner.Key() + "." + methodName
+	if ctx.queuedConcreteMethod[key] || ctx.emittedConcreteMethod[key] {
+		return
+	}
+	ctx.queuedConcreteMethod[key] = true
+	ctx.concreteMethodQueue = append(ctx.concreteMethodQueue, concreteMethodRef{Owner: owner, MethodName: methodName})
+	sort.Slice(ctx.concreteMethodQueue, func(i, j int) bool {
+		return ctx.concreteMethodQueue[i].Owner.Key()+"."+ctx.concreteMethodQueue[i].MethodName < ctx.concreteMethodQueue[j].Owner.Key()+"."+ctx.concreteMethodQueue[j].MethodName
+	})
 }
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
@@ -104,7 +125,9 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.lowerInterruptQueueLayouts()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
+	ctx.lowerConcreteMethodQueue()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
+	ctx.lowerConcreteMethodQueue()
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
 		return nil, ctx.diags
@@ -114,12 +137,14 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 
 func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 	ctx := &lowerContext{
-		checked:       checked,
-		program:       &Program{Types: map[string]TypeInfo{}},
-		modules:       map[string]*ast.Module{},
-		types:         map[string]*sem.Type{},
-		pseudo:        map[string]*sem.Type{},
-		valueBindings: map[Value]string{},
+		checked:               checked,
+		program:               &Program{Types: map[string]TypeInfo{}},
+		modules:               map[string]*ast.Module{},
+		types:                 map[string]*sem.Type{},
+		pseudo:                map[string]*sem.Type{},
+		queuedConcreteMethod:  map[string]bool{},
+		emittedConcreteMethod: map[string]bool{},
+		valueBindings:         map[Value]string{},
 	}
 	for _, mod := range checked.Modules {
 		ctx.modules[mod.Name] = mod
@@ -296,7 +321,7 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	params := make([]Value, 0, len(phase.Params))
 	scope := newLowerScope(nil)
 	for _, param := range phase.Params {
-		typ := ctx.resolveType(moduleName, param.Type.Name)
+		typ := ctx.resolveTypeRef(moduleName, param.Type)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
@@ -305,7 +330,7 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	ops := ctx.lowerStmtList(moduleName, nil, scope, assigned, phase.Body)
 	return Function{
 		Symbol:              symbol,
-		Return:              ctx.irType(ctx.resolveType(moduleName, phase.Return.Name)),
+		Return:              ctx.irType(ctx.resolveTypeRef(moduleName, phase.Return)),
 		Params:              params,
 		Blocks:              []Block{{Label: "entry", Ops: ops}},
 		PreserveStackReturn: phase.Name == "delegated_hardware",
@@ -335,6 +360,9 @@ func (ctx *lowerContext) lowerSourceMethods() {
 				continue
 			}
 			receiverType := ctx.resolveType(mod.Name, typeName)
+			if receiverType != nil && len(receiverType.TypeParams) != 0 {
+				continue
+			}
 			for i := range methods {
 				method := &methods[i]
 				if method.IsAsm {
@@ -356,6 +384,37 @@ func (ctx *lowerContext) lowerSourceMethods() {
 			}
 		}
 	}
+}
+
+func (ctx *lowerContext) lowerConcreteMethodQueue() {
+	for len(ctx.concreteMethodQueue) != 0 {
+		ref := ctx.concreteMethodQueue[0]
+		ctx.concreteMethodQueue = ctx.concreteMethodQueue[1:]
+		key := ref.Owner.Key() + "." + ref.MethodName
+		if ctx.emittedConcreteMethod[key] {
+			continue
+		}
+		method := semMethodByName(ref.Owner, ref.MethodName)
+		if method == nil {
+			ctx.errorf("missing concrete method %s.%s", ref.Owner.Display(), ref.MethodName)
+			continue
+		}
+		symbol := symbolName("method", ref.Owner.Module, ref.Owner.MangledName(), ref.MethodName)
+		ctx.program.Functions = append(ctx.program.Functions, ctx.lowerSemanticMethodWithSymbol(ref.Owner.Module, ref.Owner, method, symbol))
+		ctx.emittedConcreteMethod[key] = true
+	}
+}
+
+func semMethodByName(owner *sem.Type, name string) *sem.Method {
+	if owner == nil {
+		return nil
+	}
+	for i := range owner.Methods {
+		if owner.Methods[i].Name == name {
+			return &owner.Methods[i]
+		}
+	}
+	return nil
 }
 
 func (ctx *lowerContext) executorPlacementsForType(receiverType *sem.Type) []*sem.ExecutorNode {
@@ -424,7 +483,7 @@ func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Typ
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(executorType)}
 	scope.define("self", lowerBinding{value: self, typ: executorType})
-	eventType := ctx.resolveType(moduleName, handler.ParamType.Name)
+	eventType := ctx.resolveTypeRef(moduleName, handler.ParamType)
 	event := &Param{Symbol: handler.ParamName, Type: ctx.irType(eventType)}
 	scope.define(handler.ParamName, lowerBinding{value: event, typ: eventType})
 	ops := ctx.lowerStmtList(moduleName, executorType, scope, assignedNames(handler.Body), handler.Body)
@@ -558,7 +617,7 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 		if param.Name == "self" {
 			continue
 		}
-		typ := ctx.resolveType(moduleName, param.Type.Name)
+		typ := ctx.resolveTypeRef(moduleName, param.Type)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
@@ -573,6 +632,35 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 		Params:              params,
 		Blocks:              []Block{{Label: "entry", Ops: ops}},
 		PreserveStackReturn: ctx.isOwnershipTransferMethod(receiverType, method),
+	}
+}
+
+func (ctx *lowerContext) lowerSemanticMethodWithSymbol(moduleName string, receiverType *sem.Type, method *sem.Method, symbol string) Function {
+	params := []Value{}
+	scope := newLowerScope(nil)
+
+	self := &Param{Symbol: "self", Type: ctx.irType(receiverType)}
+	params = append(params, self)
+	scope.define("self", lowerBinding{value: self, typ: receiverType})
+	ctx.rememberValueBinding(self, "self")
+
+	for _, param := range method.Params {
+		if param.Name == "self" {
+			continue
+		}
+		p := &Param{Symbol: param.Name, Type: ctx.irType(param.Type)}
+		params = append(params, p)
+		scope.define(param.Name, lowerBinding{value: p, typ: param.Type})
+		ctx.rememberValueBinding(p, param.Name)
+	}
+
+	assigned := assignedNames(method.Body)
+	ops := ctx.lowerStmtList(moduleName, receiverType, scope, assigned, method.Body)
+	return Function{
+		Symbol: symbol,
+		Return: ctx.irType(method.Return),
+		Params: params,
+		Blocks: []Block{{Label: "entry", Ops: ops}},
 	}
 }
 
@@ -1453,6 +1541,15 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ctx.errorf("unknown field %s", e.Field)
 			return object, objectOps, objectType
 		}
+		var fieldType *sem.Type
+		if objectType != nil {
+			for _, candidate := range objectType.Fields {
+				if candidate.Name == e.Field {
+					fieldType = candidate.Type
+					break
+				}
+			}
+		}
 		load := &FieldLoad{
 			Object:     object,
 			ObjectType: objectType.Name,
@@ -1460,7 +1557,10 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			Type:       field.Type,
 			Offset:     ctx.irFieldOffset(objectType, e.Field, field.Offset),
 		}
-		return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
+		if fieldType == nil {
+			return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
+		}
+		return load, append(objectOps, load), fieldType
 	case *ast.ConstructorExpr:
 		typName := e.Type.Name
 		typ := ctx.resolveType(moduleName, typName)
@@ -1735,7 +1835,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 					ctx.errorf("place argument was not a constructor")
 					return receiver, receiverOps, recvType
 				}
-				placedType := ctx.resolveType(moduleName, cons.Type.Name)
+				placedType := ctx.resolveTypeRef(moduleName, cons.Type)
 				fields := make([]FieldValue, 0, len(cons.Args))
 				ops := append([]Operation{}, receiverOps...)
 				for _, arg := range cons.Args {
@@ -1752,6 +1852,10 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		args, argOps := ctx.lowerCallArgs(moduleName, receiverType, scope, method, e.Args)
 		ret := ctx.methodReturn(moduleName, method)
 		symbol := symbolName("method", recvType.Module, recvType.Name, e.Method)
+		if recvType != nil && recvType.GenericOrigin != nil {
+			ctx.enqueueConcreteMethod(recvType, e.Method)
+			symbol = symbolName("method", recvType.Module, recvType.MangledName(), e.Method)
+		}
 		if recvType.Kind == sem.KindExecutor && len(ctx.executorPlacementsForType(recvType)) > 1 {
 			if ctx.currentExecutor != nil && sameSemType(ctx.currentExecutor.Type, recvType) {
 				symbol = executorMethodSymbolForSlot(recvType, e.Method, ctx.currentExecutor.SlotLabel)
@@ -1901,7 +2005,22 @@ func (ctx *lowerContext) methodDeclReturn(moduleName string, method *ast.MethodD
 	if method == nil || method.Return.Name == "" {
 		return ctx.resolveType(moduleName, "void")
 	}
-	return ctx.resolveType(moduleName, method.Return.Name)
+	return ctx.resolveTypeRef(moduleName, method.Return)
+}
+
+func (ctx *lowerContext) resolveTypeRef(moduleName string, ref ast.TypeRef) *sem.Type {
+	if ref.Name == "" {
+		return ctx.resolveType(moduleName, "void")
+	}
+	typ, ds := ctx.checked.Index.LookupTypeRef(moduleName, ref, nil)
+	if len(ds) != 0 {
+		ctx.errorf("could not resolve type %s in %s", ref.String(), moduleName)
+		return ctx.resolveType(moduleName, "void")
+	}
+	if typ == nil {
+		return ctx.resolveType(moduleName, ref.Name)
+	}
+	return typ
 }
 
 func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {

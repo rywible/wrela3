@@ -56,11 +56,12 @@ type LifetimeRequirement struct {
 }
 
 type methodLifetimeTarget struct {
-	ModuleName string
-	Type       *Type
-	Method     ast.MethodDecl
-	ReturnType *Type
-	Context    ContextKind
+	ModuleName     string
+	Type           *Type
+	Method         ast.MethodDecl
+	SemanticMethod *Method
+	ReturnType     *Type
+	Context        ContextKind
 }
 
 // Method-summary checking uses negative synthetic scopes for abstract lifetimes.
@@ -151,6 +152,12 @@ func (c *checker) registerMethodLifetimeTargets() {
 				if method.IsAsm || isCanonicalFrameIntrinsic(mod.Name, typ, method) {
 					continue
 				}
+				if typ != nil && len(typ.TypeParams) != 0 {
+					continue
+				}
+				if len(method.TypeParams) != 0 {
+					continue
+				}
 				marker := ContextNormalMethod
 				returnType := c.mustType(mod.Name, legacyTypeName(method.Return))
 				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
@@ -163,6 +170,30 @@ func (c *checker) registerMethodLifetimeTargets() {
 					ReturnType: returnType,
 					Context:    marker,
 				}
+			}
+		}
+	}
+	keys := append([]string(nil), c.index.InstantiationOrder...)
+	for _, key := range keys {
+		typ := c.index.Instantiations[key]
+		if typ == nil {
+			continue
+		}
+		for i := range typ.Methods {
+			method := &typ.Methods[i]
+			if method.IsAsm || len(method.TypeParams) != 0 {
+				continue
+			}
+			marker := ContextNormalMethod
+			if c.isOwnershipTransferAuthority(typ) && method.Return == c.ownedRoot {
+				marker = ContextOwnershipTransferAuthorityMethod
+			}
+			c.methodLifetimeTargets[methodLifetimeKey(typ, method.Name)] = methodLifetimeTarget{
+				ModuleName:     typ.Module,
+				Type:           typ,
+				SemanticMethod: method,
+				ReturnType:     method.Return,
+				Context:        marker,
 			}
 		}
 	}
@@ -183,6 +214,14 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 	moduleName := target.ModuleName
 	typ := target.Type
 	method := target.Method
+	methodName := method.Name
+	body := method.Body
+	scope := c.newMethodLifetimeScope(moduleName, typ, method)
+	if target.SemanticMethod != nil {
+		methodName = target.SemanticMethod.Name
+		body = target.SemanticMethod.Body
+		scope = c.newSemanticMethodLifetimeScope(typ, target.SemanticMethod)
+	}
 	summary := MethodLifetimeSummary{ReturnFromParam: -1}
 
 	if c.methodLifetimeSummaries == nil {
@@ -198,15 +237,14 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 		return summary
 	}
 
-	scope := c.newMethodLifetimeScope(moduleName, typ, method)
 	prev := c.currentMethodSummary
 	prevPhase := c.currentPhase
 	prevType := c.currentType
 	c.currentMethodSummary = &summary
-	c.currentPhase = method.Name
+	c.currentPhase = methodName
 	c.currentType = typ
 	c.activeMethodSummaries[key] = true
-	terminates := c.checkStmtList(moduleName, method.Body, scope, target.ReturnType, target.Context)
+	terminates := c.checkStmtList(moduleName, body, scope, target.ReturnType, target.Context)
 	summary.Terminates = terminates
 	delete(c.activeMethodSummaries, key)
 	c.currentType = prevType
@@ -220,7 +258,7 @@ func methodLifetimeKey(typ *Type, methodName string) string {
 	if typ == nil {
 		return "::" + methodName
 	}
-	return typ.Module + "." + typ.Name + "::" + methodName
+	return typ.Key() + "::" + methodName
 }
 
 func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method ast.MethodDecl) *Scope {
@@ -239,6 +277,33 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else if parameterCanCarryHiddenLifetime(paramType) {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeExecutorRoot})
+		}
+		explicitIndex++
+	}
+	return scope
+}
+
+func (c *checker) newSemanticMethodLifetimeScope(typ *Type, method *Method) *Scope {
+	scope := NewScope(nil)
+	if method == nil {
+		return scope
+	}
+	if len(method.Params) > 0 && method.Params[0].Name == "self" {
+		scope.Define("self", typ)
+		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
+	}
+	explicitIndex := 0
+	for _, p := range method.Params {
+		if p.Name == "self" {
+			continue
+		}
+		scope.Define(p.Name, p.Type)
+		if ClassifyMemoryType(p.Type) == MemoryKindFrameArena {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else if parameterCanCarryHiddenLifetime(p.Type) {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeExecutorRoot})
