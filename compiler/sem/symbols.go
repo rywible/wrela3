@@ -354,6 +354,7 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 			End:      idx.Images[1].SpanV.End,
 		})
 	}
+	diagOut = append(diagOut, idx.CompleteGenericInstantiations()...)
 
 	return idx, diagOut
 }

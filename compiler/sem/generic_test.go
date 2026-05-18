@@ -6,6 +6,13 @@ import (
 	"github.com/ryanwible/wrela3/compiler/diag"
 )
 
+func mustCompleteGenericInstantiations(t *testing.T, index *Index) {
+	t.Helper()
+	if ds := index.CompleteGenericInstantiations(); len(ds) != 0 {
+		t.Fatalf("generic instantiation diagnostics: %#v", ds)
+	}
+}
+
 func TestGenericInstantiationKeyIsDeterministic(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.generics
@@ -22,6 +29,35 @@ data UsesBox { box: Box<Payload> }
 	want := "sem.generics.Box[sem.generics.Payload]"
 	if got != want {
 		t.Fatalf("field type key = %q, want %q", got, want)
+	}
+}
+
+func TestGenericFieldSubstitutionIsRecursive(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.generics
+data Event { kind: U64 }
+data Box<T> { value: T }
+data Pair<T> { first: T; second: T }
+data Ring<T> { current: Box<T> }
+data Root {
+    box: Box<Event>
+    ring: Ring<Event>
+    pair: Pair<Box<Event>>
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	mustCompleteGenericInstantiations(t, index)
+	box := index.Instantiations["sem.generics.Box[sem.generics.Event]"]
+	if box.Fields[0].Type.Key() != "sem.generics.Event" {
+		t.Fatalf("Box<Event>.value = %s", box.Fields[0].Type.Key())
+	}
+	ring := index.Instantiations["sem.generics.Ring[sem.generics.Event]"]
+	if ring.Fields[0].Type.Key() != "sem.generics.Box[sem.generics.Event]" {
+		t.Fatalf("Ring<Event>.current = %s", ring.Fields[0].Type.Key())
+	}
+	pair := index.Instantiations["sem.generics.Pair[sem.generics.Box[sem.generics.Event]]"]
+	if pair.Fields[0].Type.Key() != "sem.generics.Box[sem.generics.Event]" {
+		t.Fatalf("Pair<Box<Event>>.first = %s", pair.Fields[0].Type.Key())
 	}
 }
 
