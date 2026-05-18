@@ -209,24 +209,29 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 			return info
 		}
 	}
-	infoKey := typeInfoKey(typ.Module, typ.Name)
-	if typ.Module != "" {
-		if info, ok := ctx.program.Types[infoKey]; ok && typeInfoReady(info, typ.Name) {
-			return info
-		}
-	} else {
+	infoKey := ctx.typeInfoKey(typ)
+	if info, ok := ctx.program.Types[infoKey]; ok && typeInfoReady(info, typ.Name) {
+		return info
+	}
+	if typ.Module == "" && len(typ.TypeArgs) == 0 {
 		if info, ok := ctx.program.Types[typ.Name]; ok && typeInfoReady(info, typ.Name) {
 			return info
 		}
 	}
-	key := typeKey(typ.Module, typ.Name)
+	key := infoKey
 	if visiting[key] {
-		return TypeInfo{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind), Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
+		return TypeInfo{Name: ctx.irTypeName(typ), Module: typ.Module, Kind: semKindToIR(typ.Kind), Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
 	}
 	visiting[key] = true
 
+	if typ.Kind == sem.KindEnum {
+		info := ctx.ensureEnumTypeInfo(typ, visiting)
+		delete(visiting, key)
+		return info
+	}
+
 	info := TypeInfo{
-		Name:   typ.Name,
+		Name:   ctx.irTypeName(typ),
 		Module: typ.Module,
 		Kind:   semKindToIR(typ.Kind),
 		Fields: map[string]FieldInfo{},
@@ -293,12 +298,112 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 	if info.StorageSize == 0 {
 		info.StorageSize = info.Size
 	}
-	if typ.Module != "" {
-		ctx.program.Types[infoKey] = info
+	ctx.program.Types[infoKey] = info
+	if len(typ.TypeArgs) == 0 {
+		ctx.program.Types[typ.Name] = info
 	}
-	ctx.program.Types[typ.Name] = info
 	delete(visiting, key)
 	return info
+}
+
+func (ctx *lowerContext) ensureEnumTypeInfo(typ *sem.Type, visiting map[string]bool) TypeInfo {
+	infoKey := ctx.typeInfoKey(typ)
+	info := TypeInfo{
+		Name:        ctx.irTypeName(typ),
+		Module:      typ.Module,
+		Kind:        TypeKindEnum,
+		Size:        8,
+		Align:       8,
+		StorageSize: 8,
+		Fields:      map[string]FieldInfo{},
+		FieldOrder:  []string{"$tag"},
+	}
+	u64 := ctx.resolveType(typ.Module, "U64")
+	info.Fields["$tag"] = FieldInfo{
+		Name:          "$tag",
+		Type:          ctx.irType(u64),
+		Offset:        0,
+		Size:          8,
+		Align:         8,
+		StorageOffset: 0,
+		StorageSize:   8,
+	}
+
+	maxPayloadSize := 0
+	maxPayloadAlign := 1
+	for i, variant := range typ.EnumVariants {
+		variantInfo := EnumVariantInfo{Name: variant.Name, Discriminant: uint64(i)}
+		fields, order, payloadSize, payloadAlign := ctx.semanticFieldLayout(variant.Fields, 8, visiting)
+		for _, name := range order {
+			field := fields[name]
+			field.Name = variant.Name + "." + field.Name
+			info.Fields[field.Name] = field
+			info.FieldOrder = append(info.FieldOrder, field.Name)
+			variantInfo.Fields = append(variantInfo.Fields, field.Name)
+		}
+		if payloadSize > maxPayloadSize {
+			maxPayloadSize = payloadSize
+		}
+		if payloadAlign > maxPayloadAlign {
+			maxPayloadAlign = payloadAlign
+		}
+		info.EnumVariants = append(info.EnumVariants, variantInfo)
+	}
+
+	if maxPayloadAlign > info.Align {
+		info.Align = maxPayloadAlign
+	}
+	info.Size = layout.AlignUp(8+maxPayloadSize, info.Align)
+	if info.Size == 0 {
+		info.Size = 8
+	}
+	info.StorageSize = info.Size
+	ctx.program.Types[infoKey] = info
+	if len(typ.TypeArgs) == 0 {
+		ctx.program.Types[typ.Name] = info
+	}
+	return info
+}
+
+func (ctx *lowerContext) semanticFieldLayout(fields []sem.Field, baseOffset int, visiting map[string]bool) (map[string]FieldInfo, []string, int, int) {
+	out := map[string]FieldInfo{}
+	order := []string{}
+	offset := baseOffset
+	maxAlign := 1
+	for _, field := range fields {
+		fieldInfo := ctx.ensureTypeInfo(field.Type, visiting)
+		fieldType := ctx.irType(field.Type)
+		size := fieldInfo.Size
+		storageSize := fieldInfo.StorageSize
+		if storageSize == 0 {
+			storageSize = size
+		}
+		align := fieldInfo.Align
+		if isHandleRecordKind(fieldType.Kind) {
+			size = 8
+			align = 8
+		}
+		if align == 0 {
+			align = 8
+		}
+		offset = layout.AlignUp(offset, align)
+		out[field.Name] = FieldInfo{
+			Name:          field.Name,
+			Type:          fieldType,
+			Offset:        offset,
+			Size:          size,
+			Align:         align,
+			StorageOffset: offset,
+			StorageSize:   storageSize,
+		}
+		order = append(order, field.Name)
+		offset += storageSize
+		if align > maxAlign {
+			maxAlign = align
+		}
+	}
+	payloadSize := layout.AlignUp(offset-baseOffset, maxAlign)
+	return out, order, payloadSize, maxAlign
 }
 
 func typeInfoReady(info TypeInfo, name string) bool {
@@ -1905,7 +2010,7 @@ func (ctx *lowerContext) irFieldOffset(objectType *sem.Type, fieldName string, f
 	if objectType == nil {
 		return fallback
 	}
-	info, ok := ctx.program.Types[typeInfoKey(objectType.Module, objectType.Name)]
+	info, ok := ctx.program.Types[ctx.typeInfoKey(objectType)]
 	if !ok {
 		info, ok = ctx.program.Types[objectType.Name]
 	}
@@ -2062,7 +2167,27 @@ func (ctx *lowerContext) irType(typ *sem.Type) Type {
 	if typ == nil {
 		return Type{Name: "void", Kind: TypeKindPrimitive}
 	}
-	return Type{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind)}
+	return Type{Name: ctx.irTypeName(typ), Module: typ.Module, Kind: semKindToIR(typ.Kind)}
+}
+
+func (ctx *lowerContext) irTypeName(typ *sem.Type) string {
+	if typ == nil {
+		return "void"
+	}
+	if len(typ.TypeArgs) == 0 {
+		return typ.Name
+	}
+	return typ.Display()
+}
+
+func (ctx *lowerContext) typeInfoKey(typ *sem.Type) string {
+	if typ == nil {
+		return ""
+	}
+	if typ.Kind == sem.KindPrimitive {
+		return typ.Name
+	}
+	return typ.Key()
 }
 
 func (ctx *lowerContext) errorf(format string, args ...any) {
@@ -2202,6 +2327,8 @@ func semKindToIR(kind sem.Kind) TypeKind {
 		return TypeKindExecutor
 	case sem.KindImage:
 		return TypeKindImage
+	case sem.KindEnum:
+		return TypeKindEnum
 	default:
 		return TypeKindUnknown
 	}
@@ -2387,13 +2514,15 @@ func pathName(pathType string) string {
 }
 
 func typeInfoFor(types map[string]TypeInfo, typ Type) (TypeInfo, bool) {
+	if info, ok := types[typ.Name]; ok {
+		return info, true
+	}
 	if typ.Module != "" {
 		if info, ok := types[typ.Module+"."+typ.Name]; ok {
 			return info, true
 		}
 	}
-	info, ok := types[typ.Name]
-	return info, ok
+	return TypeInfo{}, false
 }
 
 func typeName(typ *sem.Type) string {
@@ -2426,12 +2555,5 @@ func receiverHasMethodReturning(receiver *sem.Type, ret *sem.Type) bool {
 }
 
 func typeKey(moduleName, name string) string {
-	return moduleName + "." + name
-}
-
-func typeInfoKey(moduleName, name string) string {
-	if moduleName == "" {
-		return name
-	}
 	return moduleName + "." + name
 }

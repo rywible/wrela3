@@ -34,6 +34,7 @@ const (
 	TypeKindDriverPath TypeKind = "driver_path"
 	TypeKindExecutor   TypeKind = "executor"
 	TypeKindImage      TypeKind = "image"
+	TypeKindEnum       TypeKind = "enum"
 )
 
 type FieldInfo struct {
@@ -47,14 +48,21 @@ type FieldInfo struct {
 }
 
 type TypeInfo struct {
-	Name        string
-	Module      string
-	Kind        TypeKind
-	Size        int
-	Align       int
-	StorageSize int
-	Fields      map[string]FieldInfo
-	FieldOrder  []string
+	Name         string
+	Module       string
+	Kind         TypeKind
+	Size         int
+	Align        int
+	StorageSize  int
+	Fields       map[string]FieldInfo
+	FieldOrder   []string
+	EnumVariants []EnumVariantInfo
+}
+
+type EnumVariantInfo struct {
+	Name         string
+	Discriminant uint64
+	Fields       []string
 }
 
 func (f Function) ValuesInDeterministicOrder() []Value {
@@ -566,8 +574,8 @@ type TimerRoute struct {
 
 type InterruptQueueLayout struct {
 	Label        string
-	SourceLabel string
-	Vector      uint8
+	SourceLabel  string
+	Vector       uint8
 	Owner        string
 	Capacity     uint64
 	PayloadSize  uint64
