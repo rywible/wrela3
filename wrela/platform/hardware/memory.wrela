@@ -94,12 +94,11 @@ data RootArena {
         )
     }
 
-    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer {
+    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer<U8> {
         let child = self.child(identity = identity, length = length, align = align)
-        return DmaBuffer(
+        return DmaBuffer<U8>(
             owner = owner,
-            identity = identity,
-            bytes = MutableBytes(address = child.base, length = child.length)
+            slots = Slots<U8>(address = child.base, capacity = child.length)
         )
     }
 
@@ -203,8 +202,7 @@ data ChildArena {
     }
 }
 
-data DmaBuffer {
+data DmaBuffer<T> {
     owner: PciDevice
-    identity: ArenaIdentity
-    bytes: MutableBytes
+    slots: Slots<T>
 }

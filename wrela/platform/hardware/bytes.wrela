@@ -81,6 +81,14 @@ class PhysicalBytes {
     }
 }
 
+data Mmio<T> {
+    address: PhysicalAddress
+}
+
+data Volatile<T> {
+    address: PhysicalAddress
+}
+
 data MmioRegion {
     address: PhysicalAddress
     length: U64

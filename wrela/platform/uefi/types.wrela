@@ -74,6 +74,15 @@ data UefiConfigurationTableEntry {
     table_address: PhysicalAddress
 }
 
+data FirmwareAddress {
+    value: PhysicalAddress
+}
+
+data FirmwareSlice<T> {
+    address: FirmwareAddress
+    length: U64
+}
+
 data AcpiRsdpSearchResult {
     found: Bool
     address: PhysicalAddress
