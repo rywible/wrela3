@@ -94,3 +94,29 @@ data StorageRegionValidator {
         return RegionValidationResult(valid = true)
     }
 }
+
+const STORAGE_RECOVERY_STOP_CLEAN_EOF: U64 = 0
+const STORAGE_RECOVERY_STOP_CHECKSUM_MISMATCH: U64 = 1
+const STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP: U64 = 2
+const STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT: U64 = 3
+
+data RecoveryResult {
+    visible_events: U64
+    next_event_id: U64
+    last_committed_group_end: U64
+    stop_reason: U64
+}
+
+data EventRecoveryScanner {
+    fn validate_group_member(self, header: EventSlotHeader) -> RecoveryResult {
+        if header.event_type_id == 0 {
+            if header.flags != STORAGE_SLOT_RESERVED_EMPTY {
+                return RecoveryResult(visible_events = 0, next_event_id = header.event_id, last_committed_group_end = 0, stop_reason = STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT)
+            }
+        }
+        if header.atomic_group_len == 0 {
+            return RecoveryResult(visible_events = 0, next_event_id = header.event_id, last_committed_group_end = 0, stop_reason = STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP)
+        }
+        return RecoveryResult(visible_events = 1, next_event_id = header.event_id + 1, last_committed_group_end = header.event_id, stop_reason = STORAGE_RECOVERY_STOP_CLEAN_EOF)
+    }
+}

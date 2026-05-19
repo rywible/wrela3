@@ -92,6 +92,54 @@ data SuperblockConsumer {
 	})
 }
 
+func TestEventLogRecoveryMirrorContract(t *testing.T) {
+	modules := parseEventLogModules(t, `
+module sem.event_log_recovery_mirror
+
+use {
+    STORAGE_RECOVERY_STOP_CLEAN_EOF,
+    STORAGE_RECOVERY_STOP_CHECKSUM_MISMATCH,
+    STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP,
+    STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT,
+    EventRecoveryScanner,
+    RecoveryResult
+} from storage.event_log
+
+const CLEAN_EOF: U64 = STORAGE_RECOVERY_STOP_CLEAN_EOF
+const CHECKSUM_MISMATCH: U64 = STORAGE_RECOVERY_STOP_CHECKSUM_MISMATCH
+const INCOMPLETE_ATOMIC_GROUP: U64 = STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP
+const INVALID_EMPTY_SLOT: U64 = STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT
+
+data RecoveryConsumer {
+    scanner: EventRecoveryScanner
+    result: RecoveryResult
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.event_log", "RecoveryResult"), map[string]string{
+		"visible_events":           "U64",
+		"next_event_id":            "U64",
+		"last_committed_group_end": "U64",
+		"stop_reason":              "U64",
+	})
+	for _, name := range []string{
+		"STORAGE_RECOVERY_STOP_CLEAN_EOF",
+		"STORAGE_RECOVERY_STOP_CHECKSUM_MISMATCH",
+		"STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP",
+		"STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT",
+	} {
+		if _, ok := checked.Index.LookupConst("storage.event_log", name); !ok {
+			t.Fatalf("missing const storage.event_log.%s", name)
+		}
+	}
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "EventRecoveryScanner"), "validate_group_member")
+}
+
 func parseEventLogModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{

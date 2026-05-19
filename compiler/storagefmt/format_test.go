@@ -186,3 +186,58 @@ func TestRegionOverlap(t *testing.T) {
 func validSuperblockForTest(generation uint64) Superblock {
 	return Superblock{Generation: generation, Checksum32: SuperblockChecksum(generation)}
 }
+
+func TestRecoveryStopsBeforeChecksumMismatch(t *testing.T) {
+	good := ValidSlotForTest(0)
+	bad := ValidSlotForTest(1)
+	bad.Header.Checksum32++
+
+	got := RecoverSlots([]Slot{good, bad})
+	if got.StopReason != StopChecksumMismatch {
+		t.Fatalf("stop reason = %v, want checksum mismatch", got.StopReason)
+	}
+	if got.VisibleEvents != 1 || got.NextEventID != 1 || got.LastCommittedGroupEnd != 0 {
+		t.Fatalf("recovery = %#v, want one visible event before mismatch", got)
+	}
+}
+
+func TestRecoveryStopsBeforeIncompleteAtomicGroup(t *testing.T) {
+	first := ValidSlotForTest(0)
+	first.Header.AtomicGroupLen = 2
+	first.Header.AtomicGroupIndex = 0
+	RefreshSlotChecksum(&first)
+
+	got := RecoverSlots([]Slot{first})
+	if got.StopReason != StopIncompleteAtomicGroup {
+		t.Fatalf("stop reason = %v, want incomplete atomic group", got.StopReason)
+	}
+	if got.VisibleEvents != 0 || got.NextEventID != 0 {
+		t.Fatalf("recovery = %#v, want no visible events", got)
+	}
+}
+
+func TestRecoveryRejectsEmptySlotOutsidePadding(t *testing.T) {
+	slot := ValidSlotForTest(7)
+	slot.Header.EventTypeID = 0
+	slot.Header.Flags = 0
+	RefreshSlotChecksum(&slot)
+
+	got := RecoverSlots([]Slot{slot})
+	if got.StopReason != StopInvalidEmptySlot || got.VisibleEvents != 0 {
+		t.Fatalf("recovery = %#v, want invalid empty slot", got)
+	}
+}
+
+func TestRecoverySkipsReservedEmptySlots(t *testing.T) {
+	first := ValidSlotForTest(0)
+	padding := ReservedEmptySlotForTest(1)
+	second := ValidSlotForTest(2)
+
+	got := RecoverSlots([]Slot{first, padding, second})
+	if got.StopReason != StopCleanEOF {
+		t.Fatalf("stop reason = %v, want clean EOF", got.StopReason)
+	}
+	if got.VisibleEvents != 2 || got.NextEventID != 3 || got.LastCommittedGroupEnd != 2 {
+		t.Fatalf("recovery = %#v, want reserved empty skipped", got)
+	}
+}
