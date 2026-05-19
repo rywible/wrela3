@@ -34,6 +34,7 @@ const (
 	TypeKindDriverPath TypeKind = "driver_path"
 	TypeKindExecutor   TypeKind = "executor"
 	TypeKindImage      TypeKind = "image"
+	TypeKindEnum       TypeKind = "enum"
 )
 
 type FieldInfo struct {
@@ -47,14 +48,21 @@ type FieldInfo struct {
 }
 
 type TypeInfo struct {
-	Name        string
-	Module      string
-	Kind        TypeKind
-	Size        int
-	Align       int
-	StorageSize int
-	Fields      map[string]FieldInfo
-	FieldOrder  []string
+	Name         string
+	Module       string
+	Kind         TypeKind
+	Size         int
+	Align        int
+	StorageSize  int
+	Fields       map[string]FieldInfo
+	FieldOrder   []string
+	EnumVariants []EnumVariantInfo
+}
+
+type EnumVariantInfo struct {
+	Name         string
+	Discriminant uint64
+	Fields       []string
 }
 
 func (f Function) ValuesInDeterministicOrder() []Value {
@@ -100,7 +108,19 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *ArenaReserve:
 		return []Value{v}
+	case *ArenaReserveArray:
+		return []Value{v}
 	case *ArenaPlace:
+		return []Value{v}
+	case *EnumConstruct:
+		return []Value{v}
+	case *EnumVariantTest:
+		return []Value{v}
+	case *EnumPayloadExtract:
+		return []Value{v}
+	case *SlotFill:
+		return []Value{v}
+	case *SliceGet:
 		return []Value{v}
 	case ReliableTopicTryPublish:
 		return []Value{v}
@@ -252,6 +272,35 @@ type Construct struct {
 func (Construct) isValue()     {}
 func (Construct) isOperation() {}
 
+type EnumConstruct struct {
+	Symbol  string
+	Type    Type
+	Variant string
+	Fields  []FieldValue
+}
+
+func (*EnumConstruct) isValue()     {}
+func (*EnumConstruct) isOperation() {}
+
+type EnumVariantTest struct {
+	Value   Value
+	Type    Type
+	Variant string
+}
+
+func (*EnumVariantTest) isValue()     {}
+func (*EnumVariantTest) isOperation() {}
+
+type EnumPayloadExtract struct {
+	Value   Value
+	Type    Type
+	Variant string
+	Field   string
+}
+
+func (*EnumPayloadExtract) isValue()     {}
+func (*EnumPayloadExtract) isOperation() {}
+
 type FrameBegin struct {
 	Symbol string
 	Parent Value
@@ -277,6 +326,17 @@ type ArenaReserve struct {
 
 func (*ArenaReserve) isValue()     {}
 func (*ArenaReserve) isOperation() {}
+
+type ArenaReserveArray struct {
+	Arena   Value
+	Element Type
+	Count   Value
+	Align   Value
+	Type    Type
+}
+
+func (*ArenaReserveArray) isValue()     {}
+func (*ArenaReserveArray) isOperation() {}
 
 type ArenaPlace struct {
 	Arena  Value
@@ -345,6 +405,41 @@ type FieldStore struct {
 }
 
 func (FieldStore) isOperation() {}
+
+type SlotWrite struct {
+	Slots Value
+	Index Value
+	Value Value
+}
+
+func (*SlotWrite) isOperation() {}
+
+type SlotFill struct {
+	Slots   Value
+	Value   Value
+	Element Type
+	Type    Type
+}
+
+func (*SlotFill) isValue()     {}
+func (*SlotFill) isOperation() {}
+
+type SliceGet struct {
+	Slice Value
+	Index Value
+	Type  Type
+}
+
+func (*SliceGet) isValue()     {}
+func (*SliceGet) isOperation() {}
+
+type SliceSet struct {
+	Slice Value
+	Index Value
+	Value Value
+}
+
+func (*SliceSet) isOperation() {}
 
 type TopicPublish struct {
 	TopicLabel string
@@ -521,6 +616,7 @@ type InterruptBinding struct {
 	HandlerFunctionSymbol string
 	ExecutorType          Type
 	PathField             string
+	EventType             Type
 	PathFieldOffset       int
 	ContextSymbol         string
 	EventStorageSymbol    string
@@ -566,8 +662,8 @@ type TimerRoute struct {
 
 type InterruptQueueLayout struct {
 	Label        string
-	SourceLabel string
-	Vector      uint8
+	SourceLabel  string
+	Vector       uint8
 	Owner        string
 	Capacity     uint64
 	PayloadSize  uint64

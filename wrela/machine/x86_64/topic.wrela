@@ -1,0 +1,94 @@
+module machine.x86_64.topic
+
+use { Option, Result, Unit, Publisher, Subscription } from wrela.lang.core
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { TopicIdentity } from machine.x86_64.topic_u64
+
+data TopicFull {}
+
+class Topic<T> {
+    identity: TopicIdentity
+    id: U64
+    depth: U64
+
+    fn publisher(self) -> TopicPublisher<T> {
+        return TopicPublisher<T>(topic = self)
+    }
+
+    fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> {
+        return TopicSubscription<T>(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    }
+}
+
+class TopicPublisher<T> {
+    topic: Topic<T>
+
+    asm fn publish(self, value: T) {
+        ret
+    }
+}
+
+class TopicSubscription<T> {
+    topic: Topic<T>
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+
+    asm fn try_next(self) -> Option<T> {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.armed = true
+    }
+
+    fn is_wait_armed(self) -> Bool {
+        return self.armed
+    }
+}
+
+impl Publisher<T> for TopicPublisher<T>
+impl Subscription<T> for TopicSubscription<T>
+
+class ReliableTopic<T> {
+    identity: TopicIdentity
+    id: U64
+    depth: U64
+
+    fn publisher(self) -> ReliablePublisher<T> {
+        return ReliablePublisher<T>(topic = self)
+    }
+
+    fn subscribe(self, subscriber: ExecutorSlot) -> ReliableSubscription<T> {
+        return ReliableSubscription<T>(topic = self, subscriber = subscriber, cursor = 0, armed = false)
+    }
+}
+
+class ReliablePublisher<T> {
+    topic: ReliableTopic<T>
+
+    asm fn try_publish(self, value: T) -> Result<Unit, TopicFull> {
+        ret
+    }
+}
+
+class ReliableSubscription<T> {
+    topic: ReliableTopic<T>
+    subscriber: ExecutorSlot
+    cursor: U64
+    armed: Bool
+
+    asm fn try_next(self) -> Option<T> {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.armed = true
+    }
+
+    fn is_wait_armed(self) -> Bool {
+        return self.armed
+    }
+}
+
+impl Subscription<T> for ReliableSubscription<T>

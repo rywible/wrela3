@@ -109,6 +109,80 @@ func TestPhysicalRegionAndArenaAuthorityForgeryRejected(t *testing.T) {
 	}
 }
 
+func TestHardwareAuthorityRegionKindSourceDefinitions(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+
+	for _, tc := range []struct {
+		module string
+		name   string
+	}{
+		{"platform.hardware.bytes", "Mmio"},
+		{"platform.hardware.bytes", "Volatile"},
+		{"platform.uefi.types", "FirmwareSlice"},
+		{"platform.hardware.memory", "DmaBuffer"},
+		{"platform.acpi.tables", "AcpiTableView"},
+	} {
+		typ := moduleType(t, index, tc.module, tc.name)
+		if len(typ.TypeParams) != 1 || typ.TypeParams[0].Name != "T" {
+			t.Fatalf("%s.%s type params = %#v, want T", tc.module, tc.name, typ.TypeParams)
+		}
+	}
+
+	firmware := moduleType(t, index, "platform.uefi.types", "FirmwareSlice")
+	if fieldTypeDisplay(t, firmware, "address") != "FirmwareAddress" {
+		t.Fatalf("FirmwareSlice.address = %s, want FirmwareAddress", fieldTypeDisplay(t, firmware, "address"))
+	}
+	if fieldTypeDisplay(t, firmware, "length") != "U64" {
+		t.Fatalf("FirmwareSlice.length = %s, want U64", fieldTypeDisplay(t, firmware, "length"))
+	}
+
+	dma := moduleType(t, index, "platform.hardware.memory", "DmaBuffer")
+	if fieldTypeDisplay(t, dma, "slots") != "Slots<T>" {
+		t.Fatalf("DmaBuffer.slots = %s, want Slots<T>", fieldTypeDisplay(t, dma, "slots"))
+	}
+
+	table := moduleType(t, index, "platform.acpi.tables", "AcpiTable")
+	if fieldTypeDisplay(t, table, "view") != "AcpiTableView<U8>" {
+		t.Fatalf("AcpiTable.view = %s, want AcpiTableView<U8>", fieldTypeDisplay(t, table, "view"))
+	}
+	view := moduleType(t, index, "platform.acpi.tables", "AcpiTableView")
+	if fieldTypeDisplay(t, view, "typed") != "FirmwareSlice<T>" {
+		t.Fatalf("AcpiTableView.typed = %s, want FirmwareSlice<T>", fieldTypeDisplay(t, view, "typed"))
+	}
+
+	mmio := moduleType(t, index, "platform.hardware.bytes", "MmioRegion")
+	assertMethodExists(t, mmio, "read32")
+	assertMethodExists(t, mmio, "write32")
+}
+
+func TestProtectedGenericRegionViewForgeryRejected(t *testing.T) {
+	modules := parseAuthorityFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", "forged_mmio_generic.wrela"))
+	index, ds := BuildIndex(modules)
+	ds = filterMissingImageDiagnostic(ds)
+	if len(ds) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	_, ds = Check(index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("expected SEM0092, got %#v", ds)
+	}
+}
+
+func fieldTypeDisplay(t *testing.T, typ *Type, field string) string {
+	t.Helper()
+	for _, f := range typ.Fields {
+		if f.Name == field {
+			return f.Type.Display()
+		}
+	}
+	t.Fatalf("missing field %s on %s", field, typ.Name)
+	return ""
+}
+
 func parseAuthorityFixtureModulesForTest(t *testing.T, path string) []*ast.Module {
 	t.Helper()
 	wd, err := os.Getwd()

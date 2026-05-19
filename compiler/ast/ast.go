@@ -6,6 +6,36 @@ import (
 	"github.com/ryanwible/wrela3/compiler/source"
 )
 
+type TypeRef struct {
+	Name  string
+	Args  []TypeRef
+	SpanV source.Span
+}
+
+func (t TypeRef) Span() source.Span { return t.SpanV }
+
+func (t TypeRef) String() string {
+	if len(t.Args) == 0 {
+		return t.Name
+	}
+	parts := make([]string, 0, len(t.Args))
+	for _, arg := range t.Args {
+		parts = append(parts, arg.String())
+	}
+	return t.Name + "<" + strings.Join(parts, ", ") + ">"
+}
+
+type TypeParam struct {
+	Name string
+	Span source.Span
+}
+
+type TraitBound struct {
+	Param string
+	Trait TypeRef
+	Span  source.Span
+}
+
 type Module struct {
 	Name    string
 	Imports []Import
@@ -23,31 +53,86 @@ type Decl interface {
 	Span() source.Span
 }
 
-type DataDecl struct {
-	Name    string
-	Fields  []Field
-	Methods []MethodDecl
+type EnumDecl struct {
+	Name       string
+	TypeParams []TypeParam
+	Variants   []EnumVariant
+	SpanV      source.Span
+}
+
+func (d *EnumDecl) Span() source.Span { return d.SpanV }
+
+type EnumVariant struct {
+	Name   string
+	Fields []Field
+	Span   source.Span
+}
+
+type TraitDecl struct {
+	Name       string
+	TypeParams []TypeParam
+	Methods    []MethodDecl
+	SpanV      source.Span
+}
+
+func (d *TraitDecl) Span() source.Span { return d.SpanV }
+
+type ImplDecl struct {
+	Trait TypeRef
+	For   TypeRef
+	SpanV source.Span
+}
+
+func (d *ImplDecl) Span() source.Span { return d.SpanV }
+
+type ConstDecl struct {
+	Name  string
+	Type  TypeRef
+	Value Expr
+	SpanV source.Span
+}
+
+func (d *ConstDecl) Span() source.Span { return d.SpanV }
+
+type StaticAssertDecl struct {
+	Expr    Expr
+	Message string
 	SpanV   source.Span
+}
+
+func (d *StaticAssertDecl) Span() source.Span { return d.SpanV }
+
+type DataDecl struct {
+	Name       string
+	TypeParams []TypeParam
+	Where      []TraitBound
+	Fields     []Field
+	Methods    []MethodDecl
+	SpanV      source.Span
 }
 
 func (d *DataDecl) Span() source.Span { return d.SpanV }
 
 type ClassDecl struct {
-	Name    string
-	Fields  []Field
-	Methods []MethodDecl
-	Unique  bool
-	SpanV   source.Span
+	Name       string
+	TypeParams []TypeParam
+	Where      []TraitBound
+	Fields     []Field
+	Methods    []MethodDecl
+	Unique     bool
+	SpanV      source.Span
 }
 
 func (d *ClassDecl) Span() source.Span { return d.SpanV }
 
 type DriverDecl struct {
-	Name    string
-	Fields  []Field
-	Methods []MethodDecl
-	Unique  bool
-	SpanV   source.Span
+	Name       string
+	TypeParams []TypeParam
+	Where      []TraitBound
+	Fields     []Field
+	Methods    []MethodDecl
+	Unique     bool
+	SpanV      source.Span
 }
 
 func (d *DriverDecl) Span() source.Span { return d.SpanV }
@@ -63,7 +148,7 @@ type DriverPathDecl struct {
 func (d *DriverPathDecl) Span() source.Span { return d.SpanV }
 
 type InterruptEventDecl struct {
-	EventType string
+	EventType TypeRef
 	Body      []Stmt
 	SpanV     source.Span
 }
@@ -83,7 +168,7 @@ func (d *ExecutorDecl) Span() source.Span { return d.SpanV }
 type OnHandlerDecl struct {
 	PathField string
 	ParamName string
-	ParamType string
+	ParamType TypeRef
 	Body      []Stmt
 	SpanV     source.Span
 }
@@ -108,7 +193,7 @@ type Transition struct {
 type PhaseDecl struct {
 	Name   string
 	Params []Param
-	Return string
+	Return TypeRef
 	Body   []Stmt
 	SpanV  source.Span
 	Parent *ImageDecl
@@ -118,26 +203,28 @@ func (d *PhaseDecl) Span() source.Span { return d.SpanV }
 
 type Field struct {
 	Name string
-	Type string
+	Type TypeRef
 	Span source.Span
 }
 
 type Param struct {
 	Name string
-	Type string
+	Type TypeRef
 	Span source.Span
 }
 
 type MethodDecl struct {
-	Receiver string
-	Name     string
-	Params   []Param
-	Return   string
-	Body     []Stmt
-	Asm      *AsmBody
-	IsAsm    bool
-	IsStart  bool
-	SpanV    source.Span
+	Receiver   string
+	Name       string
+	TypeParams []TypeParam
+	Where      []TraitBound
+	Params     []Param
+	Return     TypeRef
+	Body       []Stmt
+	Asm        *AsmBody
+	IsAsm      bool
+	IsStart    bool
+	SpanV      source.Span
 }
 
 func (d *MethodDecl) Span() source.Span { return d.SpanV }
@@ -150,6 +237,27 @@ type AsmBody struct {
 type Stmt interface {
 	Span() source.Span
 }
+
+type Pattern interface {
+	patternString() string
+}
+
+type WildcardPattern struct{}
+
+func (p WildcardPattern) patternString() string { return "_" }
+
+type PatternBinding struct {
+	Name string
+	Bind string
+}
+
+type VariantPattern struct {
+	Enum     string
+	Variant  string
+	Bindings []PatternBinding
+}
+
+func (p VariantPattern) patternString() string { return debugPattern(p) }
 
 type LetStmt struct {
 	Name  string
@@ -174,6 +282,29 @@ type IfStmt struct {
 }
 
 func (s *IfStmt) Span() source.Span { return s.SpanV }
+
+type IfLetStmt struct {
+	Pattern Pattern
+	Value   Expr
+	Body    []Stmt
+	SpanV   source.Span
+}
+
+func (s *IfLetStmt) Span() source.Span { return s.SpanV }
+
+type MatchStmt struct {
+	Value Expr
+	Arms  []MatchArm
+	SpanV source.Span
+}
+
+func (s *MatchStmt) Span() source.Span { return s.SpanV }
+
+type MatchArm struct {
+	Pattern Pattern
+	Body    []Stmt
+	Span    source.Span
+}
 
 type WhileStmt struct {
 	Cond  Expr
@@ -249,12 +380,42 @@ type BoolLiteral struct {
 func (e *BoolLiteral) Span() source.Span { return e.SpanV }
 
 type ConstructorExpr struct {
-	Type  string
+	Type  TypeRef
 	Args  []NamedArg
 	SpanV source.Span
 }
 
 func (e *ConstructorExpr) Span() source.Span { return e.SpanV }
+
+type VariantConstructorExpr struct {
+	Enum    string
+	Variant string
+	Args    []NamedArg
+	SpanV   source.Span
+}
+
+func (e *VariantConstructorExpr) Span() source.Span { return e.SpanV }
+
+type SizeOfExpr struct {
+	Type  TypeRef
+	SpanV source.Span
+}
+
+func (e *SizeOfExpr) Span() source.Span { return e.SpanV }
+
+type AlignOfExpr struct {
+	Type  TypeRef
+	SpanV source.Span
+}
+
+func (e *AlignOfExpr) Span() source.Span { return e.SpanV }
+
+type TypeOperandExpr struct {
+	Type  TypeRef
+	SpanV source.Span
+}
+
+func (e *TypeOperandExpr) Span() source.Span { return e.SpanV }
 
 type CallExpr struct {
 	Receiver Expr
@@ -304,11 +465,21 @@ func DebugExpr(expr Expr) string {
 	case *FieldExpr:
 		return DebugExpr(e.Base) + "." + e.Field
 	case *ConstructorExpr:
-		return e.Type + "(" + debugNamedArgs(e.Args) + ")"
+		return debugConstructorType(e.Type) + "(" + debugNamedArgs(e.Args) + ")"
+	case *VariantConstructorExpr:
+		return e.Enum + "." + e.Variant + "(" + debugNamedArgs(e.Args) + ")"
+	case *SizeOfExpr:
+		return "sizeof(" + debugConstructorType(e.Type) + ")"
+	case *AlignOfExpr:
+		return "alignof(" + debugConstructorType(e.Type) + ")"
+	case *TypeOperandExpr:
+		return e.Type.String()
 	case *CallExpr:
 		return DebugExpr(e.Receiver) + "." + e.Method + "(" + debugNamedArgs(e.Args) + ")"
 	case *BinaryExpr:
 		return "(" + e.Op + " " + DebugExpr(e.Left) + " " + DebugExpr(e.Right) + ")"
+	case nil:
+		return "<nil>"
 	default:
 		return "<expr>"
 	}
@@ -335,6 +506,10 @@ func DebugStmt(stmt Stmt) string {
 		return "for " + s.Var + " in " + DebugExpr(s.InExpr) + " { " + debugStmtList(s.Body) + " }"
 	case *WithStmt:
 		return "with " + DebugExpr(s.Expr) + " as " + s.Name + " { " + debugStmtList(s.Body) + " }"
+	case *IfLetStmt:
+		return "if let " + debugPattern(s.Pattern) + " = " + DebugExpr(s.Value) + " { " + debugStmtList(s.Body) + " }"
+	case *MatchStmt:
+		return "match " + DebugExpr(s.Value) + " { " + debugMatchArms(s.Arms) + " }"
 	default:
 		return "<stmt>"
 	}
@@ -358,4 +533,41 @@ func debugNamedArgs(args []NamedArg) string {
 		out = append(out, arg.Name+" = "+DebugExpr(arg.Value))
 	}
 	return strings.Join(out, ", ")
+}
+
+func debugConstructorType(ref TypeRef) string {
+	if ref.Name == "" {
+		return ""
+	}
+	return ref.String()
+}
+
+func debugPattern(p Pattern) string {
+	if p == nil {
+		return "_"
+	}
+	switch v := p.(type) {
+	case WildcardPattern:
+		return "_"
+	case VariantPattern:
+		if len(v.Bindings) == 0 {
+			return v.Enum + "." + v.Variant
+		}
+		parts := make([]string, 0, len(v.Bindings))
+		for _, binding := range v.Bindings {
+			parts = append(parts, binding.Name+" = "+binding.Bind)
+		}
+		return v.Enum + "." + v.Variant + "(" + strings.Join(parts, ", ") + ")"
+	default:
+		return "<pattern>"
+	}
+}
+
+func debugMatchArms(arms []MatchArm) string {
+	parts := make([]string, 0, len(arms))
+	for _, arm := range arms {
+		pattern := debugPattern(arm.Pattern)
+		parts = append(parts, pattern+" => { "+debugStmtList(arm.Body)+" }")
+	}
+	return strings.Join(parts, " ")
 }

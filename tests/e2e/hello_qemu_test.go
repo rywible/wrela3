@@ -293,7 +293,7 @@ func TestMultiVcpuTopicsQEMU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
 	}
-	if !strings.Contains(out, "producer published 64") || !strings.Contains(out, "consumer received 64") {
+	if !strings.Contains(out, "producer sent 64") || !strings.Contains(out, "consumer received 64") {
 		t.Fatalf("missing multi-vcpu topic output:\n%s", out)
 	}
 	assertDiscoveryMarkers(t, out)

@@ -144,7 +144,7 @@ func negativePrelude() []ast.Decl {
 		},
 		&ast.DataDecl{
 			Name:   "ExecutorPlacement",
-			Fields: []ast.Field{{Name: "id", Type: "U64", Span: source.Span{}}},
+			Fields: []ast.Field{{Name: "id", Type: ast.TypeRef{Name: "U64"}, Span: source.Span{}}},
 			SpanV:  source.Span{},
 		},
 		&ast.ClassDecl{
@@ -154,13 +154,13 @@ func negativePrelude() []ast.Decl {
 				{
 					Name: "exit_to_owned_hardware",
 					Params: []ast.Param{
-						{Name: "self", Type: "DelegatedHardware", Span: source.Span{}},
+						{Name: "self", Type: ast.TypeRef{Name: "DelegatedHardware"}, Span: source.Span{}},
 					},
-					Return: "OwnedHardware",
+					Return: ast.TypeRef{Name: "OwnedHardware"},
 					Body: []ast.Stmt{
 						&ast.ReturnStmt{
 							Value: &ast.ConstructorExpr{
-								Type:  "OwnedHardware",
+								Type:  ast.TypeRef{Name: "OwnedHardware"},
 								Args:  nil,
 								SpanV: source.Span{},
 							},

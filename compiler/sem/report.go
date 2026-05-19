@@ -261,7 +261,12 @@ func appendTopicsToReportAndAudit(r *report.ImageReport, g ImageGraph) {
 	for _, topic := range g.Topics {
 		r.Runtime.Topics = append(r.Runtime.Topics, report.TopicReport{
 			Label:       topic.Label,
+			Type:        topic.Type,
+			TypeKey:     topic.TypeKey,
 			PayloadType: reportPayloadType(topic.PayloadType),
+			PayloadKey:  topic.PayloadKey,
+			NextType:    topic.NextType,
+			NextKey:     topic.NextKey,
 			Bytes:       topic.PayloadSize,
 			Align:       topic.PayloadAlign,
 			Depth:       topic.Depth,

@@ -156,10 +156,10 @@ executor ConsoleExec {
 	if len(ds) != 0 {
 		t.Fatalf("index diagnostics: %#v", ds)
 	}
-	if got := idx.InterruptEvent("index.interrupt_symbols", "SerialConsolePath"); got == nil || got.EventType != "SerialInterrupt" {
+	if got := idx.InterruptEvent("index.interrupt_symbols", "SerialConsolePath"); got == nil || got.EventType.Name != "SerialInterrupt" {
 		t.Fatalf("interrupt event = %#v, want SerialInterrupt", got)
 	}
-	if got := idx.OnHandler("index.interrupt_symbols", "ConsoleExec", "serial"); got == nil || got.ParamType != "SerialInterrupt" {
+	if got := idx.OnHandler("index.interrupt_symbols", "ConsoleExec", "serial"); got == nil || got.ParamType.Name != "SerialInterrupt" {
 		t.Fatalf("on handler = %#v, want SerialInterrupt", got)
 	}
 }

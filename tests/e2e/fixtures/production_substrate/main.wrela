@@ -8,11 +8,13 @@ use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan,
 use { EventSleepPolicy, HotPollPolicy } from machine.x86_64.executor_loop
 use { Bytes } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { EduInterruptTopic, EduMsiPath } from machine.x86_64.edu
+use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
-use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellTopic } from machine.x86_64.ivshmem
-use { SerialDriver, SerialRxTopic, SerialWriterRegisters } from machine.x86_64.serial
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } from machine.x86_64.ivshmem
+use { SerialDriver, SerialWriterRegisters } from machine.x86_64.serial
+use { Topic } from machine.x86_64.topic
+use { Option } from wrela.lang.core
 use { TopicIdentity } from machine.x86_64.topic_u64
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 
@@ -54,12 +56,16 @@ image ProductionSubstrate {
             length = 0x200000,
             align = 4096
         )
-        let serial_irq_queue = root_arena.interrupt_queue(
+        let serial_irq_slots = console_memory_seed.reserve_array(U8, count = 64)
+        let serial_irq_queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = console_slot_seed,
+            slots = serial_irq_slots,
             capacity = 64,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 0)
+            overflow = InterruptOverflowPolicy(mode = 0),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
         let interrupts = discovery.interrupts
         let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
@@ -131,9 +137,10 @@ image ProductionSubstrate {
             owner = console_slot,
             memory = hardware.hardware_plan.console_memory
         )
-        let serial_rx_topic = SerialRxTopic(
+        let serial_rx_topic = Topic<U8>(
             identity = TopicIdentity(label = "production.console.rx"),
-            id = 0
+            id = 0,
+            depth = 64
         )
         let serial_path = serial_driver.create_console_path(
             identity = PathIdentity(label = "production.console"),
@@ -143,13 +150,15 @@ image ProductionSubstrate {
         let serial_irq_source = hardware.hardware_plan.interrupts.serial_irq_source
         let serial_irq_queue = hardware.hardware_plan.serial_irq_queue
         serial_path.write(console_memory.bytes(value = "discovery: memory=selected lapic=selected ioapic=selected pci=selected\n"))
-        let edu_interrupt_topic = EduInterruptTopic(
+        let edu_interrupt_topic = Topic<EduInterrupt>(
             identity = TopicIdentity(label = "production.edu.interrupt"),
-            id = 1
+            id = 1,
+            depth = 64
         )
-        let ivshmem_topic = IvshmemDoorbellTopic(
+        let ivshmem_topic = Topic<IvshmemDoorbellInterrupt>(
             identity = TopicIdentity(label = "production.ivshmem.doorbell"),
-            id = 2
+            id = 2,
+            depth = 64
         )
         let serial_rx = serial_rx_topic.subscribe(subscriber = console_slot)
         let edu_interrupts = edu_interrupt_topic.subscribe(subscriber = console_slot)

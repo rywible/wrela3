@@ -147,6 +147,21 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix data in v0")
 		}
 		return p.parseDataDecl()
+	case lex.KeywordEnum:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix enum in v0")
+		}
+		return p.parseEnumDecl()
+	case lex.KeywordTrait:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "trait may not be unique in v0")
+		}
+		return p.parseTraitDecl()
+	case lex.KeywordImpl:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "impl may not be unique in v0")
+		}
+		return p.parseImplDecl()
 	case lex.KeywordClass:
 		return p.parseClassDecl(unique)
 	case lex.KeywordDriver:
@@ -168,11 +183,137 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "image may not be unique")
 		}
 		return p.parseImageDecl()
+	case lex.KeywordConst:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix const in v0")
+		}
+		return p.parseConstDecl()
+	case lex.KeywordStaticAssert:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix static_assert in v0")
+		}
+		return p.parseStaticAssertDecl()
 	case lex.KeywordFn:
 		return nil, p.err(p.peek(), diag.PAR0002, "module-scope fn is not allowed in v0")
 	default:
 		return nil, p.err(p.peek(), diag.PAR0002, "expected declaration")
 	}
+}
+
+func (p *Parser) parseEnumDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected enum name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	var variants []ast.EnumVariant
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		variantName, ds := p.expectIdentifier("expected enum variant name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		spanEnd := variantName.End
+		var fields []ast.Field
+		if p.match(lex.LParen) {
+			variantFields, ds := p.parseFieldListUntil(lex.RParen)
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			fields = variantFields
+			spanEnd = p.previous().End
+		}
+		variants = append(variants, ast.EnumVariant{
+			Name:   variantName.Text,
+			Fields: fields,
+			Span:   p.span(variantName.Start, spanEnd),
+		})
+		p.match(lex.Comma)
+	}
+	if !p.match(lex.RBrace) {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected '}' after enum variants")
+	}
+	return &ast.EnumDecl{
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Variants:   variants,
+		SpanV:      p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseConstDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected const name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
+		return nil, ds
+	}
+	typeRef, ds := p.parseTypeRef()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.ConstDecl{
+		Name:  name.Text,
+		Type:  typeRef,
+		Value: value,
+		SpanV: p.span(start.Start, value.Span().End),
+	}, nil
+}
+
+func (p *Parser) parseStaticAssertDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	if !p.match(lex.LParen) {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected '(' after static_assert")
+	}
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Comma); len(ds) != 0 {
+		return nil, ds
+	}
+	name, ds := p.expectIdentifier("expected message argument")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if name.Text != "message" {
+		return nil, p.err(name, diag.PAR0001, "expected message argument")
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	msgTok := p.nextIf(lex.String)
+	if msgTok.Kind != lex.String {
+		return nil, p.err(msgTok, diag.PAR0001, "expected message string in static_assert")
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.StaticAssertDecl{
+		Expr:    expr,
+		Message: msgTok.Text,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
 }
 
 func (p *Parser) parseDataDecl() (ast.Decl, []diag.Diagnostic) {
@@ -181,15 +322,25 @@ func (p *Parser) parseDataDecl() (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	where, ds := p.parseWhereClause()
+	if len(ds) != 0 {
+		return nil, ds
+	}
 	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeClass)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.DataDecl{
-		Name:    name.Text,
-		Fields:  fields,
-		Methods: methods,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Where:      where,
+		Fields:     fields,
+		Methods:    methods,
+		SpanV:      p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -199,16 +350,26 @@ func (p *Parser) parseClassDecl(unique bool) (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	where, ds := p.parseWhereClause()
+	if len(ds) != 0 {
+		return nil, ds
+	}
 	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeClass)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.ClassDecl{
-		Name:    name.Text,
-		Fields:  fields,
-		Methods: methods,
-		Unique:  unique,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Where:      where,
+		Fields:     fields,
+		Methods:    methods,
+		Unique:     unique,
+		SpanV:      p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -218,16 +379,26 @@ func (p *Parser) parseDriverDecl(unique bool) (ast.Decl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return nil, ds
 	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	where, ds := p.parseWhereClause()
+	if len(ds) != 0 {
+		return nil, ds
+	}
 	fields, methods, _, _, _, ds := p.parseCompositeMembers(compositeDriver)
 	if len(ds) != 0 {
 		return nil, ds
 	}
 	return &ast.DriverDecl{
-		Name:    name.Text,
-		Fields:  fields,
-		Methods: methods,
-		Unique:  unique,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Where:      where,
+		Fields:     fields,
+		Methods:    methods,
+		Unique:     unique,
+		SpanV:      p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -373,7 +544,7 @@ func (p *Parser) parsePhaseDecl() (*ast.PhaseDecl, []diag.Diagnostic) {
 	if !p.match(lex.Arrow) {
 		return nil, p.err(p.peek(), diag.PAR0001, "expected '->' in phase declaration")
 	}
-	ret, ds := p.parseTypeName()
+	retType, ds := p.parseTypeRef()
 	if len(ds) != 0 {
 		return nil, ds
 	}
@@ -386,7 +557,7 @@ func (p *Parser) parsePhaseDecl() (*ast.PhaseDecl, []diag.Diagnostic) {
 	return &ast.PhaseDecl{
 		Name:   nameTok.Text,
 		Params: params,
-		Return: ret,
+		Return: retType,
 		Body:   body,
 		SpanV:  p.span(start.Start, p.previous().End),
 	}, nil
@@ -476,7 +647,7 @@ func (p *Parser) parseInterruptEventDecl() (ast.InterruptEventDecl, []diag.Diagn
 	if _, ds := p.consume(lex.Arrow); len(ds) != 0 {
 		return ast.InterruptEventDecl{}, ds
 	}
-	eventType, ds := p.parseTypeName()
+	eventType, ds := p.parseTypeRef()
 	if len(ds) != 0 {
 		return ast.InterruptEventDecl{}, ds
 	}
@@ -513,7 +684,7 @@ func (p *Parser) parseOnHandlerDecl() (ast.OnHandlerDecl, []diag.Diagnostic) {
 	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 		return ast.OnHandlerDecl{}, ds
 	}
-	paramType, ds := p.parseTypeName()
+	paramType, ds := p.parseTypeRef()
 	if len(ds) != 0 {
 		return ast.OnHandlerDecl{}, ds
 	}
@@ -569,6 +740,38 @@ func (p *Parser) parseFieldContainer() ([]ast.Field, []diag.Diagnostic) {
 	return fields, nil
 }
 
+func (p *Parser) parseFieldListUntil(end lex.Kind) ([]ast.Field, []diag.Diagnostic) {
+	var fields []ast.Field
+	if p.match(end) {
+		return fields, nil
+	}
+	for {
+		p.skipSeparators()
+		if p.peek().Kind == end {
+			p.next()
+			return fields, nil
+		}
+		field, ds := p.parseFieldDecl()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		fields = append(fields, field)
+		p.skipSeparators()
+		if p.match(lex.Comma) {
+			p.skipSeparators()
+			if p.peek().Kind == end {
+				return nil, p.err(p.peek(), diag.PAR0001, "trailing comma")
+			}
+			continue
+		}
+		if p.peek().Kind != end {
+			return nil, p.err(p.peek(), diag.PAR0001, "expected ',' or ')' in enum variant fields")
+		}
+		p.next()
+		return fields, nil
+	}
+}
+
 func (p *Parser) parseFieldDecl() (ast.Field, []diag.Diagnostic) {
 	name, ds := p.expectIdentifier("expected field name")
 	if len(ds) != 0 {
@@ -577,7 +780,7 @@ func (p *Parser) parseFieldDecl() (ast.Field, []diag.Diagnostic) {
 	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 		return ast.Field{}, ds
 	}
-	typ, ds := p.parseDottedName()
+	typ, ds := p.parseTypeRef()
 	if len(ds) != 0 {
 		return ast.Field{}, ds
 	}
@@ -612,6 +815,10 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 	if len(ds) != 0 {
 		return ast.MethodDecl{}, ds
 	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
 	if _, ds := p.consume(lex.LParen); len(ds) != 0 {
 		return ast.MethodDecl{}, ds
 	}
@@ -622,10 +829,14 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
 		return ast.MethodDecl{}, ds
 	}
+	where, ds := p.parseWhereClause()
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
 
-	ret := ""
+	ret := ast.TypeRef{}
 	if p.match(lex.Arrow) {
-		retType, ds := p.parseTypeName()
+		retType, ds := p.parseTypeRef()
 		if len(ds) != 0 {
 			return ast.MethodDecl{}, ds
 		}
@@ -638,13 +849,15 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 			return ast.MethodDecl{}, ds
 		}
 		return ast.MethodDecl{
-			Name:    name.Text,
-			Params:  params,
-			Return:  ret,
-			Asm:     &body,
-			IsAsm:   true,
-			IsStart: isStart,
-			SpanV:   p.span(start.Start, p.previous().End),
+			Name:       name.Text,
+			TypeParams: typeParams,
+			Where:      where,
+			Params:     params,
+			Return:     ret,
+			Asm:        &body,
+			IsAsm:      true,
+			IsStart:    isStart,
+			SpanV:      p.span(start.Start, p.previous().End),
 		}, nil
 	}
 
@@ -653,13 +866,15 @@ func (p *Parser) parseMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
 		return ast.MethodDecl{}, ds
 	}
 	return ast.MethodDecl{
-		Name:    name.Text,
-		Params:  params,
-		Return:  ret,
-		Body:    body,
-		IsAsm:   false,
-		IsStart: isStart,
-		SpanV:   p.span(start.Start, p.previous().End),
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Where:      where,
+		Params:     params,
+		Return:     ret,
+		Body:       body,
+		IsAsm:      false,
+		IsStart:    isStart,
+		SpanV:      p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -676,7 +891,7 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 			return nil, ds
 		}
 		if name.Text == "self" && len(params) == 0 && p.peek().Kind != lex.Colon {
-			params = append(params, ast.Param{Name: name.Text, Type: "", Span: p.span(name.Start, name.End)})
+			params = append(params, ast.Param{Name: name.Text, Type: ast.TypeRef{}, Span: p.span(name.Start, name.End)})
 			p.skipSeparators()
 			if !p.match(lex.Comma) {
 				return params, nil
@@ -690,7 +905,7 @@ func (p *Parser) parseParams() ([]ast.Param, []diag.Diagnostic) {
 		if _, ds := p.consume(lex.Colon); len(ds) != 0 {
 			return nil, ds
 		}
-		typ, ds := p.parseDottedName()
+		typ, ds := p.parseTypeRef()
 		if len(ds) != 0 {
 			return nil, ds
 		}
@@ -713,7 +928,12 @@ func (p *Parser) parseStmt() (ast.Stmt, []diag.Diagnostic) {
 	case lex.KeywordReturn:
 		return p.parseReturnStmt()
 	case lex.KeywordIf:
+		if p.peekN(1).Kind == lex.KeywordLet {
+			return p.parseIfLetStmt()
+		}
 		return p.parseIfStmt()
+	case lex.KeywordMatch:
+		return p.parseMatchStmt()
 	case lex.KeywordWhile:
 		return p.parseWhileStmt()
 	case lex.KeywordFor:
@@ -775,6 +995,117 @@ func (p *Parser) parseIfStmt() (ast.Stmt, []diag.Diagnostic) {
 		}
 	}
 	return &ast.IfStmt{Cond: cond, Then: thenBody, Else: elseBody, SpanV: p.span(start.Start, p.previous().End)}, nil
+}
+
+func (p *Parser) parseIfLetStmt() (ast.Stmt, []diag.Diagnostic) {
+	start := p.next()
+	if _, ds := p.consume(lex.KeywordLet); len(ds) != 0 {
+		return nil, ds
+	}
+	pattern, ds := p.parsePattern()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+		return nil, ds
+	}
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	body, ds := p.parseBlockStmts()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.IfLetStmt{
+		Pattern: pattern,
+		Value:   value,
+		Body:    body,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseMatchStmt() (ast.Stmt, []diag.Diagnostic) {
+	start := p.next()
+	value, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+	var arms []ast.MatchArm
+	for {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace {
+			p.next()
+			return &ast.MatchStmt{Value: value, Arms: arms, SpanV: p.span(start.Start, p.previous().End)}, nil
+		}
+		armStart := p.peek().Start
+		pat, ds := p.parsePattern()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.FatArrow); len(ds) != 0 {
+			return nil, ds
+		}
+		body, ds := p.parseBlockStmts()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		arms = append(arms, ast.MatchArm{
+			Pattern: pat,
+			Body:    body,
+			Span:    p.span(armStart, p.previous().End),
+		})
+	}
+}
+
+func (p *Parser) parsePattern() (ast.Pattern, []diag.Diagnostic) {
+	if p.peek().Kind == lex.Identifier && p.peek().Text == "_" {
+		p.next()
+		return ast.WildcardPattern{}, nil
+	}
+	enumTok, ds := p.expectIdentifier("expected enum name in pattern")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.Dot); len(ds) != 0 {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected enum variant pattern")
+	}
+	variantTok, ds := p.expectIdentifier("expected enum variant")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	pattern := ast.VariantPattern{
+		Enum:    enumTok.Text,
+		Variant: variantTok.Text,
+	}
+	if !p.match(lex.LParen) {
+		return pattern, nil
+	}
+	for {
+		name, ds := p.expectIdentifier("expected pattern field name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.Equal); len(ds) != 0 {
+			return nil, ds
+		}
+		bind, ds := p.expectIdentifier("expected pattern binding name")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		pattern.Bindings = append(pattern.Bindings, ast.PatternBinding{Name: name.Text, Bind: bind.Text})
+		if !p.match(lex.Comma) {
+			break
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return nil, ds
+	}
+	return pattern, nil
 }
 
 func (p *Parser) parseWhileStmt() (ast.Stmt, []diag.Diagnostic) {
@@ -925,6 +1256,220 @@ func (p *Parser) parseTypeName() (string, []diag.Diagnostic) {
 		return p.next().Text, nil
 	}
 	return p.parseDottedName()
+}
+
+func (p *Parser) parseTypeRef() (ast.TypeRef, []diag.Diagnostic) {
+	start := p.peek().Start
+	name, ds := p.parseTypeName()
+	if len(ds) != 0 {
+		return ast.TypeRef{}, ds
+	}
+
+	ref := ast.TypeRef{
+		Name:  name,
+		SpanV: p.span(start, p.previous().End),
+	}
+	if !p.match(lex.Less) {
+		return ref, nil
+	}
+	for {
+		arg, ds := p.parseTypeRef()
+		if len(ds) != 0 {
+			return ast.TypeRef{}, ds
+		}
+		ref.Args = append(ref.Args, arg)
+		p.skipSeparators()
+		if !p.match(lex.Comma) {
+			break
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consumeTypeGreater(); len(ds) != 0 {
+		return ast.TypeRef{}, p.err(p.peek(), diag.PAR0001, "expected '>' after type arguments")
+	}
+	ref.SpanV.End = p.previous().End
+	return ref, nil
+}
+
+func (p *Parser) consumeTypeGreater() (lex.Token, []diag.Diagnostic) {
+	if p.match(lex.Greater) {
+		return p.previous(), nil
+	}
+	if p.peek().Kind != lex.ShiftRight {
+		return lex.Token{}, p.err(p.peek(), diag.PAR0001, "expected '>' after type arguments")
+	}
+
+	shiftTok := p.next()
+	first := lex.Token{
+		Kind:  lex.Greater,
+		Text:  ">",
+		Start: shiftTok.Start,
+		End:   shiftTok.Start + 1,
+	}
+	second := lex.Token{
+		Kind:  lex.Greater,
+		Text:  ">",
+		Start: shiftTok.Start + 1,
+		End:   shiftTok.End,
+	}
+	p.toks[p.idx-1] = first
+	p.toks = append(p.toks, lex.Token{})
+	copy(p.toks[p.idx+1:], p.toks[p.idx:])
+	p.toks[p.idx] = second
+	return first, nil
+}
+
+func (p *Parser) parseTypeParams() ([]ast.TypeParam, []diag.Diagnostic) {
+	if !p.match(lex.Less) {
+		return nil, nil
+	}
+	var out []ast.TypeParam
+	for {
+		tok, ds := p.expectIdentifier("expected type parameter")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		out = append(out, ast.TypeParam{Name: tok.Text, Span: p.span(tok.Start, tok.End)})
+		p.skipSeparators()
+		if !p.match(lex.Comma) {
+			break
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.Greater); len(ds) != 0 {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected '>' after type parameters")
+	}
+	return out, nil
+}
+
+func (p *Parser) parseWhereClause() ([]ast.TraitBound, []diag.Diagnostic) {
+	if !p.match(lex.KeywordWhere) {
+		return nil, nil
+	}
+	var out []ast.TraitBound
+	for {
+		start := p.peek().Start
+		param, ds := p.expectIdentifier("expected type parameter in where clause")
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		if _, ds := p.consume(lex.Colon); len(ds) != 0 {
+			return nil, ds
+		}
+		trait, ds := p.parseTypeRef()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		out = append(out, ast.TraitBound{Param: param.Text, Trait: trait, Span: p.span(start, trait.Span().End)})
+		p.skipSeparators()
+		if !p.match(lex.Comma) {
+			break
+		}
+		p.skipSeparators()
+	}
+	return out, nil
+}
+
+func (p *Parser) parseTraitDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected trait name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+	var methods []ast.MethodDecl
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace {
+			break
+		}
+		method, ds := p.parseTraitMethodDecl()
+		if len(ds) != 0 {
+			return nil, ds
+		}
+		methods = append(methods, method)
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.TraitDecl{
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Methods:    methods,
+		SpanV:      p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseTraitMethodDecl() (ast.MethodDecl, []diag.Diagnostic) {
+	start, ds := p.consume(lex.KeywordFn)
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	name, ds := p.expectIdentifier("expected trait method name")
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	typeParams, ds := p.parseTypeParams()
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	if _, ds := p.consume(lex.LParen); len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	params, ds := p.parseParams()
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	if _, ds := p.consume(lex.RParen); len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	where, ds := p.parseWhereClause()
+	if len(ds) != 0 {
+		return ast.MethodDecl{}, ds
+	}
+	ret := ast.TypeRef{}
+	if p.match(lex.Arrow) {
+		retType, ds := p.parseTypeRef()
+		if len(ds) != 0 {
+			return ast.MethodDecl{}, ds
+		}
+		ret = retType
+	}
+	return ast.MethodDecl{
+		Name:       name.Text,
+		TypeParams: typeParams,
+		Where:      where,
+		Params:     params,
+		Return:     ret,
+		SpanV:      p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseImplDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	trait, ds := p.parseTypeRef()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consume(lex.KeywordFor); len(ds) != 0 {
+		return nil, ds
+	}
+	implemented, ds := p.parseTypeRef()
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	return &ast.ImplDecl{
+		Trait: trait,
+		For:   implemented,
+		SpanV: p.span(start.Start, implemented.Span().End),
+	}, nil
 }
 
 func (p *Parser) parseNamedArgs() ([]ast.NamedArg, []diag.Diagnostic) {

@@ -1,15 +1,15 @@
 // expect: SEM0048: publishing topic pub is missing identity
 module negative.missing_topic_identity
 
-module machine.x86_64.topic_u64
-class U64ReliableTopic { fn publisher(self) -> U64ReliablePublisher { return U64ReliablePublisher(topic = self) } }
-data U64ReliablePublisher { topic: U64ReliableTopic }
+module machine.x86_64.topic
+class ReliableTopic<T> { fn publisher(self) -> ReliablePublisher<T> { return ReliablePublisher<T>(topic = self) } }
+data ReliablePublisher<T> { topic: ReliableTopic<T> }
 
 image Bad {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
-        let counter = U64ReliableTopic()
+        let counter = ReliableTopic<U64>()
         let pub = counter.publisher()
         while true {}
     }

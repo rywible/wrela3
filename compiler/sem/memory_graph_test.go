@@ -114,7 +114,8 @@ use { CpuFeatureFacts } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { Option } from wrela.lang.core
 image MemoryNearImage {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
@@ -127,7 +128,8 @@ image MemoryNearImage {
         let console_memory = root.executor_memory(owner = ExecutorSlot(id = 1), length = 0x100000, align = 4096)
         let compat = root_region.bytes()
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
-        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let queue_slots = memory.reserve_array(U8, count = 64)
+        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = compat), executor_arena = compat, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = shared.route, serial_shared_irq4 = shared, serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))), pci = ClaimedPciPlanBuilder(panic = panic).empty(), timer = discovery.timers.require_periodic(period_us = 1000), serial_irq_queue = queue, console_memory = console_memory, worker_memory = memory, wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = false))))
     }
     phase owned_hardware(hardware: OwnedHardware) -> never { while true {} }
@@ -145,7 +147,8 @@ use { CpuFeatureFacts } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { Option } from wrela.lang.core
 use { PlacementTarget } from machine.x86_64.placement
 image MemoryNearKnownImage {
     transitions { delegated_hardware -> owned_hardware }
@@ -158,7 +161,8 @@ image MemoryNearKnownImage {
         let console_memory = root.executor_memory(owner = ExecutorSlot(id = 1), length = 0x100000, align = 4096)
         let compat = root_region.bytes()
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
-        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let queue_slots = memory.reserve_array(U8, count = 64)
+        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = compat), executor_arena = compat, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = shared.route, serial_shared_irq4 = shared, serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))), pci = ClaimedPciPlanBuilder(panic = panic).empty(), timer = discovery.timers.require_periodic(period_us = 1000), serial_irq_queue = queue, console_memory = console_memory, worker_memory = memory, wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = false))))
     }
     phase owned_hardware(hardware: OwnedHardware) -> never { while true {} }
@@ -176,7 +180,8 @@ use { CpuFeatureFacts } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes, ExecutorMemory } from machine.x86_64.executor_memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { Option } from wrela.lang.core
 image ArenaAlignmentImage {
     transitions { delegated_hardware -> owned_hardware }
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
@@ -189,7 +194,8 @@ image ArenaAlignmentImage {
         let console_memory = root.executor_memory(owner = ExecutorSlot(id = 0), length = 0x100000, align = 4096)
         let compat = root_region.bytes()
         let shared = discovery.interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
-        let queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let queue_slots = console_memory.reserve_array(U8, count = 64)
+        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = ExecutorSlot(id = 0), slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         return hardware.exit_to_owned_hardware(memory_plan = MemoryPlan(owned_memory = OwnedMemory(arena = compat), executor_arena = compat, io_ports = IoPortAuthority()), cpu_plan = CpuPlan(owned_stack_top = 0, gdt_descriptor = Bytes(address = 0, length = 0), idt_descriptor = Bytes(address = 0, length = 0), cr3 = 0), hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2), interrupts = InterruptRoutingPlan(local_apic = discovery.interrupts.local_apic, serial_irq4 = shared.route, serial_shared_irq4 = shared, serial_irq_source = shared.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))), pci = ClaimedPciPlanBuilder(panic = panic).empty(), timer = discovery.timers.require_periodic(period_us = 1000), serial_irq_queue = queue, console_memory = console_memory, worker_memory = console_memory, wake_strategy = discovery.cpus.wake_strategy(features = CpuFeatureFacts(monitor_mwait_available = false))))
     }
     phase owned_hardware(hardware: OwnedHardware) -> never { while true {} }
@@ -229,9 +235,12 @@ func TestExecutorMemoryNearRecordsFallback(t *testing.T) {
 	if executorArena.Bytes != 0x200000 || executorArena.Base != 0x200000 {
 		t.Fatalf("executor memory arena = %#v, want base 0x200000 bytes 0x200000", executorArena)
 	}
-	queueArena := arenaReportByKindForTest(r.Memory.Arenas, "interrupt_queue", "executor_slot.0")
-	if queueArena.Label != "irq.serial.rx" || queueArena.Bytes != 64*8 || queueArena.Base == 0 {
-		t.Fatalf("interrupt queue arena = %#v, want 512 bytes with nonzero base", queueArena)
+	if len(checked.ImageGraph.InterruptQueues) != 1 {
+		t.Fatalf("interrupt queues = %#v, want one typed queue", checked.ImageGraph.InterruptQueues)
+	}
+	queue := checked.ImageGraph.InterruptQueues[0]
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 64 || queue.PayloadSize != 1 || queue.PayloadAlign != 1 {
+		t.Fatalf("interrupt queue = %#v, want typed U8 payload", queue)
 	}
 }
 

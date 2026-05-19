@@ -52,11 +52,16 @@ type ExecutorSlotNode struct {
 
 type TopicNode struct {
 	Label        string
+	Type         string
+	TypeKey      string
 	Kind         string
 	Depth        uint64
 	PayloadType  string
+	PayloadKey   string
 	PayloadSize  uint64
 	PayloadAlign uint64
+	NextType     string
+	NextKey      string
 	Binding      string
 	Span         source.Span
 }

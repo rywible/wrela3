@@ -42,7 +42,7 @@ func TestParseNamedArgsUseEquals(t *testing.T) {
 	if !ok {
 		t.Fatalf("expr = %#v, want *ast.ConstructorExpr", expr)
 	}
-	if con.Type != "Device" || len(con.Args) != 1 || con.Args[0].Name != "x" {
+	if con.Type.Name != "Device" || len(con.Args) != 1 || con.Args[0].Name != "x" {
 		t.Fatalf("constructor = %#v", con)
 	}
 
@@ -93,6 +93,45 @@ func TestMethodChainMayContinueAfterNewline(t *testing.T) {
 	}
 	if call.Method != "write" {
 		t.Fatalf("method = %q, want write", call.Method)
+	}
+}
+
+func TestParseGenericConstructorExpression(t *testing.T) {
+	p := newParser("expr.wrela", "FixedBuffer<RunEvent>(slots = slots, length = 0)")
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	con, ok := expr.(*ast.ConstructorExpr)
+	if !ok {
+		t.Fatalf("expr = %#v, want *ast.ConstructorExpr", expr)
+	}
+	if got, want := con.Type.String(), "FixedBuffer<RunEvent>"; got != want {
+		t.Fatalf("constructor type = %q, want %q", got, want)
+	}
+	if len(con.Args) != 2 {
+		t.Fatalf("args = %#v, want two args", con.Args)
+	}
+}
+
+func TestGenericConstructorLookaheadDoesNotStealComparison(t *testing.T) {
+	p := newParser("expr.wrela", "a < b")
+	expr, ds := p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != "<" {
+		t.Fatalf("expr = %#v, want binary comparison", expr)
+	}
+
+	p = newParser("expr.wrela", "a < b > (c)")
+	expr, ds = p.parseExpr(0)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if _, ok := expr.(*ast.ConstructorExpr); ok {
+		t.Fatalf("expr = %#v, want comparison expression, not generic constructor", expr)
 	}
 }
 

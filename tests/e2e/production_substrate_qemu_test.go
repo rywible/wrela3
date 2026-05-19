@@ -29,7 +29,7 @@ func TestProductionSubstrateBuildsReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read report: %v", err)
 	}
-	for _, want := range []string{`"TimerTickPayload"`, `"selected_apic_mode"`, `"interrupt_queues"`, `"wake_targets"`, `"irq.serial.rx"`, `"serial.rx"`} {
+	for _, want := range []string{`"Topic<TimerTickPayload>"`, `"Option<TimerTickPayload>"`, `"selected_apic_mode"`, `"interrupt_queues"`, `"wake_targets"`, `"irq.serial.rx"`, `"serial.rx"`} {
 		if !bytes.Contains(data, []byte(want)) {
 			t.Fatalf("report missing %s:\n%s", want, data)
 		}
@@ -91,7 +91,7 @@ func TestProductionSubstrateQEMU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read report: %v", err)
 	}
-	for _, want := range []string{`"TimerTickPayload"`, `"selected_apic_mode"`, `"interrupt_queues"`, `"wake_targets"`, `"irq.serial.rx"`, `"serial.rx"`} {
+	for _, want := range []string{`"Topic<TimerTickPayload>"`, `"Option<TimerTickPayload>"`, `"selected_apic_mode"`, `"interrupt_queues"`, `"wake_targets"`, `"irq.serial.rx"`, `"serial.rx"`} {
 		if !bytes.Contains(data, []byte(want)) {
 			t.Fatalf("report missing %s:\n%s", want, data)
 		}

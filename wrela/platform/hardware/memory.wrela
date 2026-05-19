@@ -3,9 +3,8 @@ module platform.hardware.memory
 use { BootPanic } from platform.hardware.panic
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { PlacementTarget } from machine.x86_64.placement
-use { ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
+use { ExecutorMemory, MutableBytes, Slots } from machine.x86_64.executor_memory
 use { CacheArena } from machine.x86_64.cache_memory
-use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { PciDevice } from machine.x86_64.pci
 
 data ArenaIdentity {
@@ -94,43 +93,14 @@ data RootArena {
         )
     }
 
-    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer {
+    fn dma_buffer(self, owner: PciDevice, identity: ArenaIdentity, length: U64, align: U64) -> DmaBuffer<U8> {
         let child = self.child(identity = identity, length = length, align = align)
-        return DmaBuffer(
+        return DmaBuffer<U8>(
             owner = owner,
-            identity = identity,
-            bytes = MutableBytes(address = child.base, length = child.length)
+            slots = Slots<U8>(address = child.base, capacity = child.length)
         )
     }
 
-    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
-        if capacity == 0 {
-            self.region.panic.fail(code = 0xAC070001)
-        }
-        if payload.size == 0 {
-            self.region.panic.fail(code = 0xAC070001)
-        }
-        if payload.align == 0 {
-            self.region.panic.fail(code = 0xAC070001)
-        }
-        if capacity > (0 - 1) / payload.size {
-            self.region.panic.fail(code = 0xAC070001)
-        }
-        let bytes = capacity * payload.size
-        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
-        let storage = MutableBytes(address = child.base, length = child.length)
-        return InterruptQueue(
-            identity = QueueIdentity(label = identity.label),
-            owner = ExecutorSlot(id = owner.id),
-            storage = MutableBytes(address = storage.address, length = storage.length),
-            capacity = capacity,
-            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
-            overflow = InterruptOverflowPolicy(mode = overflow.mode),
-            head = 0,
-            tail = 0,
-            overflowed = false
-        )
-    }
 }
 
 data ChildArena {
@@ -175,38 +145,9 @@ data ChildArena {
         return ChildArena(root = self.root, identity = identity, base = base, length = length, next_offset = 0)
     }
 
-    fn interrupt_queue(self, identity: QueueIdentity, owner: ExecutorSlot, capacity: U64, payload: InterruptPayloadKind, overflow: InterruptOverflowPolicy) -> InterruptQueue {
-        if capacity == 0 {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
-        if payload.size == 0 {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
-        if payload.align == 0 {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
-        if capacity > (0 - 1) / payload.size {
-            self.root.region.panic.fail(code = 0xAC070001)
-        }
-        let bytes = capacity * payload.size
-        let child = self.child(identity = ArenaIdentity(label = identity.label), length = bytes, align = payload.align)
-        let storage = MutableBytes(address = child.base, length = child.length)
-        return InterruptQueue(
-            identity = QueueIdentity(label = identity.label),
-            owner = ExecutorSlot(id = owner.id),
-            storage = MutableBytes(address = storage.address, length = storage.length),
-            capacity = capacity,
-            payload = InterruptPayloadKind(kind = payload.kind, size = payload.size, align = payload.align),
-            overflow = InterruptOverflowPolicy(mode = overflow.mode),
-            head = 0,
-            tail = 0,
-            overflowed = false
-        )
-    }
 }
 
-data DmaBuffer {
+data DmaBuffer<T> {
     owner: PciDevice
-    identity: ArenaIdentity
-    bytes: MutableBytes
+    slots: Slots<T>
 }

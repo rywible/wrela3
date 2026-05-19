@@ -9,21 +9,21 @@ class ExecutorRegistry { fn claim(self, identity: SlotIdentity) -> ExecutorSlot 
 module machine.x86_64.executor_loop
 class NoGapRequiredPolicy {}
 
-module machine.x86_64.topic_u64
+module machine.x86_64.topic
 use { ExecutorSlot } from machine.x86_64.cpu_state
 data TopicIdentity { label: StringLiteral }
-class U64GapTopic { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> U64GapSubscription { ret } }
-data U64GapSubscription { topic: U64GapTopic; subscriber: ExecutorSlot }
+class Topic<T> { identity: TopicIdentity; asm fn subscribe(self, subscriber: ExecutorSlot) -> TopicSubscription<T> { ret } }
+data TopicSubscription<T> { topic: Topic<T>; subscriber: ExecutorSlot }
 
 module negative.lossy_topic_without_gap_tolerance.app
 use { ExecutorRegistry, ExecutorSlot, SlotIdentity } from machine.x86_64.cpu_state
 use { NoGapRequiredPolicy } from machine.x86_64.executor_loop
-use { TopicIdentity, U64GapSubscription, U64GapTopic } from machine.x86_64.topic_u64
+use { Topic, TopicIdentity, TopicSubscription } from machine.x86_64.topic
 
 executor Worker {
     slot: ExecutorSlot
     loop: NoGapRequiredPolicy
-    input: U64GapSubscription
+    input: TopicSubscription<U64>
     start fn run(self) -> never { while true {} }
 }
 
@@ -32,7 +32,7 @@ image Bad {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware { return hardware.exit_to_owned_hardware() }
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let slot = ExecutorRegistry().claim(identity = SlotIdentity(label = "worker"))
-        let topic = U64GapTopic(identity = TopicIdentity(label = "counter"))
+        let topic = Topic<U64>(identity = TopicIdentity(label = "counter"))
         let sub = topic.subscribe(subscriber = slot)
         let worker = Worker(slot = slot, loop = NoGapRequiredPolicy(), input = sub)
         while true {}

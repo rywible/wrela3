@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -11,8 +12,11 @@ import (
 
 func checkedProgramForTest(t *testing.T, sourceText string) *sem.CheckedProgram {
 	t.Helper()
-	file := source.NewFile(1, "interrupt_test.wrela", sourceText)
-	modules, ds := parse.ParseGraph(source.Graph{Files: []*source.File{file}})
+	files := make([]*source.File, 0, 1)
+	for _, moduleSource := range splitSourceModulesForIRTest(sourceText) {
+		files = append(files, source.NewFile(source.FileID(len(files)+1), "interrupt_test.wrela", moduleSource))
+	}
+	modules, ds := parse.ParseGraph(source.Graph{Files: files})
 	if len(ds) != 0 {
 		t.Fatalf("parse diagnostics: %#v", ds)
 	}
@@ -26,6 +30,22 @@ func checkedProgramForTest(t *testing.T, sourceText string) *sem.CheckedProgram 
 		t.Fatalf("semantic diagnostics: %#v", ds)
 	}
 	return checked
+}
+
+func splitSourceModulesForIRTest(sourceText string) []string {
+	parts := strings.Split(sourceText, "\nmodule ")
+	out := make([]string, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i != 0 {
+			part = "module " + part
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 func filterMissingImageDiagnostic(ds []diag.Diagnostic) []diag.Diagnostic {

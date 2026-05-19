@@ -2,6 +2,7 @@ package sem
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -56,11 +57,12 @@ type LifetimeRequirement struct {
 }
 
 type methodLifetimeTarget struct {
-	ModuleName string
-	Type       *Type
-	Method     ast.MethodDecl
-	ReturnType *Type
-	Context    ContextKind
+	ModuleName     string
+	Type           *Type
+	Method         ast.MethodDecl
+	SemanticMethod *Method
+	ReturnType     *Type
+	Context        ContextKind
 }
 
 // Method-summary checking uses negative synthetic scopes for abstract lifetimes.
@@ -97,6 +99,48 @@ func IsArenaType(t *Type) bool {
 	return kind == MemoryKindRootArena || kind == MemoryKindFrameArena
 }
 
+func isSlotsType(t *Type) bool {
+	return t != nil && t.Module == "machine.x86_64.executor_memory" && t.Name == "Slots" && len(t.TypeArgs) == 1
+}
+
+func isInterruptQueueType(t *Type) bool {
+	return t != nil && t.Module == "machine.x86_64.interrupt_queue" && t.Name == "InterruptQueue" && len(t.TypeArgs) == 1
+}
+
+func isSliceType(t *Type) bool {
+	return t != nil &&
+		t.Module == "machine.x86_64.executor_memory" &&
+		(t.Name == "Slice" || t.Name == "MutableSlice") &&
+		len(t.TypeArgs) == 1
+}
+
+func isProtectedViewType(t *Type) bool {
+	if isSlotsType(t) || isSliceType(t) {
+		return true
+	}
+	switch qualifiedTypeName(t) {
+	case "platform.hardware.bytes.Mmio",
+		"platform.uefi.types.FirmwareSlice",
+		"platform.hardware.bytes.Volatile",
+		"platform.hardware.memory.DmaBuffer":
+		return true
+	default:
+		return false
+	}
+}
+
+func typeHasKnownLayout(t *Type) bool {
+	_, _, ok := semanticSizeAlign(t)
+	return ok
+}
+
+func isTrustedAuthorityModule(moduleName string) bool {
+	return strings.HasPrefix(moduleName, "platform.hardware.") ||
+		strings.HasPrefix(moduleName, "platform.uefi.") ||
+		strings.HasPrefix(moduleName, "platform.acpi.") ||
+		strings.HasPrefix(moduleName, "machine.x86_64.")
+}
+
 func IsPhysicalRegionAuthorityType(t *Type) bool {
 	return t != nil && t.Module == "platform.hardware.memory" && t.Name == "PhysicalRegionAuthority"
 }
@@ -123,7 +167,7 @@ func isCanonicalFrameIntrinsic(moduleName string, typ *Type, method ast.MethodDe
 	if len(params) > 0 && params[0].Name == "self" {
 		params = params[1:]
 	}
-	return len(params) == 1 && params[0].Name == "length" && params[0].Type == "U64"
+	return len(params) == 1 && params[0].Name == "length" && legacyTypeName(params[0].Type) == "U64"
 }
 
 func (c *checker) registerMethodLifetimeTargets() {
@@ -135,6 +179,11 @@ func (c *checker) registerMethodLifetimeTargets() {
 			var typeName string
 			var methods []ast.MethodDecl
 			switch d := decl.(type) {
+			case *ast.DataDecl:
+				if len(d.TypeParams) == 0 && !hasGenericMethodDecl(d.Methods) {
+					continue
+				}
+				typeName, methods = d.Name, d.Methods
 			case *ast.ClassDecl:
 				typeName, methods = d.Name, d.Methods
 			case *ast.DriverDecl:
@@ -152,7 +201,10 @@ func (c *checker) registerMethodLifetimeTargets() {
 					continue
 				}
 				marker := ContextNormalMethod
-				returnType := c.mustType(mod.Name, method.Return)
+				var returnType *Type
+				if method.Return.Name != "" {
+					returnType, _ = c.index.LookupTypeRef(mod.Name, method.Return, typeParamMapForMethod(typ, method.TypeParams))
+				}
 				if c.isOwnershipTransferAuthority(typ) && returnType == c.ownedRoot {
 					marker = ContextOwnershipTransferAuthorityMethod
 				}
@@ -163,6 +215,30 @@ func (c *checker) registerMethodLifetimeTargets() {
 					ReturnType: returnType,
 					Context:    marker,
 				}
+			}
+		}
+	}
+	keys := append([]string(nil), c.index.InstantiationOrder...)
+	for _, key := range keys {
+		typ := c.index.Instantiations[key]
+		if typ == nil {
+			continue
+		}
+		for i := range typ.Methods {
+			method := &typ.Methods[i]
+			if method.IsAsm || len(method.TypeParams) != 0 {
+				continue
+			}
+			marker := ContextNormalMethod
+			if c.isOwnershipTransferAuthority(typ) && method.Return == c.ownedRoot {
+				marker = ContextOwnershipTransferAuthorityMethod
+			}
+			c.methodLifetimeTargets[methodLifetimeKey(typ, method.Name)] = methodLifetimeTarget{
+				ModuleName:     typ.Module,
+				Type:           typ,
+				SemanticMethod: method,
+				ReturnType:     method.Return,
+				Context:        marker,
 			}
 		}
 	}
@@ -182,7 +258,17 @@ func (c *checker) ensureMethodLifetimeSummary(key string, span source.Span) Meth
 func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifetimeTarget, span source.Span) MethodLifetimeSummary {
 	moduleName := target.ModuleName
 	typ := target.Type
+	checkType := methodReceiverTypeForCheck(typ)
 	method := target.Method
+	methodName := method.Name
+	body := method.Body
+	scope := c.newMethodLifetimeScope(moduleName, checkType, method)
+	if target.SemanticMethod != nil {
+		methodName = target.SemanticMethod.Name
+		body = target.SemanticMethod.Body
+		checkType = methodReceiverTypeForCheck(typ)
+		scope = c.newSemanticMethodLifetimeScope(checkType, target.SemanticMethod)
+	}
 	summary := MethodLifetimeSummary{ReturnFromParam: -1}
 
 	if c.methodLifetimeSummaries == nil {
@@ -198,17 +284,25 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 		return summary
 	}
 
-	scope := c.newMethodLifetimeScope(moduleName, typ, method)
 	prev := c.currentMethodSummary
 	prevPhase := c.currentPhase
 	prevType := c.currentType
+	prevMethodTypeParams := c.currentMethodTypeParams
+	prevMethodWhere := c.currentMethodWhere
 	c.currentMethodSummary = &summary
-	c.currentPhase = method.Name
-	c.currentType = typ
+	c.currentPhase = methodName
+	c.currentType = checkType
+	c.currentMethodTypeParams = typeParamMapForCheck(method.TypeParams)
+	c.currentMethodWhere = c.methodWhereBounds(moduleName, checkType, method)
+	if target.SemanticMethod != nil {
+		c.currentMethodWhere = target.SemanticMethod.Where
+	}
 	c.activeMethodSummaries[key] = true
-	terminates := c.checkStmtList(moduleName, method.Body, scope, target.ReturnType, target.Context)
+	terminates := c.checkStmtList(moduleName, body, scope, target.ReturnType, target.Context)
 	summary.Terminates = terminates
 	delete(c.activeMethodSummaries, key)
+	c.currentMethodWhere = prevMethodWhere
+	c.currentMethodTypeParams = prevMethodTypeParams
 	c.currentType = prevType
 	c.currentPhase = prevPhase
 	c.currentMethodSummary = prev
@@ -216,17 +310,46 @@ func (c *checker) checkMethodWithLifetimeSummary(key string, target methodLifeti
 	return summary
 }
 
+func (c *checker) methodWhereBounds(moduleName string, typ *Type, method ast.MethodDecl) []TraitBound {
+	if len(method.Where) == 0 || c == nil || c.index == nil {
+		return nil
+	}
+	where, ds := buildWhereBounds(c.index, moduleName, method.Where, typeParamMapForMethod(typ, method.TypeParams))
+	c.diags = append(c.diags, ds...)
+	return where
+}
+
+func methodReceiverTypeForCheck(typ *Type) *Type {
+	if typ == nil || len(typ.TypeArgs) != 0 || len(typ.TypeParams) == 0 {
+		return typ
+	}
+	args := make([]*Type, 0, len(typ.TypeParams))
+	for _, param := range typ.TypeParams {
+		args = append(args, &Type{Name: param.Name, Kind: KindTypeParam})
+	}
+	receiver := *typ
+	receiver.TypeArgs = args
+	receiver.GenericOrigin = typ
+	receiver.TypeParams = nil
+	receiver.keyCache = ""
+	return &receiver
+}
+
 func methodLifetimeKey(typ *Type, methodName string) string {
 	if typ == nil {
 		return "::" + methodName
 	}
-	return typ.Module + "." + typ.Name + "::" + methodName
+	return typ.Key() + "::" + methodName
 }
 
 func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method ast.MethodDecl) *Scope {
 	scope := NewScope(nil)
 	if len(method.Params) > 0 && method.Params[0].Name == "self" {
 		scope.Define("self", typ)
+		scope.DefineOrigin("self", localOrigin{
+			Type:                typ,
+			AuthorityProvenance: c.methodReceiverHasAuthorityProvenance(moduleName, typ, method.Name),
+		})
 		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
 	}
 	explicitIndex := 0
@@ -234,8 +357,15 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 		if p.Name == "self" {
 			continue
 		}
-		paramType := c.mustType(moduleName, p.Type)
+		paramType, _ := c.index.LookupTypeRef(moduleName, p.Type, typeParamMapForMethod(typ, method.TypeParams))
+		if paramType == nil {
+			paramType = c.mustType(moduleName, legacyTypeName(p.Type))
+		}
 		scope.Define(p.Name, paramType)
+		scope.DefineOrigin(p.Name, localOrigin{
+			Type:                paramType,
+			AuthorityProvenance: c.methodParamHasAuthorityProvenance(moduleName, typ, method, p),
+		})
 		if ClassifyMemoryType(paramType) == MemoryKindFrameArena {
 			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
 		} else if parameterCanCarryHiddenLifetime(paramType) {
@@ -248,6 +378,87 @@ func (c *checker) newMethodLifetimeScope(moduleName string, typ *Type, method as
 	return scope
 }
 
+func (c *checker) newSemanticMethodLifetimeScope(typ *Type, method *Method) *Scope {
+	scope := NewScope(nil)
+	if method == nil {
+		return scope
+	}
+	if len(method.Params) > 0 && method.Params[0].Name == "self" {
+		scope.Define("self", typ)
+		scope.DefineOrigin("self", localOrigin{
+			Type:                typ,
+			AuthorityProvenance: c.methodReceiverHasAuthorityProvenance(typ.Module, typ, method.Name),
+		})
+		scope.DefineLifetime("self", Lifetime{Kind: LifetimeFrame, Scope: methodReceiverLifetimeScope})
+	}
+	explicitIndex := 0
+	for _, p := range method.Params {
+		if p.Name == "self" {
+			continue
+		}
+		scope.Define(p.Name, p.Type)
+		scope.DefineOrigin(p.Name, localOrigin{Type: p.Type})
+		if ClassifyMemoryType(p.Type) == MemoryKindFrameArena {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else if parameterCanCarryHiddenLifetime(p.Type) {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeFrame, Scope: -(explicitIndex + 1)})
+		} else {
+			scope.DefineLifetime(p.Name, Lifetime{Kind: LifetimeExecutorRoot})
+		}
+		explicitIndex++
+	}
+	return scope
+}
+
+func (c *checker) methodParamHasAuthorityProvenance(moduleName string, typ *Type, method ast.MethodDecl, param ast.Param) bool {
+	if c == nil || param.Name == "" {
+		return false
+	}
+	switch {
+	case qualifiedTypeName(typ) == "platform.acpi.tables.AcpiHelpers" &&
+		method.Name == "table_at" &&
+		param.Name == "address":
+		return true
+	case qualifiedTypeName(typ) == "platform.acpi.root.AcpiLocator" &&
+		method.Name == "find" &&
+		param.Name == "tables":
+		return true
+	case qualifiedTypeName(typ) == "platform.hardware.discovery.PlatformDiscoveryRoot" &&
+		method.Name == "from_uefi" &&
+		param.Name == "hardware":
+		return true
+	case qualifiedTypeName(typ) == "platform.hardware.memory.RootArena" &&
+		method.Name == "dma_buffer" &&
+		param.Name == "owner":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasGenericMethodDecl(methods []ast.MethodDecl) bool {
+	for _, method := range methods {
+		if len(method.TypeParams) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *checker) methodReceiverHasAuthorityProvenance(moduleName string, typ *Type, methodName string) bool {
+	if IsPhysicalRegionAuthorityType(typ) || IsArenaAuthorityType(typ) || IsDMABufferAuthorityType(typ) {
+		return true
+	}
+	switch qualifiedTypeName(typ) {
+	case "platform.uefi.transition.DelegatedHardware",
+		"platform.uefi.types.UefiConfigurationTables",
+		"platform.acpi.root.AcpiRoot":
+		return true
+	default:
+		return false
+	}
+}
+
 func parameterCanCarryHiddenLifetime(typ *Type) bool {
 	return typeCanCarryHiddenLifetime(typ) || primitiveCanCarryHiddenLifetime(typ)
 }
@@ -255,6 +466,9 @@ func parameterCanCarryHiddenLifetime(typ *Type) bool {
 func typeCanCarryHiddenLifetime(typ *Type) bool {
 	if isValueOnlyAuthorityRecord(typ) {
 		return false
+	}
+	if isSlotsType(typ) || isSliceType(typ) {
+		return true
 	}
 	return typ != nil && (typ.Kind == KindData || typ.Kind == KindClass || ClassifyMemoryType(typ) == MemoryKindFrameArena)
 }
@@ -264,7 +478,6 @@ func isValueOnlyAuthorityRecord(typ *Type) bool {
 	case "machine.x86_64.executor_slot.ExecutorSlot",
 		"machine.x86_64.cpu_state.ExecutorSlot",
 		"machine.x86_64.interrupt_queue.QueueIdentity",
-		"machine.x86_64.interrupt_queue.InterruptPayloadKind",
 		"machine.x86_64.interrupt_queue.InterruptOverflowPolicy",
 		"machine.x86_64.interrupts.InterruptSourceIdentity",
 		"machine.x86_64.interrupts.InterruptVector":
@@ -515,6 +728,17 @@ func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifeti
 	}
 }
 
+func (c *checker) rejectViewLifetimeEscape(span source.Span, typ *Type, value, target Lifetime) bool {
+	if !typeCanCarryHiddenLifetimeThroughFieldsOrArgs(typ) {
+		return false
+	}
+	if c.lifetimeShorterThan(value, target) {
+		c.error(span, diag.SEM0091, "slots or slice lifetime escapes")
+		return true
+	}
+	return false
+}
+
 func (c *checker) recordLifetimeRequirement(value, target Lifetime) bool {
 	if c.currentMethodSummary == nil {
 		return false
@@ -545,6 +769,40 @@ func (c *checker) recordLifetimeRequirement(value, target Lifetime) bool {
 	}
 	c.currentMethodSummary.RootRequirements = append(c.currentMethodSummary.RootRequirements, requirement)
 	return true
+}
+
+func typeCanCarryHiddenLifetimeThroughFieldsOrArgs(typ *Type) bool {
+	return typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(typ, map[*Type]bool{})
+}
+
+func typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(typ *Type, seen map[*Type]bool) bool {
+	if isValueOnlyAuthorityRecord(typ) {
+		return false
+	}
+	if isSlotsType(typ) || isSliceType(typ) {
+		return true
+	}
+	if typ == nil {
+		return false
+	}
+	if typ.Kind != KindData && typ.Kind != KindClass {
+		return false
+	}
+	if seen[typ] {
+		return false
+	}
+	seen[typ] = true
+	for _, arg := range typ.TypeArgs {
+		if typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(arg, seen) {
+			return true
+		}
+	}
+	for _, field := range typ.Fields {
+		if typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(field.Type, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target Lifetime) bool {
@@ -657,13 +915,16 @@ func stricterSameScopeLifetime(a, b Lifetime) Lifetime {
 func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) *Type {
 	recvType := c.typeExpr(moduleName, expr.Receiver, scope, ctx)
 	if !IsArenaType(recvType) {
+		if expr.Method == "reserve_array" {
+			c.error(expr.SpanV, diag.SEM0021, "reserve_array receiver must be ExecutorMemory or ArenaFrame")
+		}
 		return nil
 	}
 	receiverLifetime := c.lifetimeOfExpr(expr.Receiver, scope)
 	if receiverLifetime.Kind == LifetimeUnknown {
 		receiverLifetime = Lifetime{Kind: LifetimeExecutorRoot}
 	}
-	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve") {
+	if ctx == ContextOnHandler && (expr.Method == "place" || expr.Method == "reserve" || expr.Method == "reserve_array") {
 		c.error(expr.SpanV, diag.SEM0016, "on handler cannot place or reserve arena memory")
 		return nil
 	}
@@ -692,8 +953,76 @@ func (c *checker) typeArenaIntrinsicCall(moduleName string, expr *ast.CallExpr, 
 		c.requireReserveArgs(moduleName, expr, scope, ctx)
 		c.rememberLifetime(expr, receiverLifetime)
 		return c.resolveType("machine.x86_64.executor_memory", "MutableBytes")
+	case "reserve_array":
+		elemType, ok := c.firstArgAsType(moduleName, expr.Args)
+		if !ok {
+			c.error(expr.SpanV, diag.SEM0078, "reserve_array first argument must be a type")
+			return nil
+		}
+		if !typeHasKnownLayout(elemType) {
+			c.error(expr.SpanV, diag.SEM0080, "reserve_array element type must have known layout")
+			return nil
+		}
+		c.requireReserveArrayArgs(moduleName, expr, scope, ctx, elemType)
+		slotsType := c.index.instantiateByName("machine.x86_64.executor_memory", "Slots", []*Type{elemType})
+		if slotsType == nil {
+			c.error(expr.SpanV, diag.SEM0002, "unknown type Slots")
+			return nil
+		}
+		for _, d := range c.index.completeInstantiation(slotsType.Key(), map[string]bool{}) {
+			c.diags = append(c.diags, d)
+		}
+		c.rememberLifetime(expr, receiverLifetime)
+		return slotsType
 	default:
 		return nil
+	}
+}
+
+func (c *checker) firstArgAsType(moduleName string, args []ast.NamedArg) (*Type, bool) {
+	if len(args) == 0 || args[0].Name != "" {
+		return nil, false
+	}
+	params := c.currentTypeParamMap()
+	switch value := args[0].Value.(type) {
+	case *ast.NameExpr:
+		if typ := params[value.Name]; typ != nil {
+			return typ, true
+		}
+		typ, ok := c.index.lookupBaseType(moduleName, value.Name)
+		return typ, ok
+	case *ast.TypeOperandExpr:
+		typ, ds := c.index.LookupTypeRef(moduleName, value.Type, params)
+		if len(ds) != 0 {
+			c.diags = append(c.diags, ds...)
+			return nil, false
+		}
+		return typ, typ != nil
+	default:
+		return nil, false
+	}
+}
+
+func (c *checker) requireReserveArrayArgs(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind, elemType *Type) {
+	if len(expr.Args) != 2 || expr.Args[0].Name != "" || expr.Args[1].Name != "count" {
+		c.error(expr.SpanV, diag.SEM0090, "reserve_array expects a type and count")
+		return
+	}
+	u64 := c.mustType(moduleName, "U64")
+	countType := c.typeExpr(moduleName, expr.Args[1].Value, scope, ctx)
+	if countType != nil && !typesCompatible(u64, countType) {
+		c.error(expr.Args[1].Value.Span(), diag.SEM0090, "reserve_array count must be U64")
+	}
+	countValue, ok := c.constValueOfExpr(moduleName, expr.Args[1].Value)
+	if !ok {
+		return
+	}
+	elemSize, _, ok := semanticSizeAlign(elemType)
+	if !ok || elemSize == 0 {
+		return
+	}
+	if countValue > ^uint64(0)/elemSize {
+		c.error(expr.SpanV, diag.SEM0090, "slot count overflows reservation size")
 	}
 }
 
@@ -713,6 +1042,25 @@ func (c *checker) requireReserveArgs(moduleName string, expr *ast.CallExpr, scop
 	}
 	if value, ok := unsignedIntegerLiteral(expr.Args[1].Value); ok && !isPowerOfTwo(value) {
 		c.error(expr.Args[1].Value.Span(), diag.SEM0027, "reserve align must be a non-zero power of two")
+	}
+}
+
+func (c *checker) constValueOfExpr(moduleName string, expr ast.Expr) (uint64, bool) {
+	switch e := expr.(type) {
+	case *ast.IntLiteral:
+		return unsignedIntegerLiteral(e)
+	case *ast.NameExpr:
+		value, ok := c.index.LookupConst(moduleName, e.Name)
+		return value.Value, ok && value.Type != nil
+	default:
+		scope := map[string]ConstValue{}
+		for name, value := range c.index.Consts[moduleName] {
+			if value.Type != nil {
+				scope[name] = value
+			}
+		}
+		value, ds := c.evalConstExpr(moduleName, expr, scope)
+		return value, len(ds) == 0
 	}
 }
 

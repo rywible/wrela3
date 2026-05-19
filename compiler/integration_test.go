@@ -429,6 +429,39 @@ func TestHelloSourceUsesArenaFrames(t *testing.T) {
 	}
 }
 
+func TestHelloUsesGenericTopicResultNames(t *testing.T) {
+	program := compileHelloProgram(t)
+	var report strings.Builder
+	report.WriteString(readRepoFile(t, "examples/hello/main.wrela"))
+	report.WriteString(readRepoFile(t, "examples/hello/program.wrela"))
+	for key, info := range program.Types {
+		report.WriteString(key)
+		report.WriteString(info.Name)
+	}
+	text := report.String()
+
+	for _, forbidden := range []string{
+		oldConcreteName("TimerTick", "Next"),
+		oldConcreteName("SerialRx", "Next"),
+		oldConcreteName("EduInterrupt", "Next"),
+		oldConcreteName("IvshmemDoorbell", "Next"),
+		oldConcreteName("U64Topic", "Next"),
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("report still contains concrete next type %s", forbidden)
+		}
+	}
+	for _, want := range []string{"machine.x86_64.topic.Topic[machine.x86_64.topic_payload.TimerTickPayload]", "wrela.lang.core.Option[machine.x86_64.topic_payload.TimerTickPayload]", "FixedBuffer<RunEvent>"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("report missing %s", want)
+		}
+	}
+}
+
+func oldConcreteName(prefix, suffix string) string {
+	return prefix + suffix
+}
+
 func TestSerialRXEnablementIsCentralized(t *testing.T) {
 	serialSource := readRepoFile(t, "wrela/machine/x86_64/serial.wrela")
 	if !strings.Contains(serialSource, "let console_path = SerialConsolePath(") {
@@ -519,6 +552,16 @@ func TestProductionSourcesUseExplicitExecutorContracts(t *testing.T) {
 	}
 }
 
+func TestProductionSourcesUseTypedInterruptQueues(t *testing.T) {
+	forbidden := []string{
+		".interrupt_queue(",
+		"payload = InterruptPayloadKind(",
+	}
+	for _, root := range []string{"examples", filepath.Join("tests", "e2e", "fixtures"), "wrela"} {
+		scanRepoSourceTree(t, root, forbidden)
+	}
+}
+
 func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 	source := readRepoFile(t, "wrela/platform/hardware/memory.wrela")
 	if !strings.Contains(source, "data RootArena") || !strings.Contains(source, "data ChildArena") {
@@ -548,18 +591,12 @@ func TestArenaSourceShapeKeepsChildAtMonotonic(t *testing.T) {
 	}
 
 	for _, typeName := range []string{"RootArena", "ChildArena"} {
-		methodSource := methodSourceForTypeFromDataDecl(source, typeName, "interrupt_queue")
-		if methodSource == "" {
-			t.Fatalf("missing %s.interrupt_queue method", typeName)
+		if methodSourceForTypeFromDataDecl(source, typeName, "interrupt_queue") != "" {
+			t.Fatalf("%s.interrupt_queue should not keep the old manual payload queue helper", typeName)
 		}
-		overflowGuard := "if capacity > (0 - 1) / payload.size"
-		multiply := "let bytes = capacity * payload.size"
-		if !strings.Contains(methodSource, overflowGuard) {
-			t.Fatalf("%s.interrupt_queue must reject backing-size overflow before multiplying capacity by payload.size", typeName)
-		}
-		if strings.Index(methodSource, overflowGuard) > strings.Index(methodSource, multiply) {
-			t.Fatalf("%s.interrupt_queue must check backing-size overflow before computing backing bytes", typeName)
-		}
+	}
+	if strings.Contains(source, "InterruptPayloadKind") {
+		t.Fatal("memory source should not expose manual interrupt queue payload metadata")
 	}
 }
 

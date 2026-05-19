@@ -75,7 +75,7 @@ data AcpiRoot {
             self.panic.fail(code = 0xAC010006)
         }
         let found_table = helpers.table_at(address = found_address)
-        let table_bytes = PhysicalBytes(address = found_table.address, length = found_table.length, panic = self.panic).bounded()
+        let table_bytes = found_table.view.bytes
         if helpers.checksum_ok(bytes = table_bytes) == false {
             self.panic.fail(code = 0xAC010005)
         }

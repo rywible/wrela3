@@ -60,6 +60,35 @@ func mustCheck(t *testing.T, index *Index, modules []*ast.Module) *CheckedProgra
 	return checked
 }
 
+func mustBuildIndexAllowingMissingImage(t *testing.T, modules []*ast.Module) *Index {
+	t.Helper()
+	index, ds := BuildIndex(modules)
+	filtered := ds[:0]
+	for _, d := range ds {
+		if d.Code == diag.SEM0004 {
+			continue
+		}
+		filtered = append(filtered, d)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("index diagnostics: %#v", filtered)
+	}
+	return index
+}
+
+func checkAllowingMissingImage(t *testing.T, index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnostic) {
+	t.Helper()
+	checked, ds := Check(index, modules)
+	filtered := ds[:0]
+	for _, d := range ds {
+		if d.Code == diag.SEM0004 {
+			continue
+		}
+		filtered = append(filtered, d)
+	}
+	return checked, filtered
+}
+
 func typeDiagsForModules(t *testing.T, sourceText string) (program *CheckedProgram, diags []diag.Diagnostic) {
 	t.Helper()
 	modules := parseModulesForTest(t, sourceText)

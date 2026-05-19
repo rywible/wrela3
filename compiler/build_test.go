@@ -5,6 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ryanwible/wrela3/compiler/diag"
+	"github.com/ryanwible/wrela3/compiler/parse"
+	"github.com/ryanwible/wrela3/compiler/sem"
+	"github.com/ryanwible/wrela3/compiler/source"
 )
 
 func TestBuildRejectsReleaseMode(t *testing.T) {
@@ -56,5 +61,46 @@ func TestBuildWritesReportWhenRequested(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte(`"authority_audit"`)) {
 		t.Fatalf("report missing authority audit:\n%s", data)
+	}
+}
+
+func TestBuildImportRootsLoadCoreLanguageImports(t *testing.T) {
+	dir := t.TempDir()
+	repoRoot := resolveRepoRoot(".")
+	root := filepath.Join(dir, "main.wrela")
+	if err := os.WriteFile(root, []byte(`
+module test.core_build
+use { Option } from wrela.lang.core
+data Event { kind: U64 }
+data Holder { next: Option<Event> }
+`), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	graph, err := source.LoadGraph(source.Options{
+		RootPath: root,
+		ImportRoots: []string{
+			repoRoot,
+			filepath.Join(repoRoot, "wrela"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	modules, ds := parse.ParseGraph(*graph)
+	if len(ds) != 0 {
+		t.Fatalf("parse diagnostics: %#v", ds)
+	}
+	index, ds := sem.BuildIndex(modules)
+	filtered := ds[:0]
+	for _, d := range ds {
+		if d.Code != diag.SEM0004 {
+			filtered = append(filtered, d)
+		}
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("index diagnostics: %#v", ds)
+	}
+	if _, ok := index.Lookup("wrela.lang.core", "Option"); !ok {
+		t.Fatalf("core Option was not loaded through build import roots")
 	}
 }

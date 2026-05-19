@@ -37,6 +37,7 @@ const (
 	Pipe
 	Caret
 	Arrow
+	FatArrow
 	ShiftLeft
 	ShiftRight
 
@@ -66,6 +67,15 @@ const (
 	KeywordWith
 	KeywordFor
 	KeywordIn
+	KeywordEnum
+	KeywordTrait
+	KeywordImpl
+	KeywordWhere
+	KeywordConst
+	KeywordStaticAssert
+	KeywordMatch
+	KeywordSizeof
+	KeywordAlignof
 	KeywordTrue
 	KeywordFalse
 	KeywordNever
@@ -83,39 +93,49 @@ type Token struct {
 }
 
 var keywordKinds = map[string]Kind{
-	"module":      KeywordModule,
-	"use":         KeywordUse,
-	"from":        KeywordFrom,
-	"data":        KeywordData,
-	"class":       KeywordClass,
-	"unique":      KeywordUnique,
-	"driver":      KeywordDriver,
-	"path":        KeywordPath,
-	"executor":    KeywordExecutor,
-	"interrupt":   KeywordInterrupt,
-	"receiver":    KeywordReceiver,
-	"on":          KeywordOn,
-	"image":       KeywordImage,
-	"transitions": KeywordTransitions,
-	"phase":       KeywordPhase,
-	"fn":          KeywordFn,
-	"asm":         KeywordAsm,
-	"start":       KeywordStart,
-	"let":         KeywordLet,
-	"return":      KeywordReturn,
-	"if":          KeywordIf,
-	"else":        KeywordElse,
-	"while":       KeywordWhile,
-	"with":        KeywordWith,
-	"for":         KeywordFor,
-	"in":          KeywordIn,
-	"true":        KeywordTrue,
-	"false":       KeywordFalse,
-	"never":       KeywordNever,
+	"module":        KeywordModule,
+	"use":           KeywordUse,
+	"from":          KeywordFrom,
+	"data":          KeywordData,
+	"class":         KeywordClass,
+	"unique":        KeywordUnique,
+	"driver":        KeywordDriver,
+	"path":          KeywordPath,
+	"executor":      KeywordExecutor,
+	"interrupt":     KeywordInterrupt,
+	"receiver":      KeywordReceiver,
+	"on":            KeywordOn,
+	"image":         KeywordImage,
+	"transitions":   KeywordTransitions,
+	"phase":         KeywordPhase,
+	"fn":            KeywordFn,
+	"asm":           KeywordAsm,
+	"start":         KeywordStart,
+	"let":           KeywordLet,
+	"return":        KeywordReturn,
+	"if":            KeywordIf,
+	"else":          KeywordElse,
+	"while":         KeywordWhile,
+	"with":          KeywordWith,
+	"for":           KeywordFor,
+	"enum":          KeywordEnum,
+	"trait":         KeywordTrait,
+	"impl":          KeywordImpl,
+	"in":            KeywordIn,
+	"where":         KeywordWhere,
+	"const":         KeywordConst,
+	"static_assert": KeywordStaticAssert,
+	"match":         KeywordMatch,
+	"sizeof":        KeywordSizeof,
+	"alignof":       KeywordAlignof,
+	"true":          KeywordTrue,
+	"false":         KeywordFalse,
+	"never":         KeywordNever,
 }
 
 var twoCharOperators = map[string]Kind{
 	"->": Arrow,
+	"=>": FatArrow,
 	"==": EqualEqual,
 	"!=": BangEqual,
 	"<=": LessEqual,

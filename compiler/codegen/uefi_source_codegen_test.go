@@ -158,7 +158,7 @@ func TestAcpiRootRequireTableLowersChecksumAndOffsets(t *testing.T) {
 	}
 	rootSource := readCodegenRepoFile(t, "wrela/platform/acpi/root.wrela")
 	for _, want := range []string{
-		"let table_bytes = PhysicalBytes(address = found_table.address, length = found_table.length, panic = self.panic).bounded()",
+		"let table_bytes = found_table.view.bytes",
 		"helpers.checksum_ok(bytes = table_bytes)",
 		"self.panic.fail(code = 0xAC010005)",
 		"return found_table",
@@ -767,6 +767,7 @@ func readCodegenRepoFile(t *testing.T, rel string) string {
 func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 	t.Helper()
 	paths := []string{
+		filepath.Join(repoRoot, "wrela/lang/core.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/boot_services.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
@@ -784,6 +785,7 @@ func parseUEFIModuleFiles(t *testing.T, repoRoot string) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cpu_state.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/topic.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_payload.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/cache_memory.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/serial.wrela"),
@@ -811,9 +813,10 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority } from machin
 use { MemoryPlan, CpuPlan, HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
-use { InterruptOverflowPolicy, InterruptPayloadKind, QueueIdentity } from machine.x86_64.interrupt_queue
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { Option } from wrela.lang.core
 
 image UefiCodegenHarness {
     transitions { delegated_hardware -> owned_hardware }
@@ -844,7 +847,8 @@ image UefiCodegenHarness {
         let worker_memory = root_arena.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
         let serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
-        let serial_queue = root_arena.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
+        let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let hardware_plan = HardwarePlan(
             cpus = cpus,
             interrupts = InterruptRoutingPlan(

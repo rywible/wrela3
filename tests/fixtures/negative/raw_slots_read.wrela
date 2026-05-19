@@ -1,0 +1,26 @@
+// expect: SEM0093: raw Slots memory cannot be read directly
+module machine.x86_64.executor_memory
+data ExecutorMemory {
+    fn frame(self, length: U64) -> ArenaFrame {
+        return ArenaFrame()
+    }
+}
+data ArenaFrame {}
+data Slots<T> {
+    address: U64
+    capacity: U64
+}
+
+module negative.raw_slots_read
+use { ExecutorMemory } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+executor Worker {
+    memory: ExecutorMemory
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            let bad = slots.get(index = 0)
+        }
+        while true {}
+    }
+}

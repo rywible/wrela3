@@ -150,7 +150,12 @@ type PlacementReport struct {
 
 type TopicReport struct {
 	Label       string `json:"label"`
+	Type        string `json:"type,omitempty"`
+	TypeKey     string `json:"type_key,omitempty"`
 	PayloadType string `json:"payload_type"`
+	PayloadKey  string `json:"payload_key,omitempty"`
+	NextType    string `json:"next_type,omitempty"`
+	NextKey     string `json:"next_key,omitempty"`
 	Bytes       uint64 `json:"bytes"`
 	Align       uint64 `json:"align"`
 	Depth       uint64 `json:"depth"`

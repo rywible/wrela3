@@ -362,10 +362,8 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding, ctx 
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
 	emitRegRegMove(e, asm.MustLookup("r10"), asm.MustLookup("rax"))
 	emitCallReloc(e, binding.EventFunctionSymbol)
-	emitInterruptTopicPublish(e, binding, ctx)
-	if queue, ok := ctx.interruptQueues[binding.Vector]; ok {
-		emitInterruptQueuePushPayload(e, queue, binding.EventStorageSymbol, uint64(binding.EventStorageSize))
-	}
+	queue, hasQueue := ctx.interruptQueues[binding.Vector]
+	emitInterruptTopicPublish(e, binding, ctx, queue, hasQueue)
 	emitLocalApicEOI(e)
 	emitInterruptRestore(e)
 	e.emitInstruction(asm.Instruction{Mnemonic: "iretq"})
@@ -374,6 +372,31 @@ func buildInterruptDispatchUnit(symbol string, binding ir.InterruptBinding, ctx 
 		return compiledUnit{}, e.Diags
 	}
 	return compiledUnit{Symbol: symbol, Bytes: e.Code, CallReloc: e.CallReloc, DataReloc: e.DataReloc}, nil
+}
+
+func interruptQueuePayloadRangeForBinding(e *Emitter, binding ir.InterruptBinding, ctx compileContext) (uint64, uint64, bool) {
+	if binding.TopicKind != "serial_rx" {
+		return 0, uint64(binding.EventStorageSize), true
+	}
+	eventType := binding.EventType
+	if eventType.Name == "" {
+		eventType = serialOptionU8Type()
+	}
+	eventInfo, ok := ctx.typeInfo(eventType)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt event type"})
+		return 0, 0, false
+	}
+	valueField, ok := eventInfo.Fields["Some.value"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some.value field"})
+		return 0, 0, false
+	}
+	return uint64(fieldStorageOffset(valueField)), uint64(fieldStorageSize(ctx, valueField)), true
+}
+
+func serialOptionU8Type() ir.Type {
+	return ir.Type{Module: "wrela.lang.core", Name: "Option[U8]", Kind: ir.TypeKindEnum}
 }
 
 func buildInterruptQueueOnlyUnit(symbol string, queue ir.InterruptQueueLayout, ctx compileContext) (compiledUnit, []diag.Diagnostic) {
@@ -421,14 +444,10 @@ func emitLoadInterruptPathReceiver(e *Emitter, binding ir.InterruptBinding) {
 	}})
 }
 
-func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx compileContext) {
+func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx compileContext, queue ir.InterruptQueueLayout, hasQueue bool) {
 	layout, ok := ctx.topicLayouts[binding.TopicLabel]
 	if !ok {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + binding.TopicLabel})
-		return
-	}
-	if binding.EventStorageSize > cacheLineSize-8 {
-		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "interrupt event payload exceeds topic slot capacity"})
 		return
 	}
 
@@ -438,27 +457,49 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	mask := asm.MustLookup("rdx")
 	src := asm.MustLookup("rsi")
 	skipPublish := e.newLabel("interrupt_topic_publish_skip")
+	payloadOffset := 0
+	payloadSize := binding.EventStorageSize
 
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), topicDataSymbol(binding.TopicLabel))
 	emitRegRegMove(e, base, asm.MustLookup("rax"))
 	emitMovDataAddressToReg(e, asm.MustLookup("rax"), binding.EventStorageSymbol)
 	emitRegRegMove(e, src, asm.MustLookup("rax"))
 	if binding.TopicKind == "serial_rx" {
-		eventInfo, ok := ctx.typeInfo(ir.Type{Name: "SerialPathInterrupt", Module: "machine.x86_64.serial", Kind: ir.TypeKindData})
+		eventType := binding.EventType
+		if eventType.Name == "" {
+			eventType = serialOptionU8Type()
+		}
+		eventInfo, ok := ctx.typeInfo(eventType)
 		if !ok {
 			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt event type"})
 			return
 		}
-		hasByte, ok := eventInfo.Fields["has_byte"]
+		tagField, ok := eventInfo.Fields["$tag"]
 		if !ok {
-			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt has_byte field"})
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt option tag field"})
+			return
+		}
+		someVariant, ok := enumVariantInfo(eventInfo, "Some")
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some variant"})
+			return
+		}
+		valueField, ok := eventInfo.Fields["Some.value"]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing serial interrupt Some.value field"})
 			return
 		}
 		emitMovImmToReg(e, mask, 0)
-		emitLoadMemToReg(e, mask, src, int64(hasByte.Offset), 8)
-		emitMovImmToReg(e, asm.MustLookup("rdi"), 0)
+		emitLoadMemToReg(e, mask, src, int64(fieldStorageOffset(tagField)), 64)
+		emitMovImmToReg(e, asm.MustLookup("rdi"), int64(someVariant.Discriminant))
 		emitCmpRegReg(e, mask, asm.MustLookup("rdi"))
-		e.emitJcc(0x84, skipPublish)
+		e.emitJcc(0x85, skipPublish)
+		payloadOffset = fieldStorageOffset(valueField)
+		payloadSize = fieldStorageSize(ctx, valueField)
+	}
+	if uint64(payloadSize) > layout.PayloadSize {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "interrupt event payload exceeds topic payload size"})
+		return
 	}
 	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
 	emitRegRegMove(e, slot, seq)
@@ -469,10 +510,16 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
-	emitCopyBytes(e, slot, 8, src, 0, binding.EventStorageSize)
+	emitCopyBytes(e, slot, 8, src, int64(payloadOffset), payloadSize)
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
 	emitTouchSubscriberWaitlinesAndWakeSkippingVcpu(e, layout, base, seq, binding.SubscriberSlots, ctx, 0)
+	if hasQueue {
+		payloadOffset, payloadSize, ok := interruptQueuePayloadRangeForBinding(e, binding, ctx)
+		if ok {
+			emitInterruptQueuePushPayload(e, queue, binding.EventStorageSymbol, payloadOffset, payloadSize)
+		}
+	}
 	e.bindLabel(skipPublish)
 }
 
@@ -700,12 +747,28 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitStringLiteral(e, v, frame)
 			case *ir.Construct:
 				emitConstruct(e, v, frame)
+			case *ir.EnumConstruct:
+				emitEnumConstruct(e, v, frame)
+			case *ir.EnumVariantTest:
+				emitEnumVariantTest(e, v, frame)
+			case *ir.EnumPayloadExtract:
+				emitEnumPayloadExtract(e, v, frame)
 			case *ir.FrameBegin:
 				emitFrameBegin(e, v, frame)
 			case *ir.ArenaReserve:
 				emitArenaReserve(e, v, frame)
+			case *ir.ArenaReserveArray:
+				emitArenaReserveArray(e, v, frame)
 			case *ir.ArenaPlace:
 				emitArenaPlace(e, v, frame)
+			case *ir.SlotWrite:
+				emitSlotWrite(e, v, frame)
+			case *ir.SlotFill:
+				emitSlotFill(e, v, frame)
+			case *ir.SliceGet:
+				emitSliceGet(e, v, frame)
+			case *ir.SliceSet:
+				emitSliceSet(e, v, frame)
 			case *ir.FrameEnd:
 				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
@@ -942,20 +1005,28 @@ func needsObjectSlot(ctx compileContext, value ir.Value) bool {
 	switch v := value.(type) {
 	case *ir.Construct, *ir.StringLiteral:
 		return true
-	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaPlace:
+	case *ir.EnumConstruct:
+		return true
+	case *ir.EnumPayloadExtract:
+		return ctx.isHandleTypeKind(valueType(v).Kind) || ctx.isHandleType(valueType(v).Name)
+	case *ir.SliceGet:
+		return ctx.isDataType(v.Type)
+	case *ir.SlotFill:
+		return true
+	case *ir.FrameBegin, *ir.ArenaReserve, *ir.ArenaReserveArray, *ir.ArenaPlace:
 		return true
 	case *ir.Call:
 		return ctx.shouldPassRecordReturn(v.Type)
 	case *ir.FieldLoad:
 		return ctx.isDataType(v.Type)
 	case *ir.ReliableTopicTryPublish:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case ir.ReliableTopicTryPublish:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case *ir.TopicTryNext:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case ir.TopicTryNext:
-		return ctx.isDataType(v.Type)
+		return ctx.shouldPassRecordReturn(v.Type)
 	case *ir.VcpuStart:
 		return ctx.isDataType(v.Type)
 	case ir.VcpuStart:
@@ -1044,13 +1115,25 @@ func valueSize(ctx compileContext, value ir.Value) int {
 		return ctx.representationSize(v.Type.Name)
 	case *ir.Construct:
 		return ctx.representationSize(v.Type.Name)
+	case *ir.EnumConstruct:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.EnumVariantTest:
+		return 1
+	case *ir.EnumPayloadExtract:
+		return ctx.representationSize(v.Type.Name)
 	case *ir.StringLiteral:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.FrameBegin:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaReserve:
 		return ctx.representationSize(v.Type.Name)
+	case *ir.ArenaReserveArray:
+		return ctx.representationSize(v.Type.Name)
 	case *ir.ArenaPlace:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.SliceGet:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.SlotFill:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.ReliableTopicTryPublish:
 		return ctx.representationSize(v.Type.Name)
@@ -1132,6 +1215,10 @@ func (ctx compileContext) isDataType(typ ir.Type) bool {
 	return ok && info.Kind == ir.TypeKindData
 }
 
+func (ctx compileContext) isHandleTypeKind(kind ir.TypeKind) bool {
+	return isHandleTypeKind(kind)
+}
+
 func (ctx compileContext) isHandleType(name string) bool {
 	if name == "StringLiteral" {
 		return true
@@ -1152,7 +1239,7 @@ func (ctx compileContext) isHandleType(name string) bool {
 
 func isHandleTypeKind(kind ir.TypeKind) bool {
 	switch kind {
-	case ir.TypeKindData, ir.TypeKindClass, ir.TypeKindDriver, ir.TypeKindDriverPath, ir.TypeKindExecutor:
+	case ir.TypeKindData, ir.TypeKindClass, ir.TypeKindDriver, ir.TypeKindDriverPath, ir.TypeKindExecutor, ir.TypeKindEnum:
 		return true
 	default:
 		return false
@@ -1164,7 +1251,7 @@ func (ctx compileContext) shouldPassRecordReturn(typ ir.Type) bool {
 		return false
 	}
 	if info, ok := ctx.typeInfo(typ); ok {
-		return info.Kind == ir.TypeKindData
+		return info.Kind == ir.TypeKindData || info.Kind == ir.TypeKindEnum
 	}
 	return false
 }
@@ -1659,12 +1746,28 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitStringLiteral(e, v, frame)
 		case *ir.Construct:
 			emitConstruct(e, v, frame)
+		case *ir.EnumConstruct:
+			emitEnumConstruct(e, v, frame)
+		case *ir.EnumVariantTest:
+			emitEnumVariantTest(e, v, frame)
+		case *ir.EnumPayloadExtract:
+			emitEnumPayloadExtract(e, v, frame)
 		case *ir.FrameBegin:
 			emitFrameBegin(e, v, frame)
 		case *ir.ArenaReserve:
 			emitArenaReserve(e, v, frame)
+		case *ir.ArenaReserveArray:
+			emitArenaReserveArray(e, v, frame)
 		case *ir.ArenaPlace:
 			emitArenaPlace(e, v, frame)
+		case *ir.SlotWrite:
+			emitSlotWrite(e, v, frame)
+		case *ir.SlotFill:
+			emitSlotFill(e, v, frame)
+		case *ir.SliceGet:
+			emitSliceGet(e, v, frame)
+		case *ir.SliceSet:
+			emitSliceSet(e, v, frame)
 		case *ir.FrameEnd:
 			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
@@ -1810,9 +1913,13 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing constructor object slot"})
 		return
 	}
-	size := e.ctx.storageSize(op.Type.Name)
+	size := e.ctx.storageSizeForType(op.Type)
 	emitZeroSlotRange(e, objectSlot, size)
-	info := e.ctx.types[op.Type.Name]
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown constructor type: " + op.Type.Name})
+		return
+	}
 	for _, field := range op.Fields {
 		fieldInfo, ok := info.Fields[field.Name]
 		if !ok {
@@ -1828,6 +1935,131 @@ func emitConstruct(e *Emitter, op *ir.Construct, frame Frame) {
 	}
 	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
 	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitEnumConstruct(e *Emitter, op *ir.EnumConstruct, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing enum constructor object slot"})
+		return
+	}
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum constructor type: " + op.Type.Name})
+		return
+	}
+	variant, ok := enumVariantInfo(info, op.Variant)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum variant: " + op.Variant})
+		return
+	}
+	tag, ok := info.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "enum type missing $tag field: " + op.Type.Name})
+		return
+	}
+	size := info.StorageSize
+	if size <= 0 {
+		size = info.Size
+	}
+	if size <= 0 {
+		size = e.ctx.storageSizeForType(op.Type)
+	}
+	emitZeroSlotRange(e, objectSlot, size)
+	emitStoreSlotImm(e, objectSlot+fieldStorageOffset(tag), int64(variant.Discriminant), fieldStorageWidthBits(e.ctx, tag))
+	for _, field := range op.Fields {
+		fieldInfo, ok := info.Fields[op.Variant+"."+field.Name]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload field: " + op.Variant + "." + field.Name})
+			continue
+		}
+		emitMovImmToReg(e, scratchRegs[1], int64(fieldStorageOffset(fieldInfo)))
+		offset := objectSlot + fieldStorageOffset(fieldInfo)
+		size := fieldStorageSize(e.ctx, fieldInfo)
+		if e.ctx.isDataType(fieldInfo.Type) {
+			emitDeepCopyValueToTypedStorage(e, frame, field.Value, fieldInfo.Type, asm.MustLookup("rbp"), int64(offset))
+			continue
+		}
+		emitCopyValueToStackRange(e, frame, field.Value, offset, size)
+	}
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], slot, 64)
+}
+
+func emitEnumVariantTest(e *Emitter, op *ir.EnumVariantTest, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	info, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum test type: " + op.Type.Name})
+		return
+	}
+	variant, ok := enumVariantInfo(info, op.Variant)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum variant: " + op.Variant})
+		return
+	}
+	tag, ok := info.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "enum type missing $tag field: " + op.Type.Name})
+		return
+	}
+	base, disp, ok := emitValueAddress(e, frame, op.Value)
+	if !ok {
+		return
+	}
+	tagReg := asm.MustLookup("rcx")
+	emitLoadMemToReg(e, tagReg, base, disp+int64(fieldStorageOffset(tag)), fieldStorageWidthBits(e.ctx, tag))
+	emitMovImmToReg(e, scratchRegs[0], 0)
+	emitCmpRegImm(e, tagReg, int64(variant.Discriminant))
+	done := e.newLabel("enum_variant_test_done")
+	e.emitJcc(0x85, done)
+	emitMovImmToReg(e, scratchRegs[0], 1)
+	e.bindLabel(done)
+	emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 8)
+}
+
+func emitEnumPayloadExtract(e *Emitter, op *ir.EnumPayloadExtract, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	enumType := valueType(op.Value)
+	info, ok := e.ctx.typeInfo(enumType)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload type: " + enumType.Name})
+		return
+	}
+	fieldInfo, ok := info.Fields[op.Variant+"."+op.Field]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown enum payload field: " + op.Variant + "." + op.Field})
+		return
+	}
+	base, disp, ok := emitValueAddress(e, frame, op.Value)
+	if !ok {
+		return
+	}
+	offset := disp + int64(fieldStorageOffset(fieldInfo))
+	size := fieldStorageSize(e.ctx, fieldInfo)
+	emitMovImmToReg(e, scratchRegs[1], int64(fieldStorageOffset(fieldInfo)))
+	if e.ctx.isDataType(fieldInfo.Type) {
+		objectSlot, ok := frame.ObjectSlots[op]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing enum payload object slot"})
+			return
+		}
+		emitDeepCopyObjectToAddressAsType(e, fieldInfo.Type, base, offset, asm.MustLookup("rbp"), int64(objectSlot))
+		emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+		emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+		return
+	}
+	emitCopyMemoryToStackRange(e, base, offset, outSlot, size)
 }
 
 func emitFrameBegin(e *Emitter, op *ir.FrameBegin, frame Frame) {
@@ -1904,6 +2136,63 @@ func emitArenaReserve(e *Emitter, op *ir.ArenaReserve, frame Frame) {
 	emitStoreSlotFromReg(e, arena, slot, 64)
 }
 
+func emitArenaReserveArray(e *Emitter, op *ir.ArenaReserveArray, frame Frame) {
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing reserve_array object slot"})
+		return
+	}
+	elementInfo, elementOK := e.ctx.typeInfo(op.Element)
+	elementStorageSize := e.ctx.storageSizeForType(op.Element)
+	if elementStorageSize <= 0 {
+		elementStorageSize = 1
+	}
+	elementAlign := 8
+	if elementOK && elementInfo.Align > 0 {
+		elementAlign = elementInfo.Align
+	}
+	slotsInfo, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown reserve_array slots type: " + op.Type.Name})
+		return
+	}
+	addressOffset := 0
+	if field, ok := slotsInfo.Fields["address"]; ok {
+		addressOffset = fieldStorageOffset(field)
+	}
+	capacityOffset := 8
+	if field, ok := slotsInfo.Fields["capacity"]; ok {
+		capacityOffset = fieldStorageOffset(field)
+	}
+
+	countReg := asm.MustLookup("r8")
+	byteCountReg := asm.MustLookup("r10")
+	alignReg := asm.MustLookup("r9")
+	elementReg := asm.MustLookup("rcx")
+
+	emitLoadValue(e, frame, op.Count, countReg)
+	emitRegRegMove(e, byteCountReg, countReg)
+	emitMovImmToReg(e, elementReg, int64(elementStorageSize))
+	emitUnsignedMulInto(e, byteCountReg, elementReg)
+	if op.Align != nil {
+		emitLoadValue(e, frame, op.Align, alignReg)
+	} else {
+		emitMovImmToReg(e, alignReg, int64(elementAlign))
+	}
+	address, ok := emitArenaBump(e, frame, op.Arena, byteCountReg, alignReg)
+	if !ok {
+		return
+	}
+	emitStoreSlotFromReg(e, address, objectSlot+addressOffset, 64)
+	emitStoreSlotFromReg(e, countReg, objectSlot+capacityOffset, 64)
+	emitSlotFromBase(e, asm.MustLookup("rdi"), asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, asm.MustLookup("rdi"), slot, 64)
+}
+
 func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
 	slot, ok := frame.Slots[op]
 	if !ok {
@@ -1960,6 +2249,226 @@ func emitArenaPlace(e *Emitter, op *ir.ArenaPlace, frame Frame) {
 		}
 		emitCopyValueToMemoryRange(e, frame, field.Value, address, int64(offset), fieldSize)
 	}
+}
+
+func emitSlotWrite(e *Emitter, op *ir.SlotWrite, frame Frame) {
+	slotsBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	capacity := asm.MustLookup("r11")
+	elementReg := asm.MustLookup("rcx")
+
+	if !emitValueAddressToReg(e, frame, op.Slots, slotsBase) {
+		return
+	}
+	slotsInfo, ok := e.ctx.typeInfo(valueType(op.Slots))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slots type: " + valueTypeName(op.Slots)})
+		return
+	}
+	addressField, ok := slotsInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing address field: " + slotsInfo.Name})
+		return
+	}
+	capacityField, ok := slotsInfo.Fields["capacity"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing capacity field: " + slotsInfo.Name})
+		return
+	}
+	emitLoadMemToReg(e, address, slotsBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, capacity, slotsBase, int64(fieldStorageOffset(capacityField)), 64)
+	emitLoadValue(e, frame, op.Index, index)
+	emitIndexBoundsCheck(e, index, capacity)
+
+	valueType := valueType(op.Value)
+	elementSize := e.ctx.storageSizeForType(valueType)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, index, elementReg)
+	emitRegRegOp(e, 0x01, address, index)
+	if e.ctx.isDataType(valueType) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, valueType, address, 0)
+		return
+	}
+	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
+func emitSliceGet(e *Emitter, op *ir.SliceGet, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	elementSize := e.ctx.storageSizeForType(op.Type)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	address, ok := emitSliceElementAddress(e, frame, op.Slice, op.Index, elementSize)
+	if !ok {
+		return
+	}
+	if e.ctx.isDataType(op.Type) {
+		objectSlot, ok := frame.ObjectSlots[op]
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing slice get object slot"})
+			return
+		}
+		emitDeepCopyObjectToAddressAsType(e, op.Type, address, 0, asm.MustLookup("rbp"), int64(objectSlot))
+		emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+		emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+		return
+	}
+	emitCopyMemoryToStackRange(e, address, 0, outSlot, elementSize)
+}
+
+func emitSliceSet(e *Emitter, op *ir.SliceSet, frame Frame) {
+	valueType := valueType(op.Value)
+	elementSize := e.ctx.storageSizeForType(valueType)
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+	address, ok := emitSliceElementAddress(e, frame, op.Slice, op.Index, elementSize)
+	if !ok {
+		return
+	}
+	if e.ctx.isDataType(valueType) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, valueType, address, 0)
+		return
+	}
+	emitCopyValueToMemoryRange(e, frame, op.Value, address, 0, elementSize)
+}
+
+func emitSlotFill(e *Emitter, op *ir.SlotFill, frame Frame) {
+	outSlot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	objectSlot, ok := frame.ObjectSlots[op]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing slot fill object slot"})
+		return
+	}
+	slotsInfo, ok := e.ctx.typeInfo(valueType(op.Slots))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slots type: " + valueTypeName(op.Slots)})
+		return
+	}
+	addressField, ok := slotsInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing address field: " + slotsInfo.Name})
+		return
+	}
+	capacityField, ok := slotsInfo.Fields["capacity"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slots type missing capacity field: " + slotsInfo.Name})
+		return
+	}
+	sliceInfo, ok := e.ctx.typeInfo(op.Type)
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slot fill return type: " + op.Type.Name})
+		return
+	}
+	returnAddressOffset := 0
+	if field, ok := sliceInfo.Fields["address"]; ok {
+		returnAddressOffset = fieldStorageOffset(field)
+	}
+	returnLengthOffset := 8
+	if field, ok := sliceInfo.Fields["length"]; ok {
+		returnLengthOffset = fieldStorageOffset(field)
+	}
+
+	slotsBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	capacity := asm.MustLookup("r11")
+	scaled := asm.MustLookup("r8")
+	elementReg := asm.MustLookup("rcx")
+	elementAddress := asm.MustLookup("rsi")
+
+	if !emitValueAddressToReg(e, frame, op.Slots, slotsBase) {
+		return
+	}
+	emitLoadMemToReg(e, address, slotsBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, capacity, slotsBase, int64(fieldStorageOffset(capacityField)), 64)
+	emitMovImmToReg(e, index, 0)
+
+	elementSize := e.ctx.storageSizeForType(op.Element)
+	if elementSize <= 0 {
+		elementSize = e.ctx.storageSizeForType(valueType(op.Value))
+	}
+	if elementSize <= 0 {
+		elementSize = 1
+	}
+
+	start := e.newLabel("slot_fill_start")
+	done := e.newLabel("slot_fill_done")
+	e.bindLabel(start)
+	emitRegRegMove(e, asm.MustLookup("rax"), index)
+	emitRegRegMove(e, asm.MustLookup("rdx"), capacity)
+	emitCmpRegReg(e, asm.MustLookup("rax"), asm.MustLookup("rdx"))
+	e.emitJcc(0x83, done)
+	emitRegRegMove(e, scaled, index)
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, scaled, elementReg)
+	emitRegRegMove(e, elementAddress, address)
+	emitRegRegOp(e, 0x01, elementAddress, scaled)
+
+	emitPushReg(e, address)
+	emitPushReg(e, index)
+	emitPushReg(e, capacity)
+	if e.ctx.isDataType(op.Element) || e.ctx.isDataType(valueType(op.Value)) {
+		emitDeepCopyValueToTypedStorage(e, frame, op.Value, op.Element, elementAddress, 0)
+	} else {
+		emitCopyValueToMemoryRange(e, frame, op.Value, elementAddress, 0, elementSize)
+	}
+	emitPopReg(e, capacity)
+	emitPopReg(e, index)
+	emitPopReg(e, address)
+	emitAddImm(e, index, 1)
+	e.emitJmp(start)
+	e.bindLabel(done)
+
+	emitStoreSlotFromReg(e, address, objectSlot+returnAddressOffset, 64)
+	emitStoreSlotFromReg(e, capacity, objectSlot+returnLengthOffset, 64)
+	emitSlotFromBase(e, scratchRegs[0], asm.MustLookup("rbp"), objectSlot)
+	emitStoreSlotFromReg(e, scratchRegs[0], outSlot, 64)
+}
+
+func emitSliceElementAddress(e *Emitter, frame Frame, slice ir.Value, indexValue ir.Value, elementSize int) (asm.Reg, bool) {
+	sliceBase := asm.MustLookup("rsi")
+	address := asm.MustLookup("rdi")
+	index := asm.MustLookup("r10")
+	length := asm.MustLookup("r11")
+	elementReg := asm.MustLookup("rcx")
+
+	if !emitValueAddressToReg(e, frame, slice, sliceBase) {
+		return asm.Reg{}, false
+	}
+	sliceInfo, ok := e.ctx.typeInfo(valueType(slice))
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unknown slice type: " + valueTypeName(slice)})
+		return asm.Reg{}, false
+	}
+	addressField, ok := sliceInfo.Fields["address"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slice type missing address field: " + sliceInfo.Name})
+		return asm.Reg{}, false
+	}
+	lengthField, ok := sliceInfo.Fields["length"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "slice type missing length field: " + sliceInfo.Name})
+		return asm.Reg{}, false
+	}
+	emitLoadMemToReg(e, address, sliceBase, int64(fieldStorageOffset(addressField)), 64)
+	emitLoadMemToReg(e, length, sliceBase, int64(fieldStorageOffset(lengthField)), 64)
+	emitLoadValue(e, frame, indexValue, index)
+	emitIndexBoundsCheck(e, index, length)
+	emitMovImmToReg(e, elementReg, int64(elementSize))
+	emitUnsignedMulInto(e, index, elementReg)
+	emitRegRegOp(e, 0x01, address, index)
+	return address, true
 }
 
 func emitArenaBump(e *Emitter, frame Frame, arenaValue ir.Value, length asm.Reg, align asm.Reg) (asm.Reg, bool) {
@@ -2025,6 +2534,17 @@ func emitTrapOnCarry(e *Emitter) {
 	e.emitJcc(0x83, ok)
 	emitCallReloc(e, "_wrela_memory_oom")
 	e.bindLabel(ok)
+}
+
+func emitIndexBoundsCheck(e *Emitter, index asm.Reg, length asm.Reg) {
+	trap := e.newLabel("index_bounds_trap")
+	done := e.newLabel("index_bounds_ok")
+	emitCmpRegReg(e, index, length)
+	e.emitJcc(0x83, trap)
+	e.emitJmp(done)
+	e.bindLabel(trap)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(done)
 }
 
 func emitTrapIfZero(e *Emitter, value asm.Reg) {
@@ -2170,15 +2690,9 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
 		return
 	}
-	if (publish.Kind != "" && publish.Kind != "gap_u64") || (layout.Kind != "" && layout.Kind != "gap_u64") {
-		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + publish.Kind})
-		return
-	}
-
 	base := asm.MustLookup("rax")
 	seq := asm.MustLookup("r10")
 	slot := asm.MustLookup("r11")
-	value := asm.MustLookup("rcx")
 
 	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
@@ -2190,8 +2704,8 @@ func emitTopicPublish(e *Emitter, frame Frame, publish *ir.TopicPublish) {
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, seq, 1)
 	emitStoreMemFromReg(e, slot, 0, seq, 64)
-	emitLoadValue(e, frame, publish.Value, value)
-	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitCopyValueToMemoryRange(e, frame, publish.Value, slot, 8, e.ctx.storageSizeForType(valueType(publish.Value)))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), seq, 64)
 	wakeSlots := make([]string, 0, len(layout.Subscribers))
@@ -2207,7 +2721,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + publish.TopicLabel})
 		return
 	}
-	if layout.Kind != "reliable_u64" {
+	if !isReliableTopicKind(layout.Kind) {
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported topic kind: " + layout.Kind})
 		return
 	}
@@ -2219,16 +2733,29 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	if !ok {
 		return
 	}
-	publishedOffset := outSlot
-	fullOffset := outSlot + 1
-	if info, ok := e.ctx.typeInfo(publish.Type); ok {
-		if field, ok := info.Fields["published"]; ok {
-			publishedOffset = outSlot + field.Offset
-		}
-		if field, ok := info.Fields["full"]; ok {
-			fullOffset = outSlot + field.Offset
-		}
+	resultInfo, ok := e.ctx.typeInfo(publish.Type)
+	if !ok || resultInfo.Kind != ir.TypeKindEnum {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish requires enum result type: " + publish.Type.Name})
+		return
 	}
+	tagField, ok := resultInfo.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing tag field: " + publish.Type.Name})
+		return
+	}
+	okVariant, ok := enumVariantInfo(resultInfo, "Ok")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing Ok variant: " + publish.Type.Name})
+		return
+	}
+	errVariant, ok := enumVariantInfo(resultInfo, "Err")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "reliable topic publish result missing Err variant: " + publish.Type.Name})
+		return
+	}
+	resultTagOffset := outSlot + fieldStorageOffset(tagField)
+	okDiscriminant := int64(okVariant.Discriminant)
+	errDiscriminant := int64(errVariant.Discriminant)
 
 	base := asm.MustLookup("rax")
 	producer := asm.MustLookup("r10")
@@ -2242,6 +2769,7 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitSlotFromBase(e, asm.MustLookup("r8"), asm.MustLookup("rbp"), outSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("r8"), valueSlot, 64)
 	emitZeroSlotRange(e, outSlot, e.ctx.storageSizeForType(publish.Type))
+	emitStoreSlotImm(e, resultTagOffset, okDiscriminant, 64)
 	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitLoadMemToReg(e, producer, base, int64(layout.HeadOffset), 64)
 	emitReliableTopicMinCursor(e, layout, base, minCursor, candidate)
@@ -2259,8 +2787,8 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 	emitRegRegOp(e, 0x01, slot, base)
 	emitAddImm(e, producer, 1)
 	emitStoreMemFromReg(e, slot, 0, producer, 64)
-	emitLoadValue(e, frame, publish.Value, value)
-	emitStoreMemFromReg(e, slot, 8, value, 64)
+	emitCopyValueToMemoryRange(e, frame, publish.Value, slot, 8, e.ctx.storageSizeForType(valueType(publish.Value)))
+	emitMovDataAddressToReg(e, base, topicDataSymbol(publish.TopicLabel))
 	emitMfence(e)
 	emitStoreMemFromReg(e, base, int64(layout.HeadOffset), producer, 64)
 	emitMovImmToReg(e, value, topicWaitlineDisarmed)
@@ -2270,11 +2798,10 @@ func emitReliableTopicTryPublish(e *Emitter, frame Frame, publish *ir.ReliableTo
 		wakeSlots = append(wakeSlots, subscriber.Label)
 	}
 	emitTouchSubscriberWaitlinesAndWake(e, layout, base, producer, wakeSlots, e.ctx)
-	emitStoreSlotBool(e, publishedOffset, 1)
 	e.emitJmp(done)
 
 	e.bindLabel(full)
-	emitStoreSlotBool(e, fullOffset, 1)
+	emitStoreSlotImm(e, resultTagOffset, errDiscriminant, 64)
 	e.bindLabel(done)
 }
 
@@ -2439,33 +2966,38 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	noMessage := e.newLabel("topic_try_next_empty")
 	gap := e.newLabel("topic_try_next_gap")
 	resultInfo, hasResultInfo := e.ctx.typeInfo(next.Type)
-	messageField := resultInfo.Fields["message"]
-	hasMessageField := hasResultInfo && messageField.StorageOffset >= 0
-	hasMessageOffset := outSlot
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["has_message"]; ok {
-			hasMessageOffset = outSlot + field.Offset
-		}
+	if !hasResultInfo || resultInfo.Kind != ir.TypeKindEnum {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next requires enum option type: " + next.Type.Name})
+		return
 	}
-	gapOffset := outSlot + 1
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["gap"]; ok {
-			gapOffset = outSlot + field.Offset
-		}
+	optionPayloadField, hasOptionPayload := resultInfo.Fields["Some.value"]
+	if !hasOptionPayload {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing Some.value field: " + next.Type.Name})
+		return
 	}
-	missedOffset := outSlot + 8
-	if hasResultInfo {
-		if field, ok := resultInfo.Fields["missed"]; ok {
-			missedOffset = outSlot + field.Offset
-		}
+	tagField, ok := resultInfo.Fields["$tag"]
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing tag field: " + next.Type.Name})
+		return
 	}
+	someVariant, ok := enumVariantInfo(resultInfo, "Some")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing Some variant: " + next.Type.Name})
+		return
+	}
+	noneVariant, ok := enumVariantInfo(resultInfo, "None")
+	if !ok {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "topic try_next option type missing None variant: " + next.Type.Name})
+		return
+	}
+	optionTagOffset := outSlot + fieldStorageOffset(tagField)
+	optionSomeDiscriminant := int64(someVariant.Discriminant)
+	optionNoneDiscriminant := int64(noneVariant.Discriminant)
 
 	emitSlotFromBase(e, asm.MustLookup("r8"), asm.MustLookup("rbp"), outSlot)
 	emitStoreSlotFromReg(e, asm.MustLookup("r8"), valueSlot, 64)
 	emitZeroSlotRange(e, outSlot, e.ctx.storageSizeForType(next.Type))
-	if hasMessageField {
-		emitStoreNestedDestinationHandle(e, asm.MustLookup("rbp"), int64(outSlot+messageField.Offset), int64(outSlot+messageField.StorageOffset))
-	}
+	emitStoreSlotImm(e, optionTagOffset, optionNoneDiscriminant, 64)
 	emitMovDataAddressToReg(e, base, topicDataSymbol(next.TopicLabel))
 	emitLoadSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
 	emitLoadMemToReg(e, head, base, int64(layout.HeadOffset), 64)
@@ -2482,46 +3014,19 @@ func emitTopicTryNext(e *Emitter, frame Frame, next *ir.TopicTryNext) {
 	emitCmpRegReg(e, tmp, cursor)
 	e.emitJcc(0x85, gap)
 	emitMfence(e)
-	emitMovImmToReg(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, hasMessageOffset, 8)
-	if hasMessageField {
-		if messageField.Type.Name == "U64TopicMessage" {
-			messageInfo, _ := e.ctx.typeInfo(messageField.Type)
-			sequenceOffset := messageField.StorageOffset
-			if field, ok := messageInfo.Fields["sequence"]; ok {
-				sequenceOffset += field.Offset
-			}
-			valueOffset := messageField.StorageOffset + 8
-			if field, ok := messageInfo.Fields["value"]; ok {
-				valueOffset = messageField.StorageOffset + field.Offset
-			}
-			emitStoreSlotFromReg(e, cursor, outSlot+sequenceOffset, 64)
-			emitLoadMemToReg(e, tmp, slot, 8, 64)
-			emitStoreSlotFromReg(e, tmp, outSlot+valueOffset, 64)
-		} else {
-			emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+messageField.StorageOffset), slot, 8, messageField.StorageSize)
-		}
-	} else {
-		emitStoreSlotFromReg(e, tmp, outSlot+16, 64)
-		emitLoadMemToReg(e, tmp, slot, 8, 64)
-		emitStoreSlotFromReg(e, tmp, outSlot+24, 64)
-	}
+	emitStoreSlotImm(e, optionTagOffset, optionSomeDiscriminant, 64)
+	emitCopyBytes(e, asm.MustLookup("rbp"), int64(outSlot+fieldStorageOffset(optionPayloadField)), slot, 8, fieldStorageSize(e.ctx, optionPayloadField))
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, cursor, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
-	if layout.Kind == "reliable_u64" {
+	if isReliableTopicKind(layout.Kind) {
 		emitWakeProducerSlots(e, layout, cursor, e.ctx)
 	}
 	e.emitJmp(done)
 	e.bindLabel(gap)
-	emitRegRegMove(e, tmp, head)
-	emitRegRegOp(e, 0x29, tmp, cursor)
-	emitAddImm(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, missedOffset, 64)
-	emitMovImmToReg(e, tmp, 1)
-	emitStoreSlotFromReg(e, tmp, gapOffset, 8)
+	emitStoreSlotImm(e, optionTagOffset, optionNoneDiscriminant, 64)
 	emitStoreSubscriptionCursor(e, frame, next.Subscription, next.SubscriberSlot, head, layout)
 	emitDisarmSubscriptionWait(e, frame, next.Subscription, next.SubscriberSlot, layout)
-	if layout.Kind == "reliable_u64" {
+	if isReliableTopicKind(layout.Kind) {
 		emitWakeProducerSlots(e, layout, head, e.ctx)
 	}
 	e.emitJmp(done)
@@ -3006,13 +3511,25 @@ func valueType(value ir.Value) ir.Type {
 		return v.Type
 	case *ir.Construct:
 		return v.Type
+	case *ir.EnumConstruct:
+		return v.Type
+	case *ir.EnumVariantTest:
+		return ir.Type{Name: "Bool", Kind: ir.TypeKindPrimitive}
+	case *ir.EnumPayloadExtract:
+		return v.Type
 	case *ir.StringLiteral:
 		return v.Type
 	case *ir.FrameBegin:
 		return v.Type
 	case *ir.ArenaReserve:
 		return v.Type
+	case *ir.ArenaReserveArray:
+		return v.Type
 	case *ir.ArenaPlace:
+		return v.Type
+	case *ir.SliceGet:
+		return v.Type
+	case *ir.SlotFill:
 		return v.Type
 	case *ir.ReliableTopicTryPublish:
 		return v.Type
@@ -3062,6 +3579,13 @@ func emitStoreSlotFromReg(e *Emitter, reg asm.Reg, slot int, width int) {
 	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
 		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
 		asm.RegOperand{Reg: registerForWidth(reg, width)},
+	}})
+}
+
+func emitStoreSlotImm(e *Emitter, slot int, value int64, width int) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+		asm.MemOperand{Base: asm.MustLookup("rbp"), Disp: int64(slot), Width: width},
+		asm.ImmOperand{Value: value},
 	}})
 }
 
@@ -3119,6 +3643,35 @@ func registerForWidth(reg asm.Reg, width int) asm.Reg {
 
 func emitCmpRegReg(e *Emitter, left asm.Reg, right asm.Reg) {
 	emitRegRegOp(e, 0x39, left, right)
+}
+
+func emitCmpRegImm(e *Emitter, left asm.Reg, value int64) {
+	e.emitInstruction(asm.Instruction{Mnemonic: "cmp", Operands: []asm.Operand{
+		asm.RegOperand{Reg: left},
+		asm.ImmOperand{Value: value},
+	}})
+}
+
+func emitUnsignedMulInto(e *Emitter, dst asm.Reg, rhs asm.Reg) {
+	rax := asm.MustLookup("rax")
+	rdx := asm.MustLookup("rdx")
+	emitRegRegMove(e, rax, dst)
+	emitUnsignedMulReg(e, rhs)
+	ok := e.newLabel("mul_no_overflow")
+	emitMovImmToReg(e, rhs, 0)
+	emitCmpRegReg(e, rdx, rhs)
+	e.emitJcc(0x84, ok)
+	emitCallReloc(e, "_wrela_memory_oom")
+	e.bindLabel(ok)
+	emitRegRegMove(e, dst, rax)
+}
+
+func emitUnsignedMulReg(e *Emitter, rhs asm.Reg) {
+	rex := byte(0x48)
+	if rhs.High {
+		rex |= 0x01
+	}
+	e.emit(rex, 0xF7, encodeModRM(3, 4, rhs.Low3))
 }
 
 func emitRegRegOp(e *Emitter, opcode byte, left asm.Reg, right asm.Reg) {
@@ -3194,4 +3747,43 @@ func alignUpLen(value, align uint64) uint64 {
 		return value
 	}
 	return (value + align - 1) &^ (align - 1)
+}
+
+func enumVariantInfo(info ir.TypeInfo, name string) (ir.EnumVariantInfo, bool) {
+	for _, variant := range info.EnumVariants {
+		if variant.Name == name {
+			return variant, true
+		}
+	}
+	return ir.EnumVariantInfo{}, false
+}
+
+func fieldStorageOffset(field ir.FieldInfo) int {
+	if field.StorageOffset >= 0 {
+		return field.StorageOffset
+	}
+	return field.Offset
+}
+
+func fieldStorageSize(ctx compileContext, field ir.FieldInfo) int {
+	if field.StorageSize > 0 {
+		return field.StorageSize
+	}
+	if field.Size > 0 {
+		return field.Size
+	}
+	return ctx.storageSizeForType(field.Type)
+}
+
+func fieldStorageWidthBits(ctx compileContext, field ir.FieldInfo) int {
+	switch fieldStorageSize(ctx, field) {
+	case 1:
+		return 8
+	case 2:
+		return 16
+	case 4:
+		return 32
+	default:
+		return 64
+	}
 }

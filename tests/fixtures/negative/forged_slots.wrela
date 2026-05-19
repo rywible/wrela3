@@ -1,0 +1,19 @@
+// expect: SEM0092: protected memory-region view construction is not allowed here
+module machine.x86_64.executor_memory
+data Slots<T> {
+    address: U64
+    capacity: U64
+}
+
+module negative.forged_slots
+use { Slots } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+data Holder {
+    slots: Slots<Event>
+}
+executor Worker {
+    start fn run(self) -> never {
+        let slots = Slots<Event>(address = 0x1000, capacity = 4)
+        while true {}
+    }
+}

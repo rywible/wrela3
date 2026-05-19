@@ -41,7 +41,7 @@ func TestDebugExprBinary(t *testing.T) {
 }
 
 func TestDebugExprConstructorAndCall(t *testing.T) {
-	_ = DebugExpr(&ConstructorExpr{Type: "Bytes", SpanV: source.Span{}})
+	_ = DebugExpr(&ConstructorExpr{Type: TypeRef{Name: "Bytes"}, SpanV: source.Span{}})
 	_ = DebugExpr(&CallExpr{Receiver: &NameExpr{SpanV: source.Span{}}, SpanV: source.Span{}})
 	for _, v := range []Expr{
 		&IntLiteral{Value: "1", SpanV: source.Span{}},
@@ -97,19 +97,72 @@ func TestInterruptEventASTContracts(t *testing.T) {
 	path := &DriverPathDecl{
 		Name: "SerialConsolePath",
 		InterruptEvents: []InterruptEventDecl{
-			{EventType: "SerialPathInterrupt"},
+			{EventType: TypeRef{Name: "Option", Args: []TypeRef{{Name: "U8"}}}},
 		},
 	}
 	exec := &ExecutorDecl{
 		Name: "HelloWorld",
 		OnHandlers: []OnHandlerDecl{
-			{PathField: "serial_path", ParamName: "event", ParamType: "SerialPathInterrupt"},
+			{PathField: "serial_path", ParamName: "event", ParamType: TypeRef{Name: "Option", Args: []TypeRef{{Name: "U8"}}}},
 		},
 	}
-	if path.InterruptEvents[0].EventType != "SerialPathInterrupt" {
+	if path.InterruptEvents[0].EventType.String() != "Option<U8>" {
 		t.Fatalf("interrupt event not stored")
 	}
-	if exec.OnHandlers[0].PathField != "serial_path" || exec.OnHandlers[0].ParamType != "SerialPathInterrupt" {
+	if exec.OnHandlers[0].PathField != "serial_path" || exec.OnHandlers[0].ParamType.String() != "Option<U8>" {
 		t.Fatalf("on handler not stored")
+	}
+}
+
+func TestTypeRefString(t *testing.T) {
+	ref := TypeRef{Name: "Result", Args: []TypeRef{{Name: "Unit"}, {Name: "BufferFull"}}}
+	if got, want := ref.String(), "Result<Unit, BufferFull>"; got != want {
+		t.Fatalf("TypeRef.String() = %q, want %q", got, want)
+	}
+}
+
+func TestDebugMatchStmt(t *testing.T) {
+	stmt := &MatchStmt{
+		Value: &CallExpr{
+			Receiver: &NameExpr{Name: "rx"},
+			Method:   "try_next",
+		},
+		Arms: []MatchArm{
+			{
+				Pattern: VariantPattern{
+					Enum:     "Option",
+					Variant:  "Some",
+					Bindings: []PatternBinding{{Name: "value", Bind: "event"}},
+				},
+				Body: []Stmt{
+					&ExprStmt{
+						Expr: &CallExpr{
+							Receiver: &NameExpr{Name: "events"},
+							Method:   "push",
+							Args: []NamedArg{
+								{
+									Name:  "value",
+									Value: &NameExpr{Name: "event"},
+								},
+							},
+						},
+					},
+				},
+			},
+			{
+				Pattern: VariantPattern{Enum: "Option", Variant: "None"},
+				Body: []Stmt{
+					&ExprStmt{
+						Expr: &CallExpr{
+							Receiver: &NameExpr{Name: "rx"},
+							Method:   "arm_wait",
+						},
+					},
+				},
+			},
+		},
+	}
+	if got, want := DebugStmt(stmt), "match rx.try_next() { Option.Some(value = event) => { events.push(value = event) } Option.None => { rx.arm_wait() } }"; got != want {
+		t.Fatalf("DebugStmt(match) = %q, want %q", got, want)
 	}
 }

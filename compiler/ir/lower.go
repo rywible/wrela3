@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 	"strconv"
@@ -18,6 +19,41 @@ type lowerBinding struct {
 	typ         *sem.Type
 	bindingName string
 }
+
+type concreteMethodRef struct {
+	Owner      *sem.Type
+	MethodName string
+	Key        string
+}
+
+type concreteMethodHeap []concreteMethodRef
+
+func (h concreteMethodHeap) Len() int           { return len(h) }
+func (h concreteMethodHeap) Less(i, j int) bool { return h[i].Key < h[j].Key }
+func (h concreteMethodHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *concreteMethodHeap) Push(x any) {
+	*h = append(*h, x.(concreteMethodRef))
+}
+
+func (h *concreteMethodHeap) Pop() any {
+	old := *h
+	n := len(old)
+	ref := old[n-1]
+	*h = old[:n-1]
+	return ref
+}
+
+type intrinsicKind int
+
+const (
+	intrinsicNone intrinsicKind = iota
+	intrinsicSlotsWrite
+	intrinsicSlotsFill
+	intrinsicSliceGet
+	intrinsicMutableSliceGet
+	intrinsicMutableSliceSet
+)
 
 type lowerScope struct {
 	parent *lowerScope
@@ -58,14 +94,31 @@ type lowerContext struct {
 	types   map[string]*sem.Type
 	pseudo  map[string]*sem.Type
 
+	concreteMethodQueue   []concreteMethodRef
+	queuedConcreteMethod  map[string]bool
+	emittedConcreteMethod map[string]bool
+
 	valueBindings   map[Value]string
 	currentExecutor *sem.ExecutorNode
+	currentReceiver *sem.Type
+	currentReturn   *sem.Type
 
 	stringSeq int
 	tempSeq   int
 	diags     []diag.Diagnostic
 
 	activeFrames []*FrameBegin
+
+	typeParamMaps map[*sem.Type]map[string]*sem.Type
+}
+
+func (ctx *lowerContext) enqueueConcreteMethod(owner *sem.Type, methodName string) {
+	key := owner.Key() + "." + methodName
+	if ctx.queuedConcreteMethod[key] || ctx.emittedConcreteMethod[key] {
+		return
+	}
+	ctx.queuedConcreteMethod[key] = true
+	heap.Push((*concreteMethodHeap)(&ctx.concreteMethodQueue), concreteMethodRef{Owner: owner, MethodName: methodName, Key: key})
 }
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
@@ -104,7 +157,9 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.lowerInterruptQueueLayouts()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
+	ctx.lowerConcreteMethodQueue()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
+	ctx.lowerConcreteMethodQueue()
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
 		return nil, ctx.diags
@@ -114,12 +169,15 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 
 func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 	ctx := &lowerContext{
-		checked:       checked,
-		program:       &Program{Types: map[string]TypeInfo{}},
-		modules:       map[string]*ast.Module{},
-		types:         map[string]*sem.Type{},
-		pseudo:        map[string]*sem.Type{},
-		valueBindings: map[Value]string{},
+		checked:               checked,
+		program:               &Program{Types: map[string]TypeInfo{}},
+		modules:               map[string]*ast.Module{},
+		types:                 map[string]*sem.Type{},
+		pseudo:                map[string]*sem.Type{},
+		queuedConcreteMethod:  map[string]bool{},
+		emittedConcreteMethod: map[string]bool{},
+		valueBindings:         map[Value]string{},
+		typeParamMaps:         map[*sem.Type]map[string]*sem.Type{},
 	}
 	for _, mod := range checked.Modules {
 		ctx.modules[mod.Name] = mod
@@ -184,24 +242,29 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 			return info
 		}
 	}
-	infoKey := typeInfoKey(typ.Module, typ.Name)
-	if typ.Module != "" {
-		if info, ok := ctx.program.Types[infoKey]; ok && typeInfoReady(info, typ.Name) {
-			return info
-		}
-	} else {
+	infoKey := ctx.typeInfoKey(typ)
+	if info, ok := ctx.program.Types[infoKey]; ok && typeInfoReady(info, typ.Name) {
+		return info
+	}
+	if typ.Module == "" && len(typ.TypeArgs) == 0 {
 		if info, ok := ctx.program.Types[typ.Name]; ok && typeInfoReady(info, typ.Name) {
 			return info
 		}
 	}
-	key := typeKey(typ.Module, typ.Name)
+	key := infoKey
 	if visiting[key] {
-		return TypeInfo{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind), Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
+		return TypeInfo{Name: ctx.irTypeName(typ), Module: typ.Module, Kind: semKindToIR(typ.Kind), Size: 8, Align: 8, StorageSize: 8, Fields: map[string]FieldInfo{}}
 	}
 	visiting[key] = true
 
+	if typ.Kind == sem.KindEnum {
+		info := ctx.ensureEnumTypeInfo(typ, visiting)
+		delete(visiting, key)
+		return info
+	}
+
 	info := TypeInfo{
-		Name:   typ.Name,
+		Name:   ctx.irTypeName(typ),
 		Module: typ.Module,
 		Kind:   semKindToIR(typ.Kind),
 		Fields: map[string]FieldInfo{},
@@ -268,12 +331,122 @@ func (ctx *lowerContext) ensureTypeInfo(typ *sem.Type, visiting map[string]bool)
 	if info.StorageSize == 0 {
 		info.StorageSize = info.Size
 	}
-	if typ.Module != "" {
-		ctx.program.Types[infoKey] = info
+	ctx.program.Types[infoKey] = info
+	if len(typ.TypeArgs) == 0 {
+		ctx.program.Types[typ.Name] = info
+	} else {
+		ctx.program.Types[info.Name] = info
+		if typ.Module != "" {
+			ctx.program.Types[typ.Module+"."+info.Name] = info
+		}
 	}
-	ctx.program.Types[typ.Name] = info
 	delete(visiting, key)
 	return info
+}
+
+func (ctx *lowerContext) ensureEnumTypeInfo(typ *sem.Type, visiting map[string]bool) TypeInfo {
+	infoKey := ctx.typeInfoKey(typ)
+	info := TypeInfo{
+		Name:        ctx.irTypeName(typ),
+		Module:      typ.Module,
+		Kind:        TypeKindEnum,
+		Size:        8,
+		Align:       8,
+		StorageSize: 8,
+		Fields:      map[string]FieldInfo{},
+		FieldOrder:  []string{"$tag"},
+	}
+	u64 := ctx.resolveType(typ.Module, "U64")
+	info.Fields["$tag"] = FieldInfo{
+		Name:          "$tag",
+		Type:          ctx.irType(u64),
+		Offset:        0,
+		Size:          8,
+		Align:         8,
+		StorageOffset: 0,
+		StorageSize:   8,
+	}
+
+	maxPayloadSize := 0
+	maxPayloadAlign := 1
+	for i, variant := range typ.EnumVariants {
+		variantInfo := EnumVariantInfo{Name: variant.Name, Discriminant: uint64(i)}
+		fields, order, payloadSize, payloadAlign := ctx.semanticFieldLayout(variant.Fields, 8, visiting)
+		for _, name := range order {
+			field := fields[name]
+			field.Name = variant.Name + "." + field.Name
+			info.Fields[field.Name] = field
+			info.FieldOrder = append(info.FieldOrder, field.Name)
+			variantInfo.Fields = append(variantInfo.Fields, field.Name)
+		}
+		if payloadSize > maxPayloadSize {
+			maxPayloadSize = payloadSize
+		}
+		if payloadAlign > maxPayloadAlign {
+			maxPayloadAlign = payloadAlign
+		}
+		info.EnumVariants = append(info.EnumVariants, variantInfo)
+	}
+
+	if maxPayloadAlign > info.Align {
+		info.Align = maxPayloadAlign
+	}
+	info.Size = layout.AlignUp(8+maxPayloadSize, info.Align)
+	if info.Size == 0 {
+		info.Size = 8
+	}
+	info.StorageSize = info.Size
+	ctx.program.Types[infoKey] = info
+	if len(typ.TypeArgs) == 0 {
+		ctx.program.Types[typ.Name] = info
+	} else {
+		ctx.program.Types[info.Name] = info
+		if typ.Module != "" {
+			ctx.program.Types[typ.Module+"."+info.Name] = info
+		}
+	}
+	return info
+}
+
+func (ctx *lowerContext) semanticFieldLayout(fields []sem.Field, baseOffset int, visiting map[string]bool) (map[string]FieldInfo, []string, int, int) {
+	out := map[string]FieldInfo{}
+	order := []string{}
+	offset := baseOffset
+	maxAlign := 1
+	for _, field := range fields {
+		fieldInfo := ctx.ensureTypeInfo(field.Type, visiting)
+		fieldType := ctx.irType(field.Type)
+		size := fieldInfo.Size
+		storageSize := fieldInfo.StorageSize
+		if storageSize == 0 {
+			storageSize = size
+		}
+		align := fieldInfo.Align
+		if isHandleRecordKind(fieldType.Kind) {
+			size = 8
+			align = 8
+		}
+		if align == 0 {
+			align = 8
+		}
+		offset = layout.AlignUp(offset, align)
+		out[field.Name] = FieldInfo{
+			Name:          field.Name,
+			Type:          fieldType,
+			Offset:        offset,
+			Size:          size,
+			Align:         align,
+			StorageOffset: offset,
+			StorageSize:   storageSize,
+		}
+		order = append(order, field.Name)
+		offset += storageSize
+		if align > maxAlign {
+			maxAlign = align
+		}
+	}
+	payloadSize := layout.AlignUp(offset-baseOffset, maxAlign)
+	return out, order, payloadSize, maxAlign
 }
 
 func typeInfoReady(info TypeInfo, name string) bool {
@@ -296,16 +469,20 @@ func (ctx *lowerContext) lowerPhase(moduleName, imageName, symbol string, phase 
 	params := make([]Value, 0, len(phase.Params))
 	scope := newLowerScope(nil)
 	for _, param := range phase.Params {
-		typ := ctx.resolveType(moduleName, param.Type)
+		typ := ctx.resolveTypeRef(moduleName, param.Type)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
 	}
 	assigned := assignedNames(phase.Body)
+	ret := ctx.resolveTypeRef(moduleName, phase.Return)
+	prevReturn := ctx.currentReturn
+	ctx.currentReturn = ret
 	ops := ctx.lowerStmtList(moduleName, nil, scope, assigned, phase.Body)
+	ctx.currentReturn = prevReturn
 	return Function{
 		Symbol:              symbol,
-		Return:              ctx.irType(ctx.resolveType(moduleName, phase.Return)),
+		Return:              ctx.irType(ret),
 		Params:              params,
 		Blocks:              []Block{{Label: "entry", Ops: ops}},
 		PreserveStackReturn: phase.Name == "delegated_hardware",
@@ -335,6 +512,9 @@ func (ctx *lowerContext) lowerSourceMethods() {
 				continue
 			}
 			receiverType := ctx.resolveType(mod.Name, typeName)
+			if receiverType != nil && len(receiverType.TypeParams) != 0 {
+				continue
+			}
 			for i := range methods {
 				method := &methods[i]
 				if method.IsAsm {
@@ -356,6 +536,36 @@ func (ctx *lowerContext) lowerSourceMethods() {
 			}
 		}
 	}
+}
+
+func (ctx *lowerContext) lowerConcreteMethodQueue() {
+	for len(ctx.concreteMethodQueue) != 0 {
+		ref := heap.Pop((*concreteMethodHeap)(&ctx.concreteMethodQueue)).(concreteMethodRef)
+		key := ref.Key
+		if ctx.emittedConcreteMethod[key] {
+			continue
+		}
+		method := semMethodByName(ref.Owner, ref.MethodName)
+		if method == nil {
+			ctx.errorf("missing concrete method %s.%s", ref.Owner.Display(), ref.MethodName)
+			continue
+		}
+		symbol := symbolName("method", ref.Owner.Module, ref.Owner.MangledName(), ref.MethodName)
+		ctx.program.Functions = append(ctx.program.Functions, ctx.lowerSemanticMethodWithSymbol(ref.Owner.Module, ref.Owner, method, symbol))
+		ctx.emittedConcreteMethod[key] = true
+	}
+}
+
+func semMethodByName(owner *sem.Type, name string) *sem.Method {
+	if owner == nil {
+		return nil
+	}
+	for i := range owner.Methods {
+		if owner.Methods[i].Name == name {
+			return &owner.Methods[i]
+		}
+	}
+	return nil
 }
 
 func (ctx *lowerContext) executorPlacementsForType(receiverType *sem.Type) []*sem.ExecutorNode {
@@ -403,8 +613,11 @@ func (ctx *lowerContext) lowerInterruptEvent(moduleName string, pathType *sem.Ty
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(pathType)}
 	scope.define("self", lowerBinding{value: self, typ: pathType})
-	retType := ctx.resolveType(moduleName, event.EventType)
+	retType := ctx.resolveTypeRef(moduleName, event.EventType)
+	prevReturn := ctx.currentReturn
+	ctx.currentReturn = retType
 	ops := ctx.lowerStmtList(moduleName, pathType, scope, assignedNames(event.Body), event.Body)
+	ctx.currentReturn = prevReturn
 	fnSymbol := symbolName("event_fn", moduleName, pathType.Name, "interrupt")
 	ctx.program.Functions = append(ctx.program.Functions, Function{
 		Symbol: fnSymbol,
@@ -424,10 +637,13 @@ func (ctx *lowerContext) lowerOnHandler(moduleName string, executorType *sem.Typ
 	scope := newLowerScope(nil)
 	self := &Param{Symbol: "self", Type: ctx.irType(executorType)}
 	scope.define("self", lowerBinding{value: self, typ: executorType})
-	eventType := ctx.resolveType(moduleName, handler.ParamType)
+	eventType := ctx.resolveTypeRef(moduleName, handler.ParamType)
 	event := &Param{Symbol: handler.ParamName, Type: ctx.irType(eventType)}
 	scope.define(handler.ParamName, lowerBinding{value: event, typ: eventType})
+	prevReturn := ctx.currentReturn
+	ctx.currentReturn = nil
 	ops := ctx.lowerStmtList(moduleName, executorType, scope, assignedNames(handler.Body), handler.Body)
+	ctx.currentReturn = prevReturn
 	fnSymbol := symbolName("on_fn", moduleName, executorType.Name, handler.PathField, "interrupt")
 	ctx.program.Functions = append(ctx.program.Functions, Function{
 		Symbol: fnSymbol,
@@ -479,6 +695,7 @@ func (ctx *lowerContext) lowerInterruptBindings() {
 		ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, InterruptBinding{
 			EventSymbol:         logicalSymbol("interrupt_event", pathModule(route.EventType), pathName(route.EventType), "interrupt"),
 			EventFunctionSymbol: route.EventFunctionSymbol,
+			EventType:           eventType,
 			PathFieldOffset:     route.PathFieldOffset,
 			ContextSymbol:       route.ContextSymbol,
 			EventStorageSymbol:  fmt.Sprintf("_wrela_interrupt_event_%02x", route.Vector),
@@ -546,6 +763,12 @@ func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, 
 }
 
 func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *sem.Type, method *ast.MethodDecl, symbol string) Function {
+	prevReceiver := ctx.currentReceiver
+	ctx.currentReceiver = receiverType
+	defer func() {
+		ctx.currentReceiver = prevReceiver
+	}()
+
 	params := []Value{}
 	scope := newLowerScope(nil)
 
@@ -558,7 +781,7 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 		if param.Name == "self" {
 			continue
 		}
-		typ := ctx.resolveType(moduleName, param.Type)
+		typ := ctx.resolveTypeRef(moduleName, param.Type)
 		p := &Param{Symbol: param.Name, Type: ctx.irType(typ)}
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
@@ -566,13 +789,55 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 	}
 
 	assigned := assignedNames(method.Body)
+	ret := ctx.methodDeclReturn(moduleName, method)
+	prevReturn := ctx.currentReturn
+	ctx.currentReturn = ret
 	ops := ctx.lowerStmtList(moduleName, receiverType, scope, assigned, method.Body)
+	ctx.currentReturn = prevReturn
 	return Function{
 		Symbol:              symbol,
-		Return:              ctx.irType(ctx.methodDeclReturn(moduleName, method)),
+		Return:              ctx.irType(ret),
 		Params:              params,
 		Blocks:              []Block{{Label: "entry", Ops: ops}},
 		PreserveStackReturn: ctx.isOwnershipTransferMethod(receiverType, method),
+	}
+}
+
+func (ctx *lowerContext) lowerSemanticMethodWithSymbol(moduleName string, receiverType *sem.Type, method *sem.Method, symbol string) Function {
+	prevReceiver := ctx.currentReceiver
+	ctx.currentReceiver = receiverType
+	defer func() {
+		ctx.currentReceiver = prevReceiver
+	}()
+
+	params := []Value{}
+	scope := newLowerScope(nil)
+
+	self := &Param{Symbol: "self", Type: ctx.irType(receiverType)}
+	params = append(params, self)
+	scope.define("self", lowerBinding{value: self, typ: receiverType})
+	ctx.rememberValueBinding(self, "self")
+
+	for _, param := range method.Params {
+		if param.Name == "self" {
+			continue
+		}
+		p := &Param{Symbol: param.Name, Type: ctx.irType(param.Type)}
+		params = append(params, p)
+		scope.define(param.Name, lowerBinding{value: p, typ: param.Type})
+		ctx.rememberValueBinding(p, param.Name)
+	}
+
+	assigned := assignedNames(method.Body)
+	prevReturn := ctx.currentReturn
+	ctx.currentReturn = method.Return
+	ops := ctx.lowerStmtList(moduleName, receiverType, scope, assigned, method.Body)
+	ctx.currentReturn = prevReturn
+	return Function{
+		Symbol: symbol,
+		Return: ctx.irType(method.Return),
+		Params: params,
+		Blocks: []Block{{Label: "entry", Ops: ops}},
 	}
 }
 
@@ -615,34 +880,39 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		ops = append(ops, ctx.interruptContextStoresForPathBinding(s.Name, value, typ)...)
 		return ops
 	case *ast.AssignStmt:
-		value, valueOps, typ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
-		ops := append([]Operation{}, valueOps...)
 		switch target := s.Target.(type) {
 		case *ast.NameExpr:
 			binding, ok := scope.lookup(target.Name)
 			if !ok {
 				ctx.errorf("unknown assignment target %q", target.Name)
-				return ops
+				return nil
 			}
+			value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, s.Value, binding.typ)
+			ops := append([]Operation{}, valueOps...)
 			ops = append(ops, &Copy{Target: binding.value, Source: value, Type: ctx.irType(binding.typ)})
+			return ops
 		case *ast.FieldExpr:
 			object, objectOps, objectType := ctx.lowerExpr(moduleName, receiverType, scope, target.Base)
-			ops = append(objectOps, ops...)
 			field := ctx.lookupField(objectType, target.Field)
 			if field == nil {
 				ctx.errorf("unknown field %s", target.Field)
-				return ops
+				return objectOps
 			}
+			fieldType := ctx.fieldType(objectType, target.Field)
+			value, valueOps, typ := ctx.lowerExprExpected(moduleName, receiverType, scope, s.Value, fieldType)
+			ops := append([]Operation{}, objectOps...)
+			ops = append(ops, valueOps...)
 			ops = append(ops, &FieldStore{Object: object, ObjectType: objectType.Name, Field: target.Field, Value: value, Type: ctx.irType(typ), Offset: ctx.irFieldOffset(objectType, target.Field, field.Offset)})
+			return ops
 		default:
 			ctx.errorf("unsupported assignment target %T", s.Target)
+			return nil
 		}
-		return ops
 	case *ast.ReturnStmt:
 		if s.Value == nil {
 			return ctx.lowerReturn(nil, nil)
 		}
-		value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, s.Value)
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, s.Value, ctx.currentReturn)
 		return ctx.lowerReturn(value, valueOps)
 	case *ast.ExprStmt:
 		call, ok := s.Expr.(*ast.CallExpr)
@@ -673,6 +943,10 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		thenOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Then)
 		elseOps := ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, s.Else)
 		return []Operation{&If{ConditionOps: conditionOps, Condition: condition, Then: thenOps, Else: elseOps}}
+	case *ast.MatchStmt:
+		return ctx.lowerMatchStmt(moduleName, receiverType, scope, assigned, s)
+	case *ast.IfLetStmt:
+		return ctx.lowerIfLetStmt(moduleName, receiverType, scope, assigned, s)
 	case *ast.WithStmt:
 		parent, frameOps, length := ctx.lowerFrameCall(moduleName, receiverType, scope, s.Expr)
 		frameType := ctx.resolveType("machine.x86_64.executor_memory", "ArenaFrame")
@@ -699,6 +973,76 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 		ctx.errorf("unsupported statement %T", stmt)
 		return nil
 	}
+}
+
+func (ctx *lowerContext) lowerMatchStmt(moduleName string, receiverType *sem.Type, scope *lowerScope, assigned map[string]bool, stmt *ast.MatchStmt) []Operation {
+	value, valueOps, valueType := ctx.lowerExpr(moduleName, receiverType, scope, stmt.Value)
+	out := append([]Operation{}, valueOps...)
+	out = append(out, ctx.lowerMatchArms(moduleName, receiverType, scope, assigned, value, valueType, stmt.Arms, 0)...)
+	return out
+}
+
+func (ctx *lowerContext) lowerMatchArms(moduleName string, receiverType *sem.Type, scope *lowerScope, assigned map[string]bool, value Value, valueType *sem.Type, arms []ast.MatchArm, index int) []Operation {
+	if index >= len(arms) {
+		return nil
+	}
+	arm := arms[index]
+	if _, ok := arm.Pattern.(ast.WildcardPattern); ok {
+		return ctx.lowerStmtList(moduleName, receiverType, newLowerScope(scope), assigned, arm.Body)
+	}
+	pattern, ok := arm.Pattern.(ast.VariantPattern)
+	if !ok {
+		ctx.errorf("unsupported match pattern %T", arm.Pattern)
+		return ctx.lowerMatchArms(moduleName, receiverType, scope, assigned, value, valueType, arms, index+1)
+	}
+	variant, ok := ctx.enumVariantForType(valueType, pattern.Variant)
+	if !ok {
+		ctx.errorf("unknown enum variant %s on %s", pattern.Variant, typeName(valueType))
+		return ctx.lowerMatchArms(moduleName, receiverType, scope, assigned, value, valueType, arms, index+1)
+	}
+	test := &EnumVariantTest{Value: value, Type: ctx.irType(valueType), Variant: variant.Name}
+	armScope := newLowerScope(scope)
+	thenOps := ctx.lowerPatternBindings(value, variant, pattern.Bindings, armScope)
+	thenOps = append(thenOps, ctx.lowerStmtList(moduleName, receiverType, armScope, assigned, arm.Body)...)
+	elseOps := ctx.lowerMatchArms(moduleName, receiverType, scope, assigned, value, valueType, arms, index+1)
+	return []Operation{&If{ConditionOps: []Operation{test}, Condition: test, Then: thenOps, Else: elseOps}}
+}
+
+func (ctx *lowerContext) lowerIfLetStmt(moduleName string, receiverType *sem.Type, scope *lowerScope, assigned map[string]bool, stmt *ast.IfLetStmt) []Operation {
+	value, valueOps, valueType := ctx.lowerExpr(moduleName, receiverType, scope, stmt.Value)
+	pattern, ok := stmt.Pattern.(ast.VariantPattern)
+	if !ok {
+		return valueOps
+	}
+	variant, ok := ctx.enumVariantForType(valueType, pattern.Variant)
+	if !ok {
+		ctx.errorf("unknown enum variant %s on %s", pattern.Variant, typeName(valueType))
+		return valueOps
+	}
+	test := &EnumVariantTest{Value: value, Type: ctx.irType(valueType), Variant: variant.Name}
+	armScope := newLowerScope(scope)
+	thenOps := ctx.lowerPatternBindings(value, variant, pattern.Bindings, armScope)
+	thenOps = append(thenOps, ctx.lowerStmtList(moduleName, receiverType, armScope, assigned, stmt.Body)...)
+	out := append([]Operation{}, valueOps...)
+	out = append(out, &If{ConditionOps: []Operation{test}, Condition: test, Then: thenOps})
+	return out
+}
+
+func (ctx *lowerContext) lowerPatternBindings(value Value, variant sem.EnumVariant, bindings []ast.PatternBinding, scope *lowerScope) []Operation {
+	ops := make([]Operation, 0, len(bindings))
+	for _, binding := range bindings {
+		fieldType := enumVariantFieldType(variant, binding.Name)
+		extract := &EnumPayloadExtract{
+			Value:   value,
+			Type:    ctx.irType(fieldType),
+			Variant: variant.Name,
+			Field:   binding.Name,
+		}
+		ops = append(ops, extract)
+		scope.define(binding.Bind, lowerBinding{value: extract, typ: fieldType})
+		ctx.rememberValueBinding(extract, binding.Bind)
+	}
+	return ops
 }
 
 func (ctx *lowerContext) lowerTopicWaitIfArmed(moduleName string, receiverType *sem.Type, scope *lowerScope, stmt *ast.IfStmt) (*TopicWaitIfArmed, []Operation, bool) {
@@ -838,6 +1182,9 @@ func qualifiedSemTypeName(typ *sem.Type) string {
 	if typ == nil {
 		return ""
 	}
+	if typ.GenericOrigin != nil {
+		typ = typ.GenericOrigin
+	}
 	if typ.Module == "" {
 		return typ.Name
 	}
@@ -900,6 +1247,7 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		return
 	}
 	for _, topic := range ctx.checked.ImageGraph.Topics {
+		payloadType := ctx.topicPayloadType(topic)
 		layout := TopicLayout{
 			Label:        topic.Label,
 			Kind:         topic.Kind,
@@ -907,6 +1255,18 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 			PayloadType:  irTypeFromQualifiedName(topic.PayloadType),
 			PayloadSize:  topic.PayloadSize,
 			PayloadAlign: topic.PayloadAlign,
+		}
+		if payloadType != nil {
+			info := ctx.ensureTypeInfo(payloadType, map[string]bool{})
+			layout.PayloadType = ctx.irType(payloadType)
+			if info.StorageSize > 0 {
+				layout.PayloadSize = uint64(info.StorageSize)
+			} else if info.Size > 0 {
+				layout.PayloadSize = uint64(info.Size)
+			}
+			if info.Align > 0 {
+				layout.PayloadAlign = uint64(info.Align)
+			}
 		}
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
 			if sub.TopicLabel == topic.Label {
@@ -916,6 +1276,42 @@ func (ctx *lowerContext) lowerTopicLayouts() {
 		layout.Producers = ctx.publisherSlotsForTopic(topic.Label)
 		ctx.program.Topics = append(ctx.program.Topics, layout)
 	}
+}
+
+func (ctx *lowerContext) topicPayloadType(topic sem.TopicNode) *sem.Type {
+	if ctx == nil || ctx.checked == nil || ctx.checked.Index == nil {
+		return nil
+	}
+	if typ := ctx.typeForTopicPayloadName(topic.PayloadKey); typ != nil {
+		return typ
+	}
+	return ctx.typeForTopicPayloadName(topic.PayloadType)
+}
+
+func (ctx *lowerContext) typeForTopicPayloadName(name string) *sem.Type {
+	if name == "" {
+		return nil
+	}
+	if typ := ctx.checked.Index.Instantiations[name]; typ != nil {
+		return typ
+	}
+	if typ := ctx.checked.Index.MustType(name); typ != nil {
+		return typ
+	}
+	moduleName, typeName, ok := splitQualifiedTypeName(name)
+	if !ok {
+		return nil
+	}
+	typ, _ := ctx.checked.Index.Lookup(moduleName, typeName)
+	return typ
+}
+
+func splitQualifiedTypeName(name string) (string, string, bool) {
+	at := strings.LastIndex(name, ".")
+	if at <= 0 || at == len(name)-1 {
+		return "", "", false
+	}
+	return name[:at], name[at+1:], true
 }
 
 func (ctx *lowerContext) lowerTimerRoutes() {
@@ -1409,11 +1805,103 @@ func (ctx *lowerContext) bindingNameForValue(value Value) string {
 	return ""
 }
 
+func (ctx *lowerContext) intrinsicForCall(receiverType *sem.Type, method string) intrinsicKind {
+	switch {
+	case qualifiedSemTypeName(receiverType) == "machine.x86_64.executor_memory.Slots" && method == "write":
+		return intrinsicSlotsWrite
+	case qualifiedSemTypeName(receiverType) == "machine.x86_64.executor_memory.Slots" && method == "fill":
+		return intrinsicSlotsFill
+	case qualifiedSemTypeName(receiverType) == "machine.x86_64.executor_memory.Slice" && method == "get":
+		return intrinsicSliceGet
+	case qualifiedSemTypeName(receiverType) == "machine.x86_64.executor_memory.MutableSlice" && method == "get":
+		return intrinsicMutableSliceGet
+	case qualifiedSemTypeName(receiverType) == "machine.x86_64.executor_memory.MutableSlice" && method == "set":
+		return intrinsicMutableSliceSet
+	default:
+		return intrinsicNone
+	}
+}
+
+func isSlotsSemType(typ *sem.Type) bool {
+	return qualifiedSemTypeName(typ) == "machine.x86_64.executor_memory.Slots" && len(typ.TypeArgs) == 1
+}
+
+func isSliceSemType(typ *sem.Type) bool {
+	name := qualifiedSemTypeName(typ)
+	return (name == "machine.x86_64.executor_memory.Slice" || name == "machine.x86_64.executor_memory.MutableSlice") && len(typ.TypeArgs) == 1
+}
+
+func (ctx *lowerContext) lowerIntrinsicCall(moduleName string, receiverType *sem.Type, scope *lowerScope, call *ast.CallExpr, receiver Value, receiverOps []Operation, recvType *sem.Type, kind intrinsicKind) (Value, []Operation, *sem.Type, bool) {
+	switch kind {
+	case intrinsicSlotsWrite:
+		index, indexOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "index"))
+		elemType := recvType.TypeArgs[0]
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, namedArgExpr(call.Args, "value"), elemType)
+		write := &SlotWrite{Slots: receiver, Index: index, Value: value}
+		ops := append([]Operation{}, receiverOps...)
+		ops = append(ops, indexOps...)
+		ops = append(ops, valueOps...)
+		ops = append(ops, write)
+		return receiver, ops, ctx.resolveType(moduleName, "void"), true
+	case intrinsicSlotsFill:
+		elemType := recvType.TypeArgs[0]
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, namedArgExpr(call.Args, "value"), elemType)
+		ret := ctx.methodReturn(moduleName, ctx.lookupMethod(recvType, call.Method))
+		fill := &SlotFill{Slots: receiver, Value: value, Element: ctx.irType(elemType), Type: ctx.irType(ret)}
+		ops := append([]Operation{}, receiverOps...)
+		ops = append(ops, valueOps...)
+		ops = append(ops, fill)
+		return fill, ops, ret, true
+	case intrinsicSliceGet, intrinsicMutableSliceGet:
+		index, indexOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "index"))
+		elemType := recvType.TypeArgs[0]
+		get := &SliceGet{Slice: receiver, Index: index, Type: ctx.irType(elemType)}
+		ops := append([]Operation{}, receiverOps...)
+		ops = append(ops, indexOps...)
+		ops = append(ops, get)
+		return get, ops, elemType, true
+	case intrinsicMutableSliceSet:
+		index, indexOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(call.Args, "index"))
+		elemType := recvType.TypeArgs[0]
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, namedArgExpr(call.Args, "value"), elemType)
+		set := &SliceSet{Slice: receiver, Index: index, Value: value}
+		ops := append([]Operation{}, receiverOps...)
+		ops = append(ops, indexOps...)
+		ops = append(ops, valueOps...)
+		ops = append(ops, set)
+		return receiver, ops, ctx.resolveType(moduleName, "void"), true
+	default:
+		return nil, nil, nil, false
+	}
+}
+
+func (ctx *lowerContext) typeOperandArg(moduleName string, args []ast.NamedArg) *sem.Type {
+	if len(args) == 0 || args[0].Name != "" {
+		return nil
+	}
+	switch value := args[0].Value.(type) {
+	case *ast.NameExpr:
+		return ctx.resolveTypeRef(moduleName, ast.TypeRef{Name: value.Name, SpanV: value.SpanV})
+	case *ast.TypeOperandExpr:
+		return ctx.resolveTypeRef(moduleName, value.Type)
+	default:
+		return nil
+	}
+}
+
 func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, scope *lowerScope, expr ast.Expr) (Value, []Operation, *sem.Type) {
+	return ctx.lowerExprExpected(moduleName, receiverType, scope, expr, nil)
+}
+
+func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.Type, scope *lowerScope, expr ast.Expr, expected *sem.Type) (Value, []Operation, *sem.Type) {
 	switch e := expr.(type) {
 	case *ast.NameExpr:
 		if binding, ok := scope.lookup(e.Name); ok {
 			return binding.value, nil, binding.typ
+		}
+		if value, ok := ctx.checked.Index.LookupConst(moduleName, e.Name); ok && value.Type != nil {
+			c := &ConstInt{Symbol: e.Name, Value: value.Value, Type: ctx.irType(value.Type)}
+			return c, []Operation{c}, value.Type
 		}
 		typ := ctx.resolveType(moduleName, e.Name)
 		if typ != nil {
@@ -1439,6 +1927,22 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		typ := ctx.resolveType(moduleName, "Bool")
 		c := &ConstInt{Symbol: "bool", Value: raw, Type: ctx.irType(typ)}
 		return c, []Operation{c}, typ
+	case *ast.SizeOfExpr:
+		target := ctx.resolveTypeRef(moduleName, e.Type)
+		info := ctx.ensureTypeInfo(target, map[string]bool{})
+		typ := ctx.resolveType(moduleName, "U64")
+		size := info.StorageSize
+		if size == 0 {
+			size = info.Size
+		}
+		c := &ConstInt{Symbol: "sizeof", Value: uint64(size), Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
+	case *ast.AlignOfExpr:
+		target := ctx.resolveTypeRef(moduleName, e.Type)
+		info := ctx.ensureTypeInfo(target, map[string]bool{})
+		typ := ctx.resolveType(moduleName, "U64")
+		c := &ConstInt{Symbol: "alignof", Value: uint64(info.Align), Type: ctx.irType(typ)}
+		return c, []Operation{c}, typ
 	case *ast.StringLiteral:
 		typ := ctx.resolveType(moduleName, "StringLiteral")
 		dataSymbol := symbolName("str", moduleName, fmt.Sprintf("%d", ctx.stringSeq))
@@ -1453,6 +1957,15 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			ctx.errorf("unknown field %s", e.Field)
 			return object, objectOps, objectType
 		}
+		var fieldType *sem.Type
+		if objectType != nil {
+			for _, candidate := range objectType.Fields {
+				if candidate.Name == e.Field {
+					fieldType = candidate.Type
+					break
+				}
+			}
+		}
 		load := &FieldLoad{
 			Object:     object,
 			ObjectType: objectType.Name,
@@ -1460,21 +1973,30 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 			Type:       field.Type,
 			Offset:     ctx.irFieldOffset(objectType, e.Field, field.Offset),
 		}
-		return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
+		if fieldType == nil {
+			return load, append(objectOps, load), ctx.resolveType(field.Type.Module, field.Type.Name)
+		}
+		return load, append(objectOps, load), fieldType
 	case *ast.ConstructorExpr:
-		typ := ctx.resolveType(moduleName, e.Type)
+		typ := ctx.resolveTypeRef(moduleName, e.Type)
+		typName := e.Type.String()
 		var ops []Operation
 		fields := make([]FieldValue, 0, len(e.Args))
 		for _, arg := range e.Args {
-			value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, arg.Value)
+			value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, arg.Value, ctx.fieldType(typ, arg.Name))
 			ops = append(ops, valueOps...)
 			fields = append(fields, FieldValue{Name: arg.Name, Value: value})
 		}
-		construct := &Construct{Symbol: e.Type, Type: ctx.irType(typ), Fields: fields}
+		construct := &Construct{Symbol: typName, Type: ctx.irType(typ), Fields: fields}
 		ops = append(ops, construct)
 		return construct, ops, typ
+	case *ast.VariantConstructorExpr:
+		return ctx.lowerVariantConstructorExpr(moduleName, receiverType, scope, e, expected)
 	case *ast.CallExpr:
 		receiver, receiverOps, recvType := ctx.lowerExpr(moduleName, receiverType, scope, e.Receiver)
+		if value, ops, typ, ok := ctx.lowerIntrinsicCall(moduleName, receiverType, scope, e, receiver, receiverOps, recvType, ctx.intrinsicForCall(recvType, e.Method)); ok {
+			return value, ops, typ
+		}
 		if recvType != nil && recvType.Module == "machine.x86_64.timer" && recvType.Name == "TimerAuthority" && e.Method == "initialize" {
 			localApic, localApicOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "local_apic"))
 			source, periodUS, vector := ctx.timerInitFactsForValue(receiver)
@@ -1522,51 +2044,6 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 				ops = append(ops, valueOps...)
 				ops = append(ops, tryPublish)
 				return tryPublish, ops, ret
-			case "publish_or_wait":
-				value, valueOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "value"))
-				method := ctx.lookupMethod(recvType, "try_publish")
-				ret := ctx.methodReturn(moduleName, method)
-				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				if label == "" {
-					break
-				}
-				fullField := ctx.lookupField(ret, "full")
-				if fullField == nil {
-					ctx.errorf("publish_or_wait requires U64PublishResult.full")
-					break
-				}
-				publisherSlot := ctx.publisherSlotForValue(receiver, receiverType)
-				result := ctx.tempLocal("publish_or_wait_result", ctx.irType(ret))
-				initialTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
-				initialCopy := &Copy{Target: result, Source: initialTry, Type: ctx.irType(ret)}
-				condition := &FieldLoad{
-					Object:     result,
-					ObjectType: ret.Name,
-					Field:      "full",
-					Type:       fullField.Type,
-					Offset:     fullField.Offset,
-				}
-				wait := &ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: publisherSlot}
-				retryTry := &ReliableTopicTryPublish{TopicLabel: label, Value: value, Type: ctx.irType(ret)}
-				retryCopy := &Copy{Target: result, Source: retryTry, Type: ctx.irType(ret)}
-				loop := &While{
-					ConditionOps: []Operation{condition},
-					Condition:    condition,
-					Body:         []Operation{wait, retryTry, retryCopy},
-				}
-				ops := append([]Operation{}, receiverOps...)
-				ops = append(ops, valueOps...)
-				ops = append(ops, initialTry, initialCopy, loop)
-				return receiver, ops, ctx.resolveType(moduleName, "void")
-			case "wait_for_subscriber_advance":
-				label, _ := ctx.topicLabelAndKindForValue(receiver)
-				if label == "" {
-					break
-				}
-				wait := ReliableTopicWaitForAdvance{TopicLabel: label, PublisherSlot: ctx.publisherSlotForValue(receiver, receiverType)}
-				ops := append([]Operation{}, receiverOps...)
-				ops = append(ops, wait)
-				return receiver, ops, ctx.resolveType(moduleName, "void")
 			}
 		}
 		if sem.IsTopicSubscriptionType(recvType) {
@@ -1718,6 +2195,23 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		}
 		if sem.IsArenaType(recvType) {
 			switch e.Method {
+			case "reserve_array":
+				elemType := ctx.typeOperandArg(moduleName, e.Args)
+				count, countOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "count"))
+				slotsType := ctx.findInstantiation(ctx.resolveType("machine.x86_64.executor_memory", "Slots"), []*sem.Type{elemType})
+				if slotsType == nil {
+					slotsType = ctx.resolveType("machine.x86_64.executor_memory", "Slots")
+				}
+				reserve := &ArenaReserveArray{
+					Arena:   receiver,
+					Element: ctx.irType(elemType),
+					Count:   count,
+					Type:    ctx.irType(slotsType),
+				}
+				ops := append([]Operation{}, receiverOps...)
+				ops = append(ops, countOps...)
+				ops = append(ops, reserve)
+				return reserve, ops, slotsType
 			case "reserve":
 				length, lengthOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "length"))
 				align, alignOps, _ := ctx.lowerExpr(moduleName, receiverType, scope, namedArgExpr(e.Args, "align"))
@@ -1734,7 +2228,7 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 					ctx.errorf("place argument was not a constructor")
 					return receiver, receiverOps, recvType
 				}
-				placedType := ctx.resolveType(moduleName, cons.Type)
+				placedType := ctx.resolveTypeRef(moduleName, cons.Type)
 				fields := make([]FieldValue, 0, len(cons.Args))
 				ops := append([]Operation{}, receiverOps...)
 				for _, arg := range cons.Args {
@@ -1751,6 +2245,10 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 		args, argOps := ctx.lowerCallArgs(moduleName, receiverType, scope, method, e.Args)
 		ret := ctx.methodReturn(moduleName, method)
 		symbol := symbolName("method", recvType.Module, recvType.Name, e.Method)
+		if recvType != nil && recvType.GenericOrigin != nil {
+			ctx.enqueueConcreteMethod(recvType, e.Method)
+			symbol = symbolName("method", recvType.Module, recvType.MangledName(), e.Method)
+		}
 		if recvType.Kind == sem.KindExecutor && len(ctx.executorPlacementsForType(recvType)) > 1 {
 			if ctx.currentExecutor != nil && sameSemType(ctx.currentExecutor.Type, recvType) {
 				symbol = executorMethodSymbolForSlot(recvType, e.Method, ctx.currentExecutor.SlotLabel)
@@ -1796,11 +2294,198 @@ func (ctx *lowerContext) lowerExpr(moduleName string, receiverType *sem.Type, sc
 	}
 }
 
+func (ctx *lowerContext) lowerVariantConstructorExpr(moduleName string, receiverType *sem.Type, scope *lowerScope, expr *ast.VariantConstructorExpr, expected *sem.Type) (Value, []Operation, *sem.Type) {
+	enumType := ctx.enumTypeForConstructor(moduleName, scope, expr, expected)
+	if enumType == nil {
+		enumType = ctx.resolveType(moduleName, expr.Enum)
+	}
+	variant, ok := ctx.enumVariantForType(enumType, expr.Variant)
+	if !ok {
+		ctx.errorf("unknown enum variant %s.%s", expr.Enum, expr.Variant)
+		return &ConstInt{Value: 0, Type: Type{Name: "U64", Kind: TypeKindPrimitive}}, nil, ctx.resolveType(moduleName, "U64")
+	}
+	var ops []Operation
+	fields := make([]FieldValue, 0, len(expr.Args))
+	for _, arg := range expr.Args {
+		fieldType := enumVariantFieldType(variant, arg.Name)
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, arg.Value, fieldType)
+		ops = append(ops, valueOps...)
+		fields = append(fields, FieldValue{Name: arg.Name, Value: value})
+	}
+	construct := &EnumConstruct{
+		Symbol:  enumType.Display(),
+		Type:    ctx.irType(enumType),
+		Variant: variant.Name,
+		Fields:  fields,
+	}
+	ops = append(ops, construct)
+	return construct, ops, enumType
+}
+
+func (ctx *lowerContext) enumTypeForConstructor(moduleName string, scope *lowerScope, expr *ast.VariantConstructorExpr, expected *sem.Type) *sem.Type {
+	base := ctx.resolveType(moduleName, expr.Enum)
+	if base == nil || base.Kind != sem.KindEnum {
+		return nil
+	}
+	if expected != nil && expected.Kind == sem.KindEnum && sameEnumOrigin(expected, base) {
+		return expected
+	}
+	if len(base.TypeParams) == 0 {
+		return base
+	}
+	variant, ok := ctx.enumVariantForType(base, expr.Variant)
+	if !ok {
+		return nil
+	}
+	inferred := map[string]*sem.Type{}
+	for _, field := range variant.Fields {
+		arg := namedArgExpr(expr.Args, field.Name)
+		if arg == nil {
+			continue
+		}
+		argType := ctx.staticTypeForExpr(moduleName, scope, arg)
+		if argType == nil {
+			continue
+		}
+		if conflict, ok := inferEnumConstructorTypeArgs(field.Type, argType, inferred); !ok {
+			ctx.errorf("conflicting inferred type for %s in %s.%s", conflict, expr.Enum, expr.Variant)
+			return nil
+		}
+	}
+	args := make([]*sem.Type, 0, len(base.TypeParams))
+	for _, param := range base.TypeParams {
+		arg := inferred[param.Name]
+		if arg == nil {
+			return nil
+		}
+		args = append(args, arg)
+	}
+	if concrete := ctx.findInstantiation(base, args); concrete != nil {
+		return concrete
+	}
+	return nil
+}
+
+func inferEnumConstructorTypeArgs(pattern *sem.Type, concrete *sem.Type, inferred map[string]*sem.Type) (string, bool) {
+	if pattern == nil || concrete == nil {
+		return "", true
+	}
+	if pattern.Kind == sem.KindTypeParam && pattern.Module == "" && len(pattern.TypeArgs) == 0 {
+		if existing := inferred[pattern.Name]; existing != nil && existing.Key() != concrete.Key() {
+			return pattern.Name, false
+		}
+		inferred[pattern.Name] = concrete
+		return "", true
+	}
+	if len(pattern.TypeArgs) == 0 || len(pattern.TypeArgs) != len(concrete.TypeArgs) {
+		return "", true
+	}
+	if !sameGenericSemTypePattern(pattern, concrete) {
+		return "", true
+	}
+	for i := range pattern.TypeArgs {
+		if conflict, ok := inferEnumConstructorTypeArgs(pattern.TypeArgs[i], concrete.TypeArgs[i], inferred); !ok {
+			return conflict, false
+		}
+	}
+	return "", true
+}
+
+func sameGenericSemTypePattern(pattern *sem.Type, concrete *sem.Type) bool {
+	if pattern == nil || concrete == nil {
+		return false
+	}
+	patternBase := pattern
+	if patternBase.GenericOrigin != nil {
+		patternBase = patternBase.GenericOrigin
+	}
+	concreteBase := concrete
+	if concreteBase.GenericOrigin != nil {
+		concreteBase = concreteBase.GenericOrigin
+	}
+	return qualifiedSemTypeName(patternBase) == qualifiedSemTypeName(concreteBase)
+}
+
+func (ctx *lowerContext) staticTypeForExpr(moduleName string, scope *lowerScope, expr ast.Expr) *sem.Type {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		if binding, ok := scope.lookup(e.Name); ok {
+			return binding.typ
+		}
+		return ctx.resolveType(moduleName, e.Name)
+	case *ast.IntLiteral:
+		return ctx.resolveType(moduleName, "U64")
+	case *ast.BoolLiteral:
+		return ctx.resolveType(moduleName, "Bool")
+	case *ast.StringLiteral:
+		return ctx.resolveType(moduleName, "StringLiteral")
+	case *ast.ConstructorExpr:
+		return ctx.resolveTypeRef(moduleName, e.Type)
+	case *ast.VariantConstructorExpr:
+		return ctx.enumTypeForConstructor(moduleName, scope, e, nil)
+	default:
+		return nil
+	}
+}
+
+func (ctx *lowerContext) findInstantiation(base *sem.Type, args []*sem.Type) *sem.Type {
+	if ctx.checked == nil || ctx.checked.Index == nil || base == nil {
+		return nil
+	}
+	key := (&sem.Type{Module: base.Module, Name: base.Name, Kind: base.Kind, TypeArgs: args}).Key()
+	if candidate := ctx.checked.Index.Instantiations[key]; candidate != nil {
+		ctx.ensureTypeInfo(candidate, map[string]bool{})
+		return candidate
+	}
+	return nil
+}
+
+func sameEnumOrigin(a, b *sem.Type) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	if a.GenericOrigin != nil {
+		a = a.GenericOrigin
+	}
+	if b.GenericOrigin != nil {
+		b = b.GenericOrigin
+	}
+	return a == b || qualifiedSemTypeName(a) == qualifiedSemTypeName(b)
+}
+
+func (ctx *lowerContext) enumVariantForType(valueType *sem.Type, name string) (sem.EnumVariant, bool) {
+	if valueType == nil {
+		return sem.EnumVariant{}, false
+	}
+	variants := valueType.EnumVariants
+	if len(variants) == 0 && valueType.GenericOrigin != nil {
+		variants = valueType.GenericOrigin.EnumVariants
+	}
+	for _, variant := range variants {
+		if variant.Name == name {
+			return variant, true
+		}
+	}
+	return sem.EnumVariant{}, false
+}
+
+func enumVariantFieldType(variant sem.EnumVariant, fieldName string) *sem.Type {
+	for _, field := range variant.Fields {
+		if field.Name == fieldName {
+			return field.Type
+		}
+	}
+	return nil
+}
+
 func (ctx *lowerContext) irFieldOffset(objectType *sem.Type, fieldName string, fallback int) int {
 	if objectType == nil {
 		return fallback
 	}
-	info, ok := ctx.program.Types[typeInfoKey(objectType.Module, objectType.Name)]
+	info, ok := ctx.program.Types[ctx.typeInfoKey(objectType)]
 	if !ok {
 		info, ok = ctx.program.Types[objectType.Name]
 	}
@@ -1840,7 +2525,7 @@ func (ctx *lowerContext) lowerCallArgs(moduleName string, receiverType *sem.Type
 		if argExpr == nil {
 			continue
 		}
-		value, valueOps, _ := ctx.lowerExpr(moduleName, nil, scope, argExpr)
+		value, valueOps, _ := ctx.lowerExprExpected(moduleName, nil, scope, argExpr, param.Type)
 		ops = append(ops, valueOps...)
 		values = append(values, value)
 	}
@@ -1857,6 +2542,18 @@ func (ctx *lowerContext) lookupField(typ *sem.Type, fieldName string) *FieldInfo
 		return nil
 	}
 	return &field
+}
+
+func (ctx *lowerContext) fieldType(typ *sem.Type, fieldName string) *sem.Type {
+	if typ == nil {
+		return nil
+	}
+	for _, field := range typ.Fields {
+		if field.Name == fieldName {
+			return field.Type
+		}
+	}
+	return nil
 }
 
 func (ctx *lowerContext) tempLocal(prefix string, typ Type) *Local {
@@ -1897,10 +2594,53 @@ func (ctx *lowerContext) methodReturn(moduleName string, method *sem.Method) *se
 }
 
 func (ctx *lowerContext) methodDeclReturn(moduleName string, method *ast.MethodDecl) *sem.Type {
-	if method == nil || method.Return == "" {
+	if method == nil || method.Return.Name == "" {
 		return ctx.resolveType(moduleName, "void")
 	}
-	return ctx.resolveType(moduleName, method.Return)
+	return ctx.resolveTypeRef(moduleName, method.Return)
+}
+
+func (ctx *lowerContext) resolveTypeRef(moduleName string, ref ast.TypeRef) *sem.Type {
+	if ref.Name == "" {
+		return ctx.resolveType(moduleName, "void")
+	}
+	typ, ds := ctx.checked.Index.LookupTypeRef(moduleName, ref, ctx.currentTypeParamMap())
+	if len(ds) != 0 {
+		ctx.errorf("could not resolve type %s in %s", ref.String(), moduleName)
+		return ctx.resolveType(moduleName, "void")
+	}
+	if typ == nil {
+		return ctx.resolveType(moduleName, ref.Name)
+	}
+	return typ
+}
+
+func (ctx *lowerContext) currentTypeParamMap() map[string]*sem.Type {
+	if ctx == nil || ctx.currentReceiver == nil {
+		return nil
+	}
+	if cached, ok := ctx.typeParamMaps[ctx.currentReceiver]; ok {
+		return cached
+	}
+	var out map[string]*sem.Type
+	if ctx.currentReceiver.GenericOrigin != nil && len(ctx.currentReceiver.GenericOrigin.TypeParams) == len(ctx.currentReceiver.TypeArgs) {
+		out = map[string]*sem.Type{}
+		for i, param := range ctx.currentReceiver.GenericOrigin.TypeParams {
+			out[param.Name] = ctx.currentReceiver.TypeArgs[i]
+		}
+		ctx.typeParamMaps[ctx.currentReceiver] = out
+		return out
+	}
+	if len(ctx.currentReceiver.TypeParams) == 0 {
+		ctx.typeParamMaps[ctx.currentReceiver] = nil
+		return nil
+	}
+	out = map[string]*sem.Type{}
+	for _, param := range ctx.currentReceiver.TypeParams {
+		out[param.Name] = &sem.Type{Name: param.Name, Kind: sem.KindTypeParam}
+	}
+	ctx.typeParamMaps[ctx.currentReceiver] = out
+	return out
 }
 
 func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {
@@ -1908,6 +2648,10 @@ func (ctx *lowerContext) resolveType(moduleName, raw string) *sem.Type {
 		return ctx.resolveType(moduleName, "void")
 	}
 	if ctx.checked != nil && ctx.checked.Index != nil {
+		if typ := ctx.checked.Index.Instantiations[raw]; typ != nil {
+			ctx.ensureTypeInfo(typ, map[string]bool{})
+			return typ
+		}
 		if typ, ok := ctx.checked.Index.Lookup(moduleName, raw); ok && typ != nil {
 			ctx.ensureTypeInfo(typ, map[string]bool{})
 			return typ
@@ -1942,7 +2686,27 @@ func (ctx *lowerContext) irType(typ *sem.Type) Type {
 	if typ == nil {
 		return Type{Name: "void", Kind: TypeKindPrimitive}
 	}
-	return Type{Name: typ.Name, Module: typ.Module, Kind: semKindToIR(typ.Kind)}
+	return Type{Name: ctx.irTypeName(typ), Module: typ.Module, Kind: semKindToIR(typ.Kind)}
+}
+
+func (ctx *lowerContext) irTypeName(typ *sem.Type) string {
+	if typ == nil {
+		return "void"
+	}
+	if len(typ.TypeArgs) == 0 {
+		return typ.Name
+	}
+	return typ.Key()
+}
+
+func (ctx *lowerContext) typeInfoKey(typ *sem.Type) string {
+	if typ == nil {
+		return ""
+	}
+	if typ.Kind == sem.KindPrimitive {
+		return typ.Name
+	}
+	return typ.Key()
 }
 
 func (ctx *lowerContext) errorf(format string, args ...any) {
@@ -1987,6 +2751,12 @@ func assignedNames(stmts []ast.Stmt) map[string]bool {
 			case *ast.IfStmt:
 				walk(s.Then)
 				walk(s.Else)
+			case *ast.IfLetStmt:
+				walk(s.Body)
+			case *ast.MatchStmt:
+				for _, arm := range s.Arms {
+					walk(arm.Body)
+				}
 			case *ast.WhileStmt:
 				walk(s.Body)
 			case *ast.ForStmt:
@@ -2082,6 +2852,8 @@ func semKindToIR(kind sem.Kind) TypeKind {
 		return TypeKindExecutor
 	case sem.KindImage:
 		return TypeKindImage
+	case sem.KindEnum:
+		return TypeKindEnum
 	default:
 		return TypeKindUnknown
 	}
@@ -2267,13 +3039,15 @@ func pathName(pathType string) string {
 }
 
 func typeInfoFor(types map[string]TypeInfo, typ Type) (TypeInfo, bool) {
+	if info, ok := types[typ.Name]; ok {
+		return info, true
+	}
 	if typ.Module != "" {
 		if info, ok := types[typ.Module+"."+typ.Name]; ok {
 			return info, true
 		}
 	}
-	info, ok := types[typ.Name]
-	return info, ok
+	return TypeInfo{}, false
 }
 
 func typeName(typ *sem.Type) string {
@@ -2306,12 +3080,5 @@ func receiverHasMethodReturning(receiver *sem.Type, ret *sem.Type) bool {
 }
 
 func typeKey(moduleName, name string) string {
-	return moduleName + "." + name
-}
-
-func typeInfoKey(moduleName, name string) string {
-	if moduleName == "" {
-		return name
-	}
 	return moduleName + "." + name
 }

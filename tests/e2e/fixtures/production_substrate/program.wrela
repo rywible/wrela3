@@ -1,15 +1,17 @@
 module tests.e2e.fixtures.production_substrate.program
 
+use { Option } from wrela.lang.core
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { EventSleepPolicy, HotPollPolicy } from machine.x86_64.executor_loop
 use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
-use { EduInterruptSubscription, EduMsiPath } from machine.x86_64.edu
+use { EduInterrupt, EduMsiPath } from machine.x86_64.edu
 use { ApicInterruptController, InterruptSourceIdentity, InterruptVector, SharedInterruptSource } from machine.x86_64.interrupts
 use { InterruptQueue } from machine.x86_64.interrupt_queue
-use { IvshmemDoorbellPath, IvshmemDoorbellPeerPath, IvshmemDoorbellSubscription } from machine.x86_64.ivshmem
+use { IvshmemDoorbellInterrupt, IvshmemDoorbellPath, IvshmemDoorbellPeerPath } from machine.x86_64.ivshmem
 use { MsiCapability, MsixCapability } from machine.x86_64.pci
-use { SerialConsolePath, SerialRxSubscription } from machine.x86_64.serial
-use { TimerTickSubscription } from machine.x86_64.topic_payload
+use { SerialConsolePath } from machine.x86_64.serial
+use { TopicSubscription } from machine.x86_64.topic
+use { TimerTickPayload } from machine.x86_64.topic_payload
 
 data RunScratch {
     hello: Bytes
@@ -18,7 +20,7 @@ data RunScratch {
 executor BackgroundWorker {
     slot: ExecutorSlot
     loop: HotPollPolicy
-    worker_ticks: TimerTickSubscription
+    worker_ticks: TopicSubscription<TimerTickPayload>
 
     start fn run(self) -> never {
         while true {
@@ -36,22 +38,26 @@ executor ProductionSubstrateProgram {
     edu_msi: MsiCapability
     ivshmem_msix: MsixCapability
     serial_path: SerialConsolePath
-    serial_rx: SerialRxSubscription
+    serial_rx: TopicSubscription<U8>
     edu_path: EduMsiPath
-    edu_interrupts: EduInterruptSubscription
+    edu_interrupts: TopicSubscription<EduInterrupt>
     ivshmem_rx: IvshmemDoorbellPath
-    ivshmem_events: IvshmemDoorbellSubscription
+    ivshmem_events: TopicSubscription<IvshmemDoorbellInterrupt>
     ivshmem_tx: IvshmemDoorbellPeerPath
     serial_irq_source: SharedInterruptSource
-    serial_irq_queue: InterruptQueue
-    console_ticks: TimerTickSubscription
+    serial_irq_queue: InterruptQueue<U8>
+    console_ticks: TopicSubscription<TimerTickPayload>
 
     start fn run(self) -> never {
         with self.memory.frame(length = 4096) as tick_frame {
             self.serial_path.write(self.memory.bytes(value = "production substrate\n"))
-            let tick = self.console_ticks.try_next()
-            if tick.has_message {
-                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            match self.console_ticks.try_next() {
+                Option.Some(value = tick) => {
+                    self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+                }
+                Option.None => {
+                    self.console_ticks.arm_wait()
+                }
             }
             self.serial_path.write(self.memory.bytes(value = "shared irq\n"))
         }
@@ -62,26 +68,42 @@ executor ProductionSubstrateProgram {
         self.edu_path.raise_test_interrupt()
         self.ivshmem_tx.ring_peer(peer_id = self.ivshmem_rx.position(), vector = 0)
         while true {
-            let serial_event = self.serial_rx.try_next()
-            if serial_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                self.serial_path.write_byte(value = serial_event.message.byte)
-                self.serial_path.write(self.memory.bytes(value = "\n"))
-                self.serial_path.ack_receive(event = serial_event.message)
+            match self.serial_rx.try_next() {
+                Option.Some(value = serial_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
+                    self.serial_path.write_byte(value = serial_event)
+                    self.serial_path.write(self.memory.bytes(value = "\n"))
+                    self.serial_path.ack_receive(event = serial_event)
+                }
+                Option.None => {
+                    self.serial_rx.arm_wait()
+                }
             }
-            let edu_event = self.edu_interrupts.try_next()
-            if edu_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
-                self.edu_path.ack_completed(event = edu_event.message)
+            match self.edu_interrupts.try_next() {
+                Option.Some(value = edu_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
+                    self.edu_path.ack_completed(event = edu_event)
+                }
+                Option.None => {
+                    self.edu_interrupts.arm_wait()
+                }
             }
-            let ivshmem_event = self.ivshmem_events.try_next()
-            if ivshmem_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_event.message)
+            match self.ivshmem_events.try_next() {
+                Option.Some(value = ivshmem_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
+                    self.ivshmem_rx.ack_doorbell(event = ivshmem_event)
+                }
+                Option.None => {
+                    self.ivshmem_events.arm_wait()
+                }
             }
-            let tick_event = self.console_ticks.try_next()
-            if tick_event.has_message {
-                self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+            match self.console_ticks.try_next() {
+                Option.Some(value = tick_event) => {
+                    self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
+                }
+                Option.None => {
+                    self.console_ticks.arm_wait()
+                }
             }
 
             self.serial_rx.arm_wait()
@@ -89,39 +111,34 @@ executor ProductionSubstrateProgram {
             self.ivshmem_events.arm_wait()
             self.console_ticks.arm_wait()
 
-            let serial_retry = self.serial_rx.try_next()
-            if serial_retry.has_message {
+            let had_retry_event = false
+            if let Option.Some(value = serial_retry) = self.serial_rx.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "serial interrupt: "))
-                self.serial_path.write_byte(value = serial_retry.message.byte)
+                self.serial_path.write_byte(value = serial_retry)
                 self.serial_path.write(self.memory.bytes(value = "\n"))
-                self.serial_path.ack_receive(event = serial_retry.message)
+                self.serial_path.ack_receive(event = serial_retry)
             }
-            let edu_retry = self.edu_interrupts.try_next()
-            if edu_retry.has_message {
+            if let Option.Some(value = edu_retry) = self.edu_interrupts.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msi interrupt\n"))
-                self.edu_path.ack_completed(event = edu_retry.message)
+                self.edu_path.ack_completed(event = edu_retry)
             }
-            let ivshmem_retry = self.ivshmem_events.try_next()
-            if ivshmem_retry.has_message {
+            if let Option.Some(value = ivshmem_retry) = self.ivshmem_events.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry.message)
+                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry)
             }
-            let tick_retry = self.console_ticks.try_next()
-            if tick_retry.has_message {
+            if let Option.Some(value = tick_retry) = self.console_ticks.try_next() {
+                had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "timer tick\n"))
             }
-            if serial_retry.has_message == false {
-                if edu_retry.has_message == false {
-                    if ivshmem_retry.has_message == false {
-                        if tick_retry.has_message == false {
-                            if self.serial_rx.is_wait_armed() {
-                                if self.edu_interrupts.is_wait_armed() {
-                                    if self.ivshmem_events.is_wait_armed() {
-                                        if self.console_ticks.is_wait_armed() {
-                                            self.loop.wait()
-                                        }
-                                    }
-                                }
+            if had_retry_event == false {
+                if self.serial_rx.is_wait_armed() {
+                    if self.edu_interrupts.is_wait_armed() {
+                        if self.ivshmem_events.is_wait_armed() {
+                            if self.console_ticks.is_wait_armed() {
+                                self.loop.wait()
                             }
                         }
                     }

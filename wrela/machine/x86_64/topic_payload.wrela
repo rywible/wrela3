@@ -1,62 +1,10 @@
 module machine.x86_64.topic_payload
 
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { TopicIdentity } from machine.x86_64.topic_u64
-
 data TimerTickPayload {
     sequence: U64
     monotonic_us: U64
     source_id: U32
 }
 
-data TimerTickNext {
-    has_message: Bool
-    gap: Bool
-    missed: U64
-    message: TimerTickPayload
-}
-
-class TimerTickTopic {
-    identity: TopicIdentity
-    id: U64
-    depth: U64
-
-    fn publisher(self) -> TimerTickPublisher {
-        return TimerTickPublisher(topic = self)
-    }
-
-    fn subscribe(self, subscriber: ExecutorSlot) -> TimerTickSubscription {
-        return TimerTickSubscription(topic = self, subscriber = subscriber, cursor = 0, armed = false)
-    }
-}
-
-class TimerTickPublisher {
-    topic: TimerTickTopic
-
-    fn publish(self, payload: TimerTickPayload) {
-        self.publish_intrinsic(payload = payload)
-    }
-
-    asm fn publish_intrinsic(self, payload: TimerTickPayload) {
-        ret
-    }
-}
-
-class TimerTickSubscription {
-    topic: TimerTickTopic
-    subscriber: ExecutorSlot
-    cursor: U64
-    armed: Bool
-
-    asm fn try_next(self) -> TimerTickNext {
-        ret
-    }
-
-    fn arm_wait(self) {
-        self.armed = true
-    }
-
-    fn is_wait_armed(self) -> Bool {
-        return self.armed
-    }
-}
+static_assert(sizeof(TimerTickPayload) <= 64, message = "timer tick payload fits one topic slot")
+static_assert(alignof(TimerTickPayload) == 8, message = "timer tick payload alignment")

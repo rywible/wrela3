@@ -8,11 +8,15 @@ import (
 
 func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "missing-overflow-policy.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
             capacity = 4,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8)
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if !hasCode(ds, diag.SEM0060) {
@@ -20,14 +24,51 @@ func TestInterruptQueueRequiresExplicitOverflowPolicy(t *testing.T) {
 	}
 }
 
-func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
-	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+func TestInterruptQueueSourceShapeIsGeneric(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-shape.wrela", interruptQueueSource(`
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
             capacity = 4,
-            payload = InterruptPayloadKind(kind = 1, size = 8, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 2)
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+`))
+	if len(ds) != 0 {
+		t.Fatalf("interrupt queue diagnostics: %#v", ds)
+	}
+	queue := moduleType(t, checked.Index, "machine.x86_64.interrupt_queue", "InterruptQueue")
+	if len(queue.TypeParams) != 1 || queue.TypeParams[0].Name != "T" {
+		t.Fatalf("InterruptQueue type params = %#v, want T", queue.TypeParams)
+	}
+	assertTypeFields(t, queue, map[string]string{
+		"identity":   "QueueIdentity",
+		"owner":      "ExecutorSlot",
+		"slots":      "Slots<T>",
+		"capacity":   "U64",
+		"overflow":   "InterruptOverflowPolicy",
+		"head":       "U64",
+		"tail":       "U64",
+		"overflowed": "Bool",
+	})
+}
+
+func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-good.wrela", interruptQueueSource(`
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if len(ds) != 0 {
@@ -37,23 +78,102 @@ func TestInterruptQueueRecordsImageGraphNode(t *testing.T) {
 		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
 	}
 	queue := checked.ImageGraph.InterruptQueues[0]
-	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "kind:1" || queue.PayloadSize != 8 || queue.PayloadAlign != 8 || queue.Overflow != "set_flag_and_wake" {
+	if queue.Label != "irq.serial.rx" || queue.Owner != "executor_slot.0" || queue.Capacity != 4 || queue.PayloadKind != "U8" || queue.PayloadSize != 1 || queue.PayloadAlign != 1 || queue.Overflow != "set_flag_and_wake" {
 		t.Fatalf("interrupt queue node = %#v", queue)
+	}
+}
+
+func TestInterruptQueueRejectsMismatchedSlotType(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-slot-mismatch.wrela", interruptQueueSource(`
+        let queue_slots = console_memory.reserve_array(U64, count = 4)
+        let queue = InterruptQueue<U8>(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+`))
+	if !hasCode(ds, diag.CG0001) {
+		t.Fatalf("expected CG0001 for InterruptQueue<T> backed by mismatched Slots<U>, got %#v", ds)
 	}
 }
 
 func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-overflow.wrela", interruptQueueSource(`
-        let queue = root.interrupt_queue(
+	        let queue_slots = console_memory.reserve_array(U64, count = 1)
+	        let queue = InterruptQueue<U64>(
             identity = QueueIdentity(label = "irq.serial.rx"),
             owner = ExecutorSlot(id = 0),
-            capacity = 0x8000000000000000,
-            payload = InterruptPayloadKind(kind = 1, size = 2, align = 8),
-            overflow = InterruptOverflowPolicy(mode = 2)
+            slots = queue_slots,
+	            capacity = 0x4000000000000000,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
         )
 `))
 	if !hasCode(ds, diag.SEM0060) {
 		t.Fatalf("expected SEM0060, got %#v", ds)
+	}
+}
+
+func TestInterruptQueueRecordsNestedPayloadStorageLayout(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-nested-payload.wrela", interruptQueueSourceWithPayload(`
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+        let payload_slots = console_memory.reserve_array(PayloadOuter, count = 4)
+        let payload_queue = InterruptQueue<PayloadOuter>(
+            identity = QueueIdentity(label = "irq.serial.payload"),
+            owner = ExecutorSlot(id = 1),
+            slots = payload_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+`, `
+data PayloadLeaf {
+    count: U64
+}
+data PayloadMiddle {
+    leaf: PayloadLeaf
+}
+data PayloadOuter {
+    middle: PayloadMiddle
+    marker: U8
+}`))
+	if len(ds) != 0 {
+		t.Fatalf("interrupt queue diagnostics: %#v", ds)
+	}
+	if len(checked.ImageGraph.InterruptQueues) != 2 {
+		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
+	}
+	var queue InterruptQueueNode
+	for _, candidate := range checked.ImageGraph.InterruptQueues {
+		if candidate.Label == "irq.serial.payload" {
+			queue = candidate
+			break
+		}
+	}
+	if queue.Label == "" {
+		t.Fatalf("missing nested payload interrupt queue: %#v", checked.ImageGraph.InterruptQueues)
+	}
+	if queue.PayloadSize != 32 || queue.PayloadAlign != 8 {
+		t.Fatalf("interrupt queue payload layout = size %d align %d, want size 32 align 8: %#v", queue.PayloadSize, queue.PayloadAlign, queue)
 	}
 }
 
@@ -103,6 +223,10 @@ func TestSharedInterruptDuplicateSourceRejected(t *testing.T) {
 }
 
 func interruptQueueSource(queueSetup string) string {
+	return interruptQueueSourceWithPayload(queueSetup, "")
+}
+
+func interruptQueueSourceWithPayload(queueSetup string, payloadDecls string) string {
 	return `
 module platform.test_interrupt_queue
 use { BootPanic } from platform.hardware.panic
@@ -113,8 +237,11 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, 
 use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
-use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy } from machine.x86_64.interrupt_queue
+use { QueueIdentity, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { Option } from wrela.lang.core
+
+` + payloadDecls + `
 
 image InterruptQueueTest {
     transitions { delegated_hardware -> owned_hardware }
@@ -180,9 +307,10 @@ use { CpuFeatureFacts, OwnedHardware, OwnedMemory, IoPortAuthority, MemoryPlan, 
 use { HardwarePlan, InterruptRoutingPlan, ClaimedPciPlanBuilder } from machine.x86_64.cpu_state
 use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { QueueIdentity, InterruptPayloadKind, InterruptOverflowPolicy } from machine.x86_64.interrupt_queue
+use { QueueIdentity, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { Option } from wrela.lang.core
 
 image SharedIrqTest {
     transitions { delegated_hardware -> owned_hardware }
@@ -198,7 +326,8 @@ image SharedIrqTest {
         let worker_slot_seed = ExecutorSlot(id = 1)
         let console_memory = root.executor_memory(owner = console_slot_seed, length = 0x100000, align = 4096)
         let worker_memory = root.executor_memory(owner = worker_slot_seed, length = 0x100000, align = 4096)
-        let serial_queue = root.interrupt_queue(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, capacity = 64, payload = InterruptPayloadKind(kind = 1, size = 8, align = 8), overflow = InterruptOverflowPolicy(mode = 0))
+        let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
+        let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let plan_route = interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
         let plan_source = plan_route.claim_source(identity = InterruptSourceIdentity(label = "serial.plan"))
 ` + claims + `

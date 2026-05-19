@@ -16,6 +16,18 @@ func TestImageReportJSONShape(t *testing.T) {
 		Bytes: 0x1000000,
 	}}
 	r.AuthorityAudit.MemoryRoots = []AuthorityRecord{{Kind: "memory_root", Label: "boot.root"}}
+	r.Runtime.Topics = []TopicReport{{
+		Label:       "timer.periodic",
+		Type:        "Topic<TimerTickPayload>",
+		TypeKey:     "machine.x86_64.topic.Topic<machine.x86_64.topic_payload.TimerTickPayload>",
+		PayloadType: "TimerTickPayload",
+		PayloadKey:  "machine.x86_64.topic_payload.TimerTickPayload",
+		NextType:    "Option<TimerTickPayload>",
+		NextKey:     "wrela.lang.core.Option<machine.x86_64.topic_payload.TimerTickPayload>",
+		Bytes:       24,
+		Align:       8,
+		Depth:       64,
+	}}
 	data, err := json.Marshal(r)
 	if err != nil {
 		t.Fatalf("marshal report: %v", err)
@@ -28,6 +40,20 @@ func TestImageReportJSONShape(t *testing.T) {
 		if _, ok := decoded[key]; !ok {
 			t.Fatalf("report missing top-level key %q in %s", key, data)
 		}
+	}
+	var shaped struct {
+		Runtime struct {
+			Topics []TopicReport `json:"topics"`
+		} `json:"runtime"`
+	}
+	if err := json.Unmarshal(data, &shaped); err != nil {
+		t.Fatalf("unmarshal shaped report: %v", err)
+	}
+	if len(shaped.Runtime.Topics) != 1 ||
+		shaped.Runtime.Topics[0].TypeKey != "machine.x86_64.topic.Topic<machine.x86_64.topic_payload.TimerTickPayload>" ||
+		shaped.Runtime.Topics[0].PayloadKey != "machine.x86_64.topic_payload.TimerTickPayload" ||
+		shaped.Runtime.Topics[0].NextKey != "wrela.lang.core.Option<machine.x86_64.topic_payload.TimerTickPayload>" {
+		t.Fatalf("generic topic JSON fields = %#v in %s", shaped.Runtime.Topics, data)
 	}
 }
 

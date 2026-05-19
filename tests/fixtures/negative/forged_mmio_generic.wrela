@@ -1,0 +1,15 @@
+// expect: SEM0092: protected memory-region view construction is not allowed here
+module platform.hardware.bytes
+data Mmio<T> {
+    address: U64
+}
+
+module negative.forged_mmio_generic
+use { Mmio } from platform.hardware.bytes
+data Registers { control: U32 }
+executor Worker {
+    start fn run(self) -> never {
+        let mmio = Mmio<Registers>(address = 0xFEE00000)
+        while true {}
+    }
+}
