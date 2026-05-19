@@ -61,3 +61,9 @@
 - This is required for production and not optional because iterative builds, caching, and inspection tooling are what keep the compiler usable day-to-day.
 - v0 exclusion reason: this milestone prioritizes correctness over productivity niceties so the first end-to-end artifact can be proven.
 - v0 must not block: cache/incremental mode, compiler daemon, and image-inspection tooling should consume the current command and result contracts.
+
+## Storage beyond the first NVMe event-store milestone
+- POSIX filesystem compatibility remains out of scope. The first storage surface is events, blobs, checkpoints, projections, and file-like entity streams.
+- SQL, relational query planning, general secondary indexes, multi-writer event-log sharding, and network replication remain out of scope.
+- Production command inboxes, idempotency records, full-disk encryption, IOMMU-backed DMA isolation, SGL-heavy NVMe transfers, tuned compression codec selection, and destructive retention policies remain deferred.
+- The first blob cipher used by QEMU tests is a named development passthrough mode behind the final blob manifest API. Production images must not construct it without explicit development-storage opt in.
