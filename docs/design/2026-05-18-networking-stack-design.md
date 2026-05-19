@@ -9,6 +9,7 @@ placement, and no hidden operating-system substrate.
 The long-term stack is:
 
 ```text
+0. Packet trace harness
 1. e1000e RX/TX
 2. Ethernet II
 3. ARP
@@ -28,7 +29,7 @@ The long-term stack is:
 The first implementation milestone is deliberately smaller:
 
 ```text
-QEMU e1000e + static IPv4 + ARP + ICMP echo
+packet trace harness + QEMU e1000e + static IPv4 + ARP + ICMP echo
 ```
 
 That proves PCI device discovery, BAR ownership, DMA rings, interrupt delivery,
@@ -41,7 +42,9 @@ behavior before TCP, TLS, DNS, or HTTP enter the system.
 - The likely real-hardware follow-up is one Intel e1000e-family PCIe gigabit
   controller, preferably an 82574L-class card if available.
 - The first image uses static IPv4 configuration. DHCP is a later step.
-- Networking owns a dedicated executor on its own core.
+- The first runtime milestone gives networking one dedicated executor on its own
+  core. Later protocol work can split per-flow authorities onto additional
+  executors without moving NIC ring ownership.
 - Networking targets modern x86_64 machines with AVX2-class SIMD and crypto
   instructions as the supported fallback tier.
 - The preferred performance target is AVX-512 with VAES, VPCLMULQDQ, and SHA
@@ -49,6 +52,8 @@ behavior before TCP, TLS, DNS, or HTTP enter the system.
 - Applications do not directly touch NIC MMIO, descriptor rings, DMA buffers,
   or raw mutable packet memory.
 - TLS crypto is Wrela-owned, not imported from a C TLS stack.
+- TLS key exchange is quantum-safe from the first TLS milestone through a hybrid
+  TLS 1.3 group using X25519 and ML-KEM-768.
 - Bespoke TLS crypto is treated as a serious security project: it needs known
   test vectors, differential tests, transcript tests, negative tests, and
   timing-aware implementation review before any production claim.
@@ -66,8 +71,9 @@ This design does not add:
 - TCP segmentation offload, LRO, RSS, or multiqueue in the first milestones
 - Wi-Fi
 - packet capture tooling beyond small debug reports
-- production CA-bundle management in the first TLS milestone
 - production networking crypto on CPUs below the AVX2 fallback tier
+- multiple NICs, multiple gateways, or multihomed routing in the first
+  milestones
 - QUIC before HTTP/1.1 compatibility exists
 
 The design should not block those features. It should make each one an explicit
@@ -75,10 +81,50 @@ capability or protocol extension instead of a rewrite of the stack.
 
 ## Design Principles
 
-### One Core Owns Networking
+### Whole-Machine Network Shape
 
-A `NetworkExecutor` is permanently placed on a dedicated executor slot and CPU.
-It owns:
+Wrela should not expose ambient network access. The image source declares the
+network shape it needs, and the compiler reports that shape.
+
+The default model is closed:
+
+- remote hostnames and ports are source-visible declarations
+- local listening ports are source-visible declarations
+- dynamic destination patterns require explicit authority
+- connection, request, and stream budgets are derived from declarations and
+  call-graph use where possible
+- endpoint-specific TLS policy is compiled into the image
+
+Conceptual source shape:
+
+```wrela
+data RemoteHttpsEndpoint {
+    host: StringLiteral
+    port: U16
+    spki_hash: Bytes32
+    allowed_group: TlsGroup
+    allowed_cipher: TlsCipherSuite
+    max_connections: U64
+}
+```
+
+An `HttpClient` for a closed endpoint should not iterate a general cipher list
+or trust arbitrary certificate roots. It should expect the declared endpoint,
+declared trust material, declared TLS group, declared cipher suite, and declared
+buffer budget. A request to a non-declared endpoint is a type error unless the
+image explicitly holds dynamic network authority.
+
+DNS can also be mostly compile-time for closed endpoints. The compiler can
+resolve declared names during the build, embed the resolved addresses as
+fallbacks, and report the resolution. Runtime DNS then refreshes or verifies the
+route instead of being the first source of truth. Fully dynamic DNS remains
+possible, but it is an explicit authority with its own budget and attack
+surface.
+
+### Network IO Core Owns Hardware
+
+The first milestone uses a `NetworkExecutor` permanently placed on a dedicated
+executor slot and CPU. It owns NIC hardware state:
 
 - NIC driver path authority
 - RX and TX descriptor rings
@@ -86,16 +132,47 @@ It owns:
 - link state
 - ARP cache
 - IPv4 address state
-- UDP endpoints
-- DNS transaction state
-- TCP connection state
-- TLS sessions
-- HTTP client/server state
-- QUIC connections later
 
 Other executors communicate with networking through typed request queues,
 topics, or connection authorities. This keeps ownership reviewable and avoids
 cross-core mutation of descriptor rings or protocol state.
+
+The long-term model should not require one core to own all TCP, TLS, HTTP/2,
+QUIC, and HTTP/3 work forever. The intended evolution is:
+
+```text
+NetworkIoExecutor:
+  owns NIC rings, RX quarantine, TX completion, ARP, routing, and packet dispatch
+
+Flow executors:
+  own bounded TCP connections, TLS sessions, HTTP streams, or QUIC connections
+
+Crypto executors, optional:
+  own expensive handshake or bulk crypto work when the image declares them
+```
+
+The IO executor remains the truth owner for NIC queues and packet memory. Per-flow
+executors receive narrowed authorities for specific flows and buffer leases. This
+keeps the first core model simple while leaving a path to multiqueue, RSS, and
+per-flow scaling without replacing the protocol stack.
+
+### Cross-Executor Queue Contract
+
+Network communication between executors is a performance-critical API, not an
+implementation detail.
+
+The first queue shapes should be explicit:
+
+- SPSC queues when the compiler can prove one producer and one consumer
+- MPSC queues only where source-visible fan-in requires them
+- cache-line separated head and tail fields
+- fixed slot count and fixed payload layout
+- explicit owner for each queued buffer or borrowed packet view
+- poll or wake policy declared per queue
+
+The compiler should reject an SPSC queue if call-graph analysis finds multiple
+producers. The image report should name each network queue, its producer set,
+consumer, capacity, payload size, wake policy, and memory owner.
 
 ### Bounded Memory Everywhere
 
@@ -120,6 +197,153 @@ The first stack should use fixed capacities:
 If a capacity is exhausted, the result is an explicit error or dropped packet
 according to source-visible policy. There is no hidden heap growth.
 
+### Packet Ownership Starts In Quarantine
+
+RX DMA bytes are hostile input. They start as quarantined memory, not as an
+Ethernet frame.
+
+Conceptual typestate:
+
+```wrela
+data QuarantinedRxBytes {
+    owner: NetworkIoExecutorSlot
+    buffer: DmaBufferLease<U8>
+    length: U64
+}
+
+data VerifiedEthernetFrame {
+    lease: PacketLease
+    dst: MacAddress
+    src: MacAddress
+    ether_type: U16
+    payload: PacketSlice
+}
+
+data VerifiedIpv4Packet {
+    lease: PacketLease
+    src: Ipv4Address
+    dst: Ipv4Address
+    protocol: U8
+    payload: PacketSlice
+}
+```
+
+Each parser performs the smallest checks needed to promote one typestate to the
+next:
+
+```text
+QuarantinedRxBytes
+  -> verify Ethernet bounds and destination
+  -> VerifiedEthernetFrame
+  -> verify IPv4 header, length, destination, checksum, no unsupported options
+  -> VerifiedIpv4Packet
+  -> verify UDP/TCP/ICMP length and checksum
+  -> Verified transport payload
+```
+
+Malformed packets never become typed frames. They are dropped from quarantine,
+their buffer lease is returned to the RX pool, and bounded counters record the
+reason.
+
+Zero-copy is allowed when ownership and lifetime prove it. A packet payload may
+be borrowed by a protocol or application only through a `PacketSlice` tied to
+the underlying lease. The compiler rejects storing that slice beyond the lease,
+publishing it to a longer-lived topic, or returning it after the buffer is
+released.
+
+Cross-executor transfer has two allowed shapes:
+
+- copy into the receiving executor's owned memory
+- move a narrowed packet lease to the receiving executor
+
+Borrowing quarantined or verified RX memory across executors without a lease
+transfer is rejected. Disk-to-NIC or storage-to-TLS-to-NIC zero-copy can become
+a proof obligation over compatible region authorities, not a best-effort
+runtime optimization.
+
+### Fused SIMD Copy And Checksums
+
+NIC checksum offload remains deferred, but software checksums should not be
+treated as slow scalar cleanup work.
+
+Whenever the stack must copy packet bytes, the copy should be a fused SIMD pass
+that also computes the next required checksum or hashable transcript fragment.
+When the compiler can prove a zero-copy path, the stack should avoid the copy
+and perform the checksum over the borrowed slice. The design goal is:
+
+```text
+copy only when ownership requires it;
+when copying, fuse validation and checksum work into the pass
+```
+
+This is a Wrela-specific optimization because packet ownership, destination
+executor, and lifetime are source-visible instead of hidden behind arbitrary
+user pointers.
+
+### Time, Timers, And Entropy Are Authorities
+
+Networking needs both monotonic time and entropy. TLS certificate validation
+also needs wall-clock policy.
+
+The image must declare the authorities it uses:
+
+```text
+TimeAuthority:
+  monotonic ticks for ARP expiry, DNS retries, TCP retransmits, TIME_WAIT,
+  DHCP leases, TLS timers, and QUIC loss detection
+
+ClockAuthority:
+  wall-clock source for certificate validity, signed policy freshness, and
+  optional NTP synchronization
+
+EntropyAuthority:
+  TCP initial sequence numbers, ephemeral ports, TLS nonces, key generation,
+  QUIC connection IDs, and randomized admission tokens
+```
+
+Possible clock policies:
+
+```text
+RtcClock:
+  use platform RTC or firmware clock and report its provenance
+
+NtpClock:
+  start with a build-time or RTC bound, then require authenticated NTP policy
+
+BuildTimestampMonotonic:
+  accept certificates valid at build time plus monotonic age bounds; useful for
+  tightly controlled appliances, not general browsing
+```
+
+A TLS-using image without a declared `ClockAuthority` and `EntropyAuthority`
+should fail to build. TCP and QUIC should similarly require entropy authority.
+
+Timers should be represented as bounded state-machine resources. Each protocol
+declares its timer slots and maximum events per tick. The network report should
+include ARP, DNS, DHCP, TCP, TLS, and QUIC timer capacities.
+
+### Attack Surface And Exhaustion Policy
+
+Networking is hostile input. The stack should report its exposed parser and
+state surfaces at build time.
+
+The image report should include:
+
+- listening ports
+- unauthenticated parser entry points
+- maximum ARP entries
+- maximum DNS transactions
+- maximum half-open TCP handshakes
+- maximum established TCP connections
+- maximum TLS handshakes
+- maximum HTTP requests in flight
+- packet parser byte budgets
+- drop and admission policies
+
+The first TCP listener must not be merely "bounded table or fail." It needs an
+admission policy such as token-bucket SYN admission, SYN cookies, or an explicit
+"not internet-facing without upstream filtering" declaration.
+
 ### Protocols Are Layered, Drivers Are Replaceable
 
 The e1000e driver exposes an Ethernet device path. ARP, IPv4, ICMP, UDP, TCP,
@@ -129,7 +353,7 @@ This keeps the second NIC driver from contaminating the protocol stack. Later
 NIC families such as Intel `igb`, Realtek `r8169`, or `virtio-net` should only
 need to implement the Ethernet device boundary.
 
-### Prefer Correct Scalar Paths Before Offloads
+### Prefer Source-Visible Software Paths Before Offloads
 
 The first stack computes checksums and performs protocol work in Wrela source.
 NIC offloads are intentionally deferred. This makes packet bytes, checksums,
@@ -169,7 +393,7 @@ Application executors
   |
   | typed network requests and responses
   v
-NetworkExecutor on dedicated core
+Flow executors or NetworkExecutor-owned flows
   |
   +-- HTTP/3 over QUIC over UDP later
   |
@@ -182,6 +406,9 @@ NetworkExecutor on dedicated core
   +-- DHCP over UDP
   |
   +-- ICMP over IPv4
+  |
+  v
+NetworkIoExecutor on dedicated core
   |
   +-- ARP + IPv4 + UDP/TCP
   |
@@ -246,6 +473,24 @@ driver path E1000ePath {
 The actual API can be smaller in the first implementation. The important
 boundary is that the driver exposes Ethernet frames and link facts, not PCI
 registers or descriptor ownership.
+
+## Milestone 0: Packet Trace Harness
+
+Before the e1000e driver, Wrela should have a pure packet laboratory.
+
+Required behavior:
+
+- parse Ethernet, ARP, IPv4, ICMP, and UDP from fixed byte fixtures
+- emit Ethernet, ARP, IPv4, ICMP, and UDP into fixed byte buffers
+- replay small pcap-derived traces through the quarantine and verification
+  pipeline
+- fuzz parser entry points with bounded byte slices
+- verify checksum implementations against known packets
+- produce deterministic packet-engine tests without QEMU
+
+This milestone lets the packet engine mature before MMIO, DMA rings, interrupts,
+and QEMU harness behavior complicate debugging. The e1000e driver then becomes
+one producer and consumer of the same verified packet engine.
 
 ## Milestone 1: e1000e RX/TX
 
@@ -485,12 +730,13 @@ Deferred:
 - urgent data
 - window scaling until needed
 - timestamps until needed
-- zero-copy across app boundaries
 
 The first TCP stack should choose a small, correct congestion-control story
 instead of pretending to be a mature internet stack. It can begin with
 conservative slow start and loss response suitable for QEMU and local network
-tests.
+tests. Because IPv4 fragmentation is deferred, TCP must clamp MSS during SYN
+handling to the configured MTU and should treat PMTU discovery as a later
+explicit feature.
 
 ## Milestone 10: TLS With Wrela Crypto
 
@@ -507,6 +753,41 @@ The first supported version should be TLS 1.3 only.
 TLS 1.2 and older versions are out of scope unless compatibility forces them
 later. Starting at TLS 1.3 avoids legacy cipher suites, renegotiation, and many
 old protocol hazards.
+
+### Hybrid Post-Quantum Key Agreement
+
+The first TLS milestone includes hybrid post-quantum key agreement. The default
+Wrela-controlled endpoint group is:
+
+```text
+X25519MLKEM768
+```
+
+This combines classical X25519 with ML-KEM-768 so the connection is not relying
+only on elliptic-curve discrete log assumptions. The implementation should track
+the IETF TLS hybrid ECDHE-ML-KEM wire format and NIST ML-KEM semantics.
+
+Endpoint policy is source-visible:
+
+```text
+Wrela-controlled endpoint:
+  require X25519MLKEM768
+
+public-web compatibility endpoint:
+  prefer X25519MLKEM768; allow explicit legacy group only when declared
+
+test endpoint:
+  may pin a single group for deterministic transcript tests
+```
+
+A non-PQ TLS group should never be an ambient fallback. If an endpoint allows a
+classical group such as X25519 alone, the endpoint declaration and image report
+must say so.
+
+Post-quantum authentication is also part of the design. Closed Wrela endpoints
+can start with pinned SPKI hashes and build-time trust checks, while the crypto
+package grows ML-DSA verification for endpoints and certificate chains that use
+post-quantum signatures.
 
 ### Vector State And Crypto Backends
 
@@ -574,6 +855,8 @@ First TLS milestone:
 
 - X25519 written to avoid secret-dependent branches and memory lookups on the
   supported backend
+- ML-KEM-768 key generation, encapsulation, and decapsulation
+- hybrid X25519MLKEM768 shared secret construction
 - HKDF-SHA256
 - SHA-256
 - SHA-384
@@ -590,13 +873,40 @@ First TLS milestone:
 - transcript hashing
 - TLS 1.3 key schedule
 - certificate signature verification for one chosen signature family
+- ML-DSA verification for Wrela-controlled post-quantum endpoints when the
+  endpoint declares it
 
 The crypto package should contain a small scalar reference path for known-answer
 tests and differential checks. That reference path is not the production
 networking target.
 
-Certificate verification can start with a pinned certificate or pinned public
-key. A public CA trust store is a separate milestone.
+### Build-Time Trust And Certificates
+
+The first TLS trust model should use Wrela's whole-image compilation instead of
+copying a general-purpose OS CA-bundle model.
+
+Closed endpoints declare their trust material:
+
+- pinned SPKI hash
+- optional pinned certificate
+- optional root or intermediate certificate set
+- allowed TLS group
+- allowed cipher suite
+- validity window policy
+
+The compiler should validate as much as possible at build time. For a declared
+endpoint, it can check the configured chain, SPKI hash, certificate validity
+against the declared clock policy, and whether the endpoint policy permits
+classical fallback. A build should fail if a closed TLS endpoint has no trust
+declaration.
+
+Runtime certificate validation still exists, but it is endpoint-specialized.
+The runtime checks the presented chain or SPKI against the compiled policy; it
+does not search a broad ambient trust store unless the image explicitly declares
+that it is a general web client.
+
+A broad public CA store is therefore a separate dynamic authority, not the
+default TLS posture.
 
 ### Verification Requirements
 
@@ -798,9 +1108,19 @@ The image report should include:
 - network arena size and subdivisions
 - RX/TX descriptor counts
 - packet buffer counts and sizes
+- packet quarantine pool size and verified packet lease budget
+- cross-executor queue producers, consumers, capacities, and wake policies
+- declared remote endpoints and local listening ports
+- computed or declared connection budgets
+- endpoint trust policy and pinned SPKI or certificate identities
+- declared time, clock, and entropy authorities
+- timer wheel or timer table capacities
+- attack-surface summary and admission policies
 - static or DHCP configuration mode
 - supported protocols
+- supported TLS groups
 - supported TLS cipher suites
+- post-quantum TLS policy
 - required SIMD tier
 - selected crypto backend
 - enabled XCR0 vector-state bits
@@ -812,10 +1132,12 @@ Runtime diagnostics should include bounded counters:
 - TX packets
 - RX drops by reason
 - TX drops by reason
+- quarantine promotion failures by reason
 - ARP hits and misses
 - IPv4 checksum failures
 - UDP packets by endpoint
 - TCP retransmits
+- TCP admission drops
 - TLS handshake failures
 - HTTP request count
 
@@ -827,6 +1149,11 @@ Runtime diagnostics should include bounded counters:
 - reject duplicate NIC claims
 - reject packet buffers escaping their arena lifetime
 - reject network tables without bounded capacities
+- reject use of quarantined bytes outside verifier functions
+- reject cross-executor packet borrows without lease transfer
+- reject closed endpoint requests to undeclared hostnames or ports
+- reject TLS endpoints without clock and entropy authority
+- reject TLS endpoints without declared trust material
 - report network arena ownership in the image report
 
 ### Unit Tests
@@ -839,12 +1166,25 @@ Runtime diagnostics should include bounded counters:
 - DNS message parser bounds
 - TCP state transitions
 - TLS primitive test vectors
+- ML-KEM-768 known-answer tests
+- X25519MLKEM768 transcript tests
+- build-time endpoint trust validation tests
+- packet quarantine promotion tests
+- packet lease lifetime negative tests
 - SIMD backend selection tests
 - scalar-versus-AVX2 crypto differential tests
 - AVX2-versus-AVX-512 crypto differential tests when host support exists
 - HTTP parser bounds
 
 ### QEMU End-to-End Tests
+
+The ARP and ICMP milestones require an L2-visible harness. QEMU user networking
+is useful later for outbound compatibility checks, but it should not be the
+first proof because it can hide Ethernet and ARP behavior behind host NAT.
+
+The first implementation plan must choose one harness that lets tests observe
+guest Ethernet frames directly, such as TAP, passt with appropriate visibility,
+or a socket-backed peer process.
 
 - boot image with QEMU `e1000e`
 - initialize NIC
@@ -875,25 +1215,30 @@ Later milestones should test against common host tools:
 The stack should be implemented in small gates:
 
 1. Add enough e1000e QEMU test plumbing to boot with the NIC.
-2. Add DMA ring memory shapes and reports.
-3. Bring up e1000e reset/init/link/MAC reporting.
-4. Prove RX/TX with raw Ethernet frames.
-5. Add Ethernet II parse/emit helpers.
-6. Add ARP request/reply and cache.
-7. Add IPv4 parse/emit/checksum.
-8. Add ICMP echo.
-9. Add UDP.
-10. Add DHCP, or keep static config if the next target is DNS/TCP.
-11. Add DNS.
-12. Add TCP.
-13. Add CPU feature discovery and vector-state policy for networking crypto.
-14. Add AVX2 fallback crypto backends.
-15. Add AVX-512 fast crypto backends.
-16. Add TLS 1.3 with Wrela crypto.
-17. Add HTTP/1.1.
-18. Add HTTP/2.
-19. Add QUIC.
-20. Add HTTP/3.
+2. Add the packet trace harness and parser fuzz fixtures.
+3. Add quarantined packet bytes and verified packet typestates.
+4. Add DMA ring memory shapes and reports.
+5. Bring up e1000e reset/init/link/MAC reporting.
+6. Prove RX/TX with raw Ethernet frames.
+7. Add Ethernet II parse/emit helpers.
+8. Add ARP request/reply and cache.
+9. Add IPv4 parse/emit/checksum.
+10. Add ICMP echo.
+11. Add UDP.
+12. Add time, clock, entropy, and bounded timer authorities.
+13. Add DHCP, or keep static config if the next target is DNS/TCP.
+14. Add DNS.
+15. Add TCP.
+16. Add compile-time network shape declarations and reports.
+17. Add CPU feature discovery and vector-state policy for networking crypto.
+18. Add AVX2 fallback crypto backends.
+19. Add AVX-512 fast crypto backends.
+20. Add ML-KEM-768 and X25519MLKEM768.
+21. Add TLS 1.3 with Wrela crypto and build-time trust policy.
+22. Add HTTP/1.1.
+23. Add HTTP/2 if the use case requires it.
+24. Add QUIC.
+25. Add HTTP/3.
 
 Every gate must have a QEMU or unit-test success criterion before the next layer
 depends on it.
@@ -908,6 +1253,12 @@ depends on it.
 - Which first real hardware target satisfies the AVX-512 fast tier.
 - Whether vector code is permitted only in the network executor or also inside
   selected interrupt handlers with explicit XSAVE/XRSTOR policy.
+- Whether HTTP/2 is still worth implementing before QUIC/HTTP/3 for the first
+  real Wrela appliance target.
+- Which closed endpoint policy syntax best expresses static endpoints and
+  explicitly dynamic patterns.
+- Which clock authority is acceptable for the first TLS image.
+- Which entropy source is required before TCP, TLS, and QUIC leave local tests.
 - Whether the first TLS verification target is a pinned local test server or a
   known external endpoint.
 - Which real e1000e-family card is the first hardware target after QEMU.
@@ -922,10 +1273,14 @@ The design is successful when:
 - Wrela can complete a UDP exchange with a controlled host service.
 - Wrela can resolve a hostname through DNS.
 - Wrela can complete a TCP exchange with a controlled host service.
+- Wrela rejects quarantined packet bytes outside the verifier path.
+- Wrela reports declared endpoints, connection budgets, trust policy, and timer
+  budgets.
 - Wrela reports the selected AVX2 or AVX-512 crypto backend.
-- Wrela has passing AES-GCM, SHA, HKDF, and TLS key-schedule tests for each
-  supported backend.
-- Wrela can complete a TLS 1.3 handshake using Wrela-owned crypto.
+- Wrela has passing AES-GCM, SHA, HKDF, ML-KEM, X25519MLKEM768, and TLS
+  key-schedule tests for each supported backend.
+- Wrela can complete a TLS 1.3 handshake using Wrela-owned hybrid
+  post-quantum crypto.
 - Wrela can perform an HTTP/1.1 HTTPS request.
 - Later, Wrela can negotiate HTTP/2.
 - Later, Wrela can run QUIC and HTTP/3 without replacing the lower stack.
