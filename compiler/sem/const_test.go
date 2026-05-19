@@ -45,6 +45,66 @@ static_assert(MAYBE_ALIGN == 8, message = "enum align")
 	}
 }
 
+func TestConstSizeofEmptyEnumMatchesIRStorageLayout(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.consts
+enum Flag {
+    Off
+    On
+}
+const FLAG_SIZE: U64 = sizeof(Flag)
+const FLAG_ALIGN: U64 = alignof(Flag)
+static_assert(FLAG_SIZE == 8, message = "empty enum is tag-sized")
+static_assert(FLAG_ALIGN == 8, message = "empty enum align")
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+	if got := index.ConstValue("sem.consts", "FLAG_SIZE"); got != 8 {
+		t.Fatalf("FLAG_SIZE = %d, want 8", got)
+	}
+}
+
+func TestConstSizeofAlignofEmptyAndNestedData(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module sem.consts
+data Empty {}
+data Inner {
+    payload: U64
+}
+data Middle {
+    inner: Inner
+}
+data Outer {
+    middle: Middle
+    marker: U8
+}
+const EMPTY_SIZE: U64 = sizeof(Empty)
+const EMPTY_ALIGN: U64 = alignof(Empty)
+const NESTED_SIZE: U64 = sizeof(Outer)
+const NESTED_ALIGN: U64 = alignof(Outer)
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+	if got := index.ConstValue("sem.consts", "EMPTY_SIZE"); got != 8 {
+		t.Fatalf("EMPTY_SIZE = %d, want 8", got)
+	}
+	if got := index.ConstValue("sem.consts", "EMPTY_ALIGN"); got != 8 {
+		t.Fatalf("EMPTY_ALIGN = %d, want 8", got)
+	}
+	if got := index.ConstValue("sem.consts", "NESTED_SIZE"); got != 32 {
+		t.Fatalf("NESTED_SIZE = %d, want 32", got)
+	}
+	if got := index.ConstValue("sem.consts", "NESTED_ALIGN"); got != 8 {
+		t.Fatalf("NESTED_ALIGN = %d, want 8", got)
+	}
+}
+
 func TestConstOverflowDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module sem.consts

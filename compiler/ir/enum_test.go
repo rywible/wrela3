@@ -79,6 +79,39 @@ class Worker {
 	}
 }
 
+func TestLowerSizeofUsesStorageLayout(t *testing.T) {
+	program := lowerSourceForTest(t, `
+	module ir.sizes
+data Inner { payload: U64 }
+data Middle { inner: Inner }
+data Outer { middle: Middle; marker: U8 }
+class Worker {
+    fn size(self) -> U64 {
+        return sizeof(Outer)
+    }
+}
+`)
+	fn := findFunction(program, "_wrela_method_ir_sizes_Worker_size")
+	if fn == nil {
+		t.Fatal("missing Worker.size")
+	}
+	var sizeof *ConstInt
+	for _, block := range fn.Blocks {
+		for _, op := range block.Ops {
+			if c, ok := op.(*ConstInt); ok && c.Symbol == "sizeof" {
+				sizeof = c
+				break
+			}
+		}
+	}
+	if sizeof == nil {
+		t.Fatalf("missing sizeof const in lowered function: %#v", fn.Blocks)
+	}
+	if sizeof.Value != 32 {
+		t.Fatalf("sizeof(Outer) = %d, want storage size 32", sizeof.Value)
+	}
+}
+
 func containsNestedOp[T any](fn Function) bool {
 	for _, block := range fn.Blocks {
 		if containsNestedOpInOps[T](block.Ops) {

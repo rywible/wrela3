@@ -26,6 +26,7 @@ type topicDataLayout struct {
 	HeadOffset             uint64
 	ProducerWaitlineOffset uint64
 	SlotsOffset            uint64
+	PayloadSize            uint64
 	SlotSize               uint64
 	Producers              []string
 	Subscribers            []topicDataSubscriberLayout
@@ -49,11 +50,12 @@ func isReliableTopicKind(kind string) bool {
 
 func planTopicData(topic ir.TopicLayout) topicDataLayout {
 	layout := topicDataLayout{
-		Label:      topic.Label,
-		Kind:       topic.Kind,
-		Depth:      topic.Depth,
-		HeadOffset: 0,
-		Producers:  append([]string{}, topic.Producers...),
+		Label:       topic.Label,
+		Kind:        topic.Kind,
+		Depth:       topic.Depth,
+		HeadOffset:  0,
+		PayloadSize: topic.PayloadSize,
+		Producers:   append([]string{}, topic.Producers...),
 	}
 
 	layout.ProducerWaitlineOffset = cacheLineSize

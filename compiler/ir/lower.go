@@ -1931,7 +1931,11 @@ func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.
 		target := ctx.resolveTypeRef(moduleName, e.Type)
 		info := ctx.ensureTypeInfo(target, map[string]bool{})
 		typ := ctx.resolveType(moduleName, "U64")
-		c := &ConstInt{Symbol: "sizeof", Value: uint64(info.Size), Type: ctx.irType(typ)}
+		size := info.StorageSize
+		if size == 0 {
+			size = info.Size
+		}
+		c := &ConstInt{Symbol: "sizeof", Value: uint64(size), Type: ctx.irType(typ)}
 		return c, []Operation{c}, typ
 	case *ast.AlignOfExpr:
 		target := ctx.resolveTypeRef(moduleName, e.Type)

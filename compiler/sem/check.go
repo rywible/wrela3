@@ -3889,11 +3889,35 @@ func (c *checker) exprHasAuthorityProvenance(moduleName string, expr ast.Expr, s
 		}
 		return true
 	case *ast.BinaryExpr:
-		return c.exprHasAuthorityProvenance(moduleName, e.Left, scope) ||
-			c.exprHasAuthorityProvenance(moduleName, e.Right, scope)
+		return (c.exprHasAuthorityProvenance(moduleName, e.Left, scope) && c.exprHasAuthorityProvenance(moduleName, e.Right, scope)) ||
+			c.authoritySideSafeIntegerOffset(moduleName, e, scope)
 	default:
 		return false
 	}
+}
+
+func (c *checker) authoritySideSafeIntegerOffset(moduleName string, expr *ast.BinaryExpr, scope *Scope) bool {
+	switch expr.Op {
+	case "+", "-":
+		return c.authoritySideHasIntegerOffset(moduleName, expr.Left, expr.Right, scope) ||
+			c.authoritySideHasIntegerOffset(moduleName, expr.Right, expr.Left, scope)
+	default:
+		return false
+	}
+}
+
+func (c *checker) authoritySideHasIntegerOffset(moduleName string, authorityExpr, offsetExpr ast.Expr, scope *Scope) bool {
+	return c.exprHasAuthorityProvenance(moduleName, authorityExpr, scope) &&
+		c.exprIsIntegerConstantExpr(moduleName, offsetExpr, scope)
+}
+
+func (c *checker) exprIsIntegerConstantExpr(moduleName string, expr ast.Expr, scope *Scope) bool {
+	exprType := c.exprStaticType(moduleName, expr, scope)
+	if !isIntegerType(exprType) {
+		return false
+	}
+	_, ok := c.constValueOfExpr(moduleName, expr)
+	return ok
 }
 
 func isAuthorityProvenanceType(typ *Type) bool {

@@ -501,6 +501,32 @@ executor Worker {
 	}
 }
 
+func TestWrappedSlotsLifetimeEscapeDiagnostic(t *testing.T) {
+	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
+module sem.slots
+use { ExecutorMemory, Slots } from machine.x86_64.executor_memory
+data Event { kind: U64 }
+data WrappedSlots<T> { value: T }
+executor Worker {
+    memory: ExecutorMemory
+    escaped: WrappedSlots<Slots<Event>>
+    start fn run(self) -> never {
+        with self.memory.frame(length = 4096) as tick {
+            let slots = tick.reserve_array(Event, count = 16)
+            self.escaped = WrappedSlots<Slots<Event>>(value = slots)
+        }
+        while true {}
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	_, checkDiags := Check(index, modules)
+	ds := append(indexDiags, checkDiags...)
+	if !hasCode(ds, diag.SEM0091) {
+		t.Fatalf("diagnostics = %#v, want SEM0091", ds)
+	}
+}
+
 func TestSlotsAddressProtectedDiagnostic(t *testing.T) {
 	modules := parseModulesForTest(t, memoryViewPreludeForTest(), `
 module sem.slots
@@ -540,6 +566,42 @@ data Registers {
 class Forgery {
     fn mmio(self) -> Mmio<Registers> {
         return Mmio<Registers>(address = 0xFEE00000)
+    }
+}
+`)
+	index, indexDiags := BuildIndex(modules)
+	indexDiags = filterMissingImageDiagnostic(indexDiags)
+	if len(indexDiags) != 0 {
+		t.Fatalf("index diagnostics: %#v", indexDiags)
+	}
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0092) {
+		t.Fatalf("diagnostics = %#v, want SEM0092", ds)
+	}
+}
+
+func TestProtectedViewBinaryOffsetMustBeTrusted(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module platform.hardware.bytes
+data BoundedBytes { address: PhysicalAddress; length: U64 }
+`, `
+module platform.uefi.types
+data FirmwareAddress { value: PhysicalAddress }
+data FirmwareSlice<T> { address: FirmwareAddress; length: U64 }
+`, `
+module platform.acpi.tables
+use { BoundedBytes } from platform.hardware.bytes
+use { FirmwareAddress, FirmwareSlice } from platform.uefi.types
+
+data Entry { value: U8 }
+class Forgery {
+    fn firmware(self, bytes: BoundedBytes, user_offset: U64) -> FirmwareSlice<Entry> {
+        return FirmwareSlice<Entry>(
+            address = FirmwareAddress(
+                value = bytes.address + user_offset
+            ),
+            length = bytes.length
+        )
     }
 }
 `)

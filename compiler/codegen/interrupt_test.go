@@ -406,6 +406,23 @@ func TestInterruptTopicDispatchPublishesWithoutHandlerCall(t *testing.T) {
 	}
 }
 
+func TestInterruptTopicDispatchAllowsPayloadLargerThanCacheLine(t *testing.T) {
+	program := interruptTopicProgramForCodegenTest(t)
+	program.Topics[0].Kind = "topic"
+	program.Topics[0].PayloadSize = 96
+	program.Topics[0].PayloadAlign = 8
+	program.InterruptBindings[0].TopicKind = "topic"
+	program.InterruptBindings[0].EventStorageSize = 96
+
+	img, diags := Compile(program)
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	if !codeReferencesSymbol(t, img, "_wrela_interrupt_vector40_serial", "_wrela_topic_console_com1_rx") {
+		t.Fatalf("interrupt vector 0x40 must publish the large interrupt payload topic")
+	}
+}
+
 func TestInterruptTopicDispatchPushesSharedInterruptQueue(t *testing.T) {
 	program := interruptTopicProgramForCodegenTest(t)
 	program.InterruptQueues = []ir.InterruptQueueLayout{{

@@ -43,64 +43,11 @@ func payloadLayoutFromType(t *Type) (size uint64, align uint64, ok bool) {
 }
 
 func payloadLayoutFromTypeSeen(t *Type, visiting map[string]bool) (size uint64, align uint64, ok bool) {
-	if t == nil {
+	_, align, size, ok = semanticSizeAlignAndStorageSeen(t, visiting)
+	if !ok {
 		return 0, 0, false
 	}
-	if t.Kind == KindPrimitive {
-		return primitivePayloadLayout(t.Name)
-	}
-	key := t.Key()
-	if visiting[key] {
-		return 0, 0, false
-	}
-	visiting[key] = true
-	defer delete(visiting, key)
-	if t.Kind == KindEnum {
-		enumSize, enumAlign := uint64(8), uint64(8)
-		for _, variant := range t.EnumVariants {
-			var offset uint64
-			var maxAlign uint64 = 1
-			for _, field := range variant.Fields {
-				fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
-				if !ok {
-					return 0, 0, false
-				}
-				offset = alignPayloadOffset(offset, fieldAlign)
-				offset += fieldSize
-				if fieldAlign > maxAlign {
-					maxAlign = fieldAlign
-				}
-			}
-			payload := alignPayloadOffset(offset, maxAlign)
-			if 8+payload > enumSize {
-				enumSize = 8 + payload
-			}
-			if maxAlign > enumAlign {
-				enumAlign = maxAlign
-			}
-		}
-		return alignPayloadOffset(enumSize, enumAlign), enumAlign, true
-	}
-	if t.Kind != KindData && t.Kind != KindClass {
-		return 0, 0, false
-	}
-	var offset uint64
-	var maxAlign uint64
-	for _, field := range t.Fields {
-		fieldSize, fieldAlign, ok := payloadLayoutFromTypeSeen(field.Type, visiting)
-		if !ok {
-			return 0, 0, false
-		}
-		offset = alignPayloadOffset(offset, fieldAlign)
-		offset += fieldSize
-		if fieldAlign > maxAlign {
-			maxAlign = fieldAlign
-		}
-	}
-	if maxAlign == 0 {
-		return 0, 0, false
-	}
-	return alignPayloadOffset(offset, maxAlign), maxAlign, true
+	return size, align, true
 }
 
 func primitivePayloadLayout(name string) (size uint64, align uint64, ok bool) {
@@ -123,61 +70,144 @@ func semanticSizeAlign(t *Type) (size uint64, align uint64, ok bool) {
 }
 
 func semanticSizeAlignSeen(t *Type, visiting map[string]bool) (size uint64, align uint64, ok bool) {
-	if t == nil {
+	_, align, size, ok = semanticSizeAlignAndStorageSeen(t, visiting)
+	if !ok {
 		return 0, 0, false
 	}
+	return size, align, true
+}
+
+type semanticFieldLayout struct {
+	valueSize   uint64
+	valueAlign  uint64
+	storageSize uint64
+	isData      bool
+}
+
+func semanticSizeAlignAndStorageSeen(t *Type, visiting map[string]bool) (valueSize uint64, align uint64, storageSize uint64, ok bool) {
+	if t == nil {
+		return 0, 0, 0, false
+	}
 	if t.Kind == KindPrimitive {
-		return primitivePayloadLayout(t.Name)
+		size, align, ok := primitivePayloadLayout(t.Name)
+		if !ok {
+			return 0, 0, 0, false
+		}
+		return size, align, size, true
 	}
 	key := t.Key()
 	if visiting[key] {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	visiting[key] = true
 	defer delete(visiting, key)
+
 	if t.Kind == KindEnum {
 		enumSize, enumAlign := uint64(8), uint64(8)
 		for _, variant := range t.EnumVariants {
-			var offset uint64
-			var maxAlign uint64 = 1
-			for _, field := range variant.Fields {
-				fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
-				if !ok {
-					return 0, 0, false
-				}
-				offset = alignPayloadOffset(offset, fieldAlign)
-				offset += fieldSize
-				if fieldAlign > maxAlign {
-					maxAlign = fieldAlign
-				}
+			variantSize, variantAlign, ok := semanticVariantPayloadSize(variant.Fields, visiting)
+			if !ok {
+				return 0, 0, 0, false
 			}
-			payload := alignPayloadOffset(offset, maxAlign)
-			if 8+payload > enumSize {
-				enumSize = 8 + payload
+			if 8+variantSize > enumSize {
+				enumSize = 8 + variantSize
 			}
-			if maxAlign > enumAlign {
-				enumAlign = maxAlign
+			if variantAlign > enumAlign {
+				enumAlign = variantAlign
 			}
 		}
-		return alignPayloadOffset(enumSize, enumAlign), enumAlign, true
+		enumSize = alignPayloadOffset(enumSize, enumAlign)
+		if enumSize == 0 {
+			enumSize = 8
+		}
+		return enumSize, enumAlign, enumSize, true
 	}
 	if t.Kind != KindData && t.Kind != KindClass {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	var offset uint64
-	var maxAlign uint64 = 1
+	if len(t.Fields) == 0 {
+		return 8, 8, 8, true
+	}
+
+	fieldLayouts := make([]semanticFieldLayout, 0, len(t.Fields))
 	for _, field := range t.Fields {
-		fieldSize, fieldAlign, ok := semanticSizeAlignSeen(field.Type, visiting)
-		if !ok {
+		fieldLayout, fieldOk := semanticFieldSizeAndStorage(field.Type, visiting)
+		if !fieldOk {
+			return 0, 0, 0, false
+		}
+		fieldLayout.isData = field.Type != nil && field.Type.Kind == KindData
+		valueSize = alignPayloadOffset(valueSize, fieldLayout.valueAlign)
+		valueSize += fieldLayout.valueSize
+		if fieldLayout.valueAlign > align {
+			align = fieldLayout.valueAlign
+		}
+		fieldLayouts = append(fieldLayouts, fieldLayout)
+	}
+	if align == 0 {
+		align = 8
+	}
+	valueSize = alignPayloadOffset(valueSize, align)
+
+	storageOffset := valueSize
+	for _, fieldLayout := range fieldLayouts {
+		if !fieldLayout.isData {
+			continue
+		}
+		storageAlign := fieldLayout.valueAlign
+		if storageAlign == 0 {
+			storageAlign = 8
+		}
+		storageOffset = alignPayloadOffset(storageOffset, storageAlign)
+		storageOffset += fieldLayout.storageSize
+	}
+	storageSize = alignPayloadOffset(storageOffset, align)
+	if storageSize == 0 {
+		storageSize = valueSize
+	}
+	return valueSize, align, storageSize, true
+}
+
+func semanticVariantPayloadSize(fields []Field, visiting map[string]bool) (payloadSize uint64, payloadAlign uint64, ok bool) {
+	var offset uint64 = 8
+	payloadAlign = 1
+	for _, field := range fields {
+		fieldLayout, fieldOk := semanticFieldSizeAndStorage(field.Type, visiting)
+		if !fieldOk {
 			return 0, 0, false
 		}
-		offset = alignPayloadOffset(offset, fieldAlign)
-		offset += fieldSize
-		if fieldAlign > maxAlign {
-			maxAlign = fieldAlign
+		offset = alignPayloadOffset(offset, fieldLayout.valueAlign)
+		offset += fieldLayout.storageSize
+		if fieldLayout.valueAlign > payloadAlign {
+			payloadAlign = fieldLayout.valueAlign
 		}
 	}
-	return alignPayloadOffset(offset, maxAlign), maxAlign, true
+	payloadSize = alignPayloadOffset(offset-8, payloadAlign)
+	return payloadSize, payloadAlign, true
+}
+
+func semanticFieldSizeAndStorage(fieldType *Type, visiting map[string]bool) (layout semanticFieldLayout, ok bool) {
+	if fieldType == nil {
+		return layout, false
+	}
+	if isSemanticHandleValue(fieldType) {
+		layout.valueSize = 8
+		layout.valueAlign = 8
+		_, _, layout.storageSize, ok = semanticSizeAlignAndStorageSeen(fieldType, visiting)
+		return layout, ok
+	}
+	layout.valueSize, layout.valueAlign, layout.storageSize, ok = semanticSizeAlignAndStorageSeen(fieldType, visiting)
+	return layout, ok
+}
+
+func isSemanticHandleValue(fieldType *Type) bool {
+	if fieldType == nil {
+		return false
+	}
+	switch fieldType.Kind {
+	case KindData, KindClass, KindDriver, KindDriverPath, KindExecutor:
+		return true
+	}
+	return false
 }
 
 func alignPayloadOffset(offset uint64, align uint64) uint64 {

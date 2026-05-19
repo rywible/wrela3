@@ -121,6 +121,62 @@ func TestInterruptQueueRejectsBackingSizeOverflow(t *testing.T) {
 	}
 }
 
+func TestInterruptQueueRecordsNestedPayloadStorageLayout(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "interrupt-queue-nested-payload.wrela", interruptQueueSourceWithPayload(`
+        let queue_slots = console_memory.reserve_array(U8, count = 4)
+        let queue = InterruptQueue<U8>(
+            identity = QueueIdentity(label = "irq.serial.rx"),
+            owner = ExecutorSlot(id = 0),
+            slots = queue_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+        let payload_slots = console_memory.reserve_array(PayloadOuter, count = 4)
+        let payload_queue = InterruptQueue<PayloadOuter>(
+            identity = QueueIdentity(label = "irq.serial.payload"),
+            owner = ExecutorSlot(id = 1),
+            slots = payload_slots,
+            capacity = 4,
+            overflow = InterruptOverflowPolicy(mode = 2),
+            head = 0,
+            tail = 0,
+            overflowed = false
+        )
+`, `
+data PayloadLeaf {
+    count: U64
+}
+data PayloadMiddle {
+    leaf: PayloadLeaf
+}
+data PayloadOuter {
+    middle: PayloadMiddle
+    marker: U8
+}`))
+	if len(ds) != 0 {
+		t.Fatalf("interrupt queue diagnostics: %#v", ds)
+	}
+	if len(checked.ImageGraph.InterruptQueues) != 2 {
+		t.Fatalf("interrupt queues = %#v", checked.ImageGraph.InterruptQueues)
+	}
+	var queue InterruptQueueNode
+	for _, candidate := range checked.ImageGraph.InterruptQueues {
+		if candidate.Label == "irq.serial.payload" {
+			queue = candidate
+			break
+		}
+	}
+	if queue.Label == "" {
+		t.Fatalf("missing nested payload interrupt queue: %#v", checked.ImageGraph.InterruptQueues)
+	}
+	if queue.PayloadSize != 32 || queue.PayloadAlign != 8 {
+		t.Fatalf("interrupt queue payload layout = size %d align %d, want size 32 align 8: %#v", queue.PayloadSize, queue.PayloadAlign, queue)
+	}
+}
+
 func TestSharedInterruptAllowsMultipleSourceClaims(t *testing.T) {
 	checked, ds := checkUEFIModulesWithExtraSource(t, "shared-irq-good.wrela", sharedIRQSource(`
         let route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
@@ -167,6 +223,10 @@ func TestSharedInterruptDuplicateSourceRejected(t *testing.T) {
 }
 
 func interruptQueueSource(queueSetup string) string {
+	return interruptQueueSourceWithPayload(queueSetup, "")
+}
+
+func interruptQueueSourceWithPayload(queueSetup string, payloadDecls string) string {
 	return `
 module platform.test_interrupt_queue
 use { BootPanic } from platform.hardware.panic
@@ -180,6 +240,8 @@ use { MutableBytes, Bytes } from machine.x86_64.executor_memory
 use { QueueIdentity, InterruptOverflowPolicy, InterruptQueue } from machine.x86_64.interrupt_queue
 use { InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
 use { Option } from wrela.lang.core
+
+` + payloadDecls + `
 
 image InterruptQueueTest {
     transitions { delegated_hardware -> owned_hardware }

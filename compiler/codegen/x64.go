@@ -450,10 +450,6 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "missing topic layout: " + binding.TopicLabel})
 		return
 	}
-	if binding.EventStorageSize > cacheLineSize-8 {
-		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "interrupt event payload exceeds topic slot capacity"})
-		return
-	}
 
 	base := asm.MustLookup("r12")
 	seq := asm.MustLookup("r10")
@@ -500,6 +496,10 @@ func emitInterruptTopicPublish(e *Emitter, binding ir.InterruptBinding, ctx comp
 		e.emitJcc(0x85, skipPublish)
 		payloadOffset = fieldStorageOffset(valueField)
 		payloadSize = fieldStorageSize(ctx, valueField)
+	}
+	if uint64(payloadSize) > layout.PayloadSize {
+		e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "interrupt event payload exceeds topic payload size"})
+		return
 	}
 	emitLoadMemToReg(e, seq, base, int64(layout.HeadOffset), 64)
 	emitRegRegMove(e, slot, seq)

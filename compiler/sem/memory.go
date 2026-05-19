@@ -729,7 +729,7 @@ func (c *checker) rejectIfLifetimeEscapes(span source.Span, value, target Lifeti
 }
 
 func (c *checker) rejectViewLifetimeEscape(span source.Span, typ *Type, value, target Lifetime) bool {
-	if !isSlotsType(typ) && !isSliceType(typ) {
+	if !typeCanCarryHiddenLifetimeThroughFieldsOrArgs(typ) {
 		return false
 	}
 	if c.lifetimeShorterThan(value, target) {
@@ -769,6 +769,40 @@ func (c *checker) recordLifetimeRequirement(value, target Lifetime) bool {
 	}
 	c.currentMethodSummary.RootRequirements = append(c.currentMethodSummary.RootRequirements, requirement)
 	return true
+}
+
+func typeCanCarryHiddenLifetimeThroughFieldsOrArgs(typ *Type) bool {
+	return typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(typ, map[*Type]bool{})
+}
+
+func typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(typ *Type, seen map[*Type]bool) bool {
+	if isValueOnlyAuthorityRecord(typ) {
+		return false
+	}
+	if isSlotsType(typ) || isSliceType(typ) {
+		return true
+	}
+	if typ == nil {
+		return false
+	}
+	if typ.Kind != KindData && typ.Kind != KindClass {
+		return false
+	}
+	if seen[typ] {
+		return false
+	}
+	seen[typ] = true
+	for _, arg := range typ.TypeArgs {
+		if typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(arg, seen) {
+			return true
+		}
+	}
+	for _, field := range typ.Fields {
+		if typeCanCarryHiddenLifetimeThroughFieldsOrArgsWithSeen(field.Type, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *checker) rejectCacheEscape(span source.Span, lifetime Lifetime, target Lifetime) bool {

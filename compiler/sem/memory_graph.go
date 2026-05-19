@@ -239,7 +239,7 @@ func (c *checker) recordInterruptQueueConstructor(moduleName string, expr *ast.C
 	} else {
 		payloadType := typ.TypeArgs[0]
 		payloadKind = payloadType.Key()
-		if size, align, ok := semanticSizeAlign(payloadType); ok {
+		if size, align, ok := payloadLayoutFromType(payloadType); ok {
 			payloadSize = size
 			payloadAlign = align
 		} else {
