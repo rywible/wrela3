@@ -13,6 +13,16 @@ type NamespaceFacts struct {
 }
 
 var ErrUnsupportedLBA = errors.New("unsupported nvme lba size")
+var ErrTransferTooLarge = errors.New("nvme transfer exceeds max prp bytes")
+
+const (
+	NVME_OPCODE_FLUSH       uint64 = 0x00
+	NVME_OPCODE_WRITE       uint64 = 0x01
+	NVME_OPCODE_READ        uint64 = 0x02
+	NVME_OPCODE_ZONE_APPEND uint64 = 0x7D
+	NVME_COMMAND_FUA_BIT    uint64 = 30
+	MaxPRPTransferBytes     uint64 = 131072
+)
 
 func PlannedControllerInitOps() []string {
 	return []string{"read CAP", "write CC.EN=0", "wait RDY=0", "write AQA", "write ASQ", "write ACQ", "write CC.EN=1", "wait RDY=1", "identify controller", "identify namespace"}
@@ -57,6 +67,50 @@ func WriteCommandDword12(blockCount uint32, fua bool) uint32 {
 		dword |= 1 << 30
 	}
 	return dword
+}
+
+type Command struct {
+	Opcode             uint64
+	NamespaceID        uint32
+	StartLBA           uint64
+	BlockCountMinusOne uint32
+	PRP1               uint64
+	CDW10              uint32
+	CDW11              uint32
+	CDW12              uint32
+}
+
+func BuildReadCommand(namespaceID uint32, startLBA uint64, blockCount uint32, prp1 uint64, logicalBlockSize uint64) (Command, error) {
+	return buildDataCommand(NVME_OPCODE_READ, namespaceID, startLBA, blockCount, prp1, logicalBlockSize, false)
+}
+
+func BuildWriteCommand(namespaceID uint32, startLBA uint64, blockCount uint32, prp1 uint64, logicalBlockSize uint64, fua bool) (Command, error) {
+	return buildDataCommand(NVME_OPCODE_WRITE, namespaceID, startLBA, blockCount, prp1, logicalBlockSize, fua)
+}
+
+func BuildFlushCommand(namespaceID uint32) (Command, error) {
+	return Command{Opcode: NVME_OPCODE_FLUSH, NamespaceID: namespaceID}, nil
+}
+
+func BuildZoneAppendCommand(namespaceID uint32, startLBA uint64, blockCount uint32, prp1 uint64, logicalBlockSize uint64, fua bool) (Command, error) {
+	return buildDataCommand(NVME_OPCODE_ZONE_APPEND, namespaceID, startLBA, blockCount, prp1, logicalBlockSize, fua)
+}
+
+func buildDataCommand(opcode uint64, namespaceID uint32, startLBA uint64, blockCount uint32, prp1 uint64, logicalBlockSize uint64, fua bool) (Command, error) {
+	if uint64(blockCount) > MaxPRPTransferBytes/logicalBlockSize {
+		return Command{}, ErrTransferTooLarge
+	}
+	cdw12 := WriteCommandDword12(blockCount, fua)
+	return Command{
+		Opcode:             opcode,
+		NamespaceID:        namespaceID,
+		StartLBA:           startLBA,
+		BlockCountMinusOne: blockCount - 1,
+		PRP1:               prp1,
+		CDW10:              uint32(startLBA),
+		CDW11:              uint32(startLBA >> 32),
+		CDW12:              cdw12,
+	}, nil
 }
 
 func PutLE64(dst []byte, off int, value uint64) {

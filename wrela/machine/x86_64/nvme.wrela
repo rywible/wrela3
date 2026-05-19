@@ -32,6 +32,11 @@ const NVME_ADMIN_QUEUE_DEPTH: U32 = 32
 const NVME_ADMIN_QUEUE_ADDRESS: U32 = 0
 const NVME_RESET_TIMEOUT_POLLS: U32 = 100000
 const NVME_READY_TIMEOUT_POLLS: U32 = 100000
+const NVME_OPCODE_FLUSH: U64 = 0x00
+const NVME_OPCODE_WRITE: U64 = 0x01
+const NVME_OPCODE_READ: U64 = 0x02
+const NVME_OPCODE_ZONE_APPEND: U64 = 0x7D
+const NVME_COMMAND_FUA_BIT: U64 = 30
 
 data NvmeNamespace {
     namespace_id: U32
@@ -212,18 +217,44 @@ driver path NvmeIoPath {
     }
 
     fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
-        self.registers.panic.fail(code = 0xAC080039)
+        let opcode = NVME_OPCODE_READ
+        let command_namespace_id = namespace_id
+        let command_prp1 = prp1
+        let command_dword10 = start_lba
+        let command_dword11 = start_lba >> 32
+        let command_dword12 = block_count - 1
+        return NvmeSubmission(command_id = 0)
     }
 
     fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
-        self.registers.panic.fail(code = 0xAC08003A)
+        let opcode = NVME_OPCODE_WRITE
+        let command_namespace_id = namespace_id
+        let command_prp1 = prp1
+        let command_dword10 = start_lba
+        let command_dword11 = start_lba >> 32
+        let command_dword12 = block_count - 1
+        if fua {
+            command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)
+        }
+        return NvmeSubmission(command_id = 0)
     }
 
     fn submit_flush(self, namespace_id: U32) -> NvmeSubmission {
-        self.registers.panic.fail(code = 0xAC080030)
+        let opcode = NVME_OPCODE_FLUSH
+        let command_namespace_id = namespace_id
+        return NvmeSubmission(command_id = 0)
     }
 
     fn submit_zone_append(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
-        self.registers.panic.fail(code = 0xAC08003B)
+        let opcode = NVME_OPCODE_ZONE_APPEND
+        let command_namespace_id = namespace_id
+        let command_prp1 = prp1
+        let command_dword10 = start_lba
+        let command_dword11 = start_lba >> 32
+        let command_dword12 = block_count - 1
+        if fua {
+            command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)
+        }
+        return NvmeSubmission(command_id = 0)
     }
 }

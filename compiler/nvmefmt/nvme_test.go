@@ -96,6 +96,71 @@ func TestWriteCommandDword12(t *testing.T) {
 	}
 }
 
+func TestWriteCommandSetsFUA(t *testing.T) {
+	cmd, err := BuildWriteCommand(1, 99, 8, 0x200000, 512, true)
+	if err != nil {
+		t.Fatalf("BuildWriteCommand() error = %v", err)
+	}
+	if cmd.Opcode != NVME_OPCODE_WRITE {
+		t.Fatalf("Opcode = %#x, want %#x", cmd.Opcode, NVME_OPCODE_WRITE)
+	}
+	if cmd.NamespaceID != 1 || cmd.StartLBA != 99 || cmd.BlockCountMinusOne != 7 || cmd.PRP1 != 0x200000 {
+		t.Fatalf("write command fields = %#v", cmd)
+	}
+	if cmd.CDW12&(1<<30) == 0 {
+		t.Fatalf("CDW12 = %#x, want FUA bit set", cmd.CDW12)
+	}
+}
+
+func TestReadFlushAndZoneAppendCommands(t *testing.T) {
+	read, err := BuildReadCommand(7, 0x123456789, 16, 0x300000, 4096)
+	if err != nil {
+		t.Fatalf("BuildReadCommand() error = %v", err)
+	}
+	if read.Opcode != NVME_OPCODE_READ || read.NamespaceID != 7 || read.StartLBA != 0x123456789 || read.BlockCountMinusOne != 15 || read.PRP1 != 0x300000 {
+		t.Fatalf("read command = %#v", read)
+	}
+
+	flush, err := BuildFlushCommand(11)
+	if err != nil {
+		t.Fatalf("BuildFlushCommand() error = %v", err)
+	}
+	if flush.Opcode != NVME_OPCODE_FLUSH || flush.NamespaceID != 11 {
+		t.Fatalf("flush command = %#v", flush)
+	}
+
+	appendCmd, err := BuildZoneAppendCommand(3, 0x8000, 4, 0x400000, 512, true)
+	if err != nil {
+		t.Fatalf("BuildZoneAppendCommand() error = %v", err)
+	}
+	if appendCmd.Opcode != NVME_OPCODE_ZONE_APPEND || appendCmd.NamespaceID != 3 || appendCmd.StartLBA != 0x8000 || appendCmd.BlockCountMinusOne != 3 || appendCmd.PRP1 != 0x400000 {
+		t.Fatalf("zone append command = %#v", appendCmd)
+	}
+	if appendCmd.CDW12&(1<<30) == 0 {
+		t.Fatalf("zone append CDW12 = %#x, want FUA bit set", appendCmd.CDW12)
+	}
+}
+
+func TestCommandRejectsTransferPastPRPLimit(t *testing.T) {
+	for name, build := range map[string]func() (Command, error){
+		"read": func() (Command, error) {
+			return BuildReadCommand(1, 0, 257, 0x200000, 512)
+		},
+		"write": func() (Command, error) {
+			return BuildWriteCommand(1, 0, 33, 0x200000, 4096, false)
+		},
+		"zone append": func() (Command, error) {
+			return BuildZoneAppendCommand(1, 0, 257, 0x200000, 512, false)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if cmd, err := build(); !errors.Is(err, ErrTransferTooLarge) {
+				t.Fatalf("build command = %#v, error = %v, want %v", cmd, err, ErrTransferTooLarge)
+			}
+		})
+	}
+}
+
 func TestCompletionQueueAdvanceWrapsHeadAndTogglesPhase(t *testing.T) {
 	q := CompletionQueue{Depth: 4, Phase: true}
 

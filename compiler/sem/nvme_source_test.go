@@ -3,6 +3,8 @@ package sem
 import (
 	"strings"
 	"testing"
+
+	"github.com/ryanwible/wrela3/compiler/nvmefmt"
 )
 
 func TestNvmeSourceCompiles(t *testing.T) {
@@ -144,6 +146,54 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("nvme source missing bounded wait shape %q", want)
+		}
+	}
+}
+
+func TestNvmeCommandMirrorContract(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+	checked, ds := Check(index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	path := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeIoPath")
+	assertMethodSignature(t, methodByName(t, path, "submit_read"), []string{"namespace_id:U32", "start_lba:U64", "block_count:U32", "prp1:PhysicalAddress"}, "NvmeSubmission")
+	assertMethodSignature(t, methodByName(t, path, "submit_write"), []string{"namespace_id:U32", "start_lba:U64", "block_count:U32", "prp1:PhysicalAddress", "fua:Bool"}, "NvmeSubmission")
+	assertMethodSignature(t, methodByName(t, path, "submit_flush"), []string{"namespace_id:U32"}, "NvmeSubmission")
+	assertMethodSignature(t, methodByName(t, path, "submit_zone_append"), []string{"namespace_id:U32", "start_lba:U64", "block_count:U32", "prp1:PhysicalAddress", "fua:Bool"}, "NvmeSubmission")
+
+	for name, want := range map[string]uint64{
+		"NVME_OPCODE_WRITE":       nvmefmt.NVME_OPCODE_WRITE,
+		"NVME_OPCODE_READ":        nvmefmt.NVME_OPCODE_READ,
+		"NVME_OPCODE_FLUSH":       nvmefmt.NVME_OPCODE_FLUSH,
+		"NVME_OPCODE_ZONE_APPEND": nvmefmt.NVME_OPCODE_ZONE_APPEND,
+		"NVME_COMMAND_FUA_BIT":    nvmefmt.NVME_COMMAND_FUA_BIT,
+	} {
+		if got := checked.Index.ConstValue("machine.x86_64.nvme", name); got != want {
+			t.Fatalf("%s = %#x, want %#x", name, got, want)
+		}
+	}
+
+	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	for _, want := range []string{
+		"let opcode = NVME_OPCODE_READ",
+		"let command_namespace_id = namespace_id",
+		"let command_prp1 = prp1",
+		"let command_dword10 = start_lba",
+		"let command_dword11 = start_lba >> 32",
+		"let command_dword12 = block_count - 1",
+		"let opcode = NVME_OPCODE_WRITE",
+		"command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)",
+		"let opcode = NVME_OPCODE_FLUSH",
+		"let opcode = NVME_OPCODE_ZONE_APPEND",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("nvme source missing command shape %q", want)
 		}
 	}
 }
