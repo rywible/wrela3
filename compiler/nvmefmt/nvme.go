@@ -50,6 +50,14 @@ type DurabilityMode struct {
 	UseFUA        bool
 }
 
+type DurabilityState struct {
+	Mode            string
+	PendingWrites   uint32
+	CompletedWrites uint32
+	FlushCompleted  bool
+	failed          bool
+}
+
 func SelectDurability(ns NamespaceFacts) (DurabilityMode, error) {
 	if ns.LogicalBlockSize != 512 && ns.LogicalBlockSize != 4096 {
 		return DurabilityMode{}, ErrUnsupportedLBA
@@ -59,6 +67,39 @@ func SelectDurability(ns NamespaceFacts) (DurabilityMode, error) {
 	}
 
 	return DurabilityMode{Mode: DurabilityWritePlusFlush, RequiresFlush: true}, nil
+}
+
+func (s *DurabilityState) CompleteWrite(commandID uint16, ok bool) {
+	_ = commandID
+	if !ok {
+		s.failed = true
+		return
+	}
+	if s.CompletedWrites < s.PendingWrites {
+		s.CompletedWrites++
+	}
+}
+
+func (s *DurabilityState) CompleteFlush(ok bool) {
+	if !ok {
+		s.failed = true
+		return
+	}
+	s.FlushCompleted = true
+}
+
+func (s DurabilityState) Acknowledged() bool {
+	if s.failed || s.CompletedWrites < s.PendingWrites {
+		return false
+	}
+	if s.Mode == DurabilityWritePlusFlush {
+		return s.FlushCompleted
+	}
+	return true
+}
+
+func (s DurabilityState) Failed() bool {
+	return s.failed
 }
 
 func WriteCommandDword12(blockCount uint32, fua bool) uint32 {

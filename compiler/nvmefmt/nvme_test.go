@@ -86,6 +86,40 @@ func TestSelectDurabilityModes(t *testing.T) {
 	}
 }
 
+func TestWritePlusFlushAcknowledgesAfterFlushOnly(t *testing.T) {
+	sm := DurabilityState{Mode: DurabilityWritePlusFlush, PendingWrites: 2}
+	sm.CompleteWrite(1, true)
+	sm.CompleteWrite(2, true)
+	if sm.Acknowledged() {
+		t.Fatal("must not ack before flush")
+	}
+	sm.CompleteFlush(true)
+	if !sm.Acknowledged() {
+		t.Fatal("must ack after flush")
+	}
+}
+
+func TestFUAAcknowledgesAfterWritesComplete(t *testing.T) {
+	sm := DurabilityState{Mode: DurabilityFUA, PendingWrites: 2}
+	sm.CompleteWrite(1, true)
+	if sm.Acknowledged() {
+		t.Fatal("must not ack before all writes complete")
+	}
+	sm.CompleteWrite(2, true)
+	if !sm.Acknowledged() {
+		t.Fatal("must ack after all FUA writes complete")
+	}
+}
+
+func TestDurabilityFailureRejectsBatch(t *testing.T) {
+	sm := DurabilityState{Mode: DurabilityWritePlusFlush, PendingWrites: 1}
+	sm.CompleteWrite(1, true)
+	sm.CompleteFlush(false)
+	if !sm.Failed() || sm.Acknowledged() {
+		t.Fatalf("state = %+v, want failed without ack", sm)
+	}
+}
+
 func TestWriteCommandDword12(t *testing.T) {
 	if got, want := WriteCommandDword12(8, false), uint32(7); got != want {
 		t.Fatalf("WriteCommandDword12(8, false) = %#x, want %#x", got, want)

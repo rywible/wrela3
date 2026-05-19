@@ -56,6 +56,22 @@ func TestStorageWriterSourceMirrorContract(t *testing.T) {
 	})
 }
 
+func TestStorageWriterDurabilityMirrorContract(t *testing.T) {
+	index := checkedStorageWriterSourceIndex(t)
+	writer := moduleType(t, index, "storage.writer", "StorageWriter")
+	assertMethodExists(t, writer, "on_durability_completed")
+	assertMethodExists(t, writer, "publish_committed_group")
+	token := moduleType(t, index, "storage.writer", "CommitToken")
+	assertMethodExists(t, token, "acknowledged")
+	assertTypeFields(t, token, map[string]string{
+		"pending_write_count":   "U64",
+		"completed_write_count": "U64",
+		"flush_required":        "Bool",
+		"flush_completed":       "Bool",
+		"durability_failed":     "Bool",
+	})
+}
+
 func checkedStorageWriterSourceIndex(t *testing.T) *Index {
 	t.Helper()
 	modules := parseStorageWriterModules(t, `

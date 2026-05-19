@@ -21,8 +21,25 @@ data CommitToken {
     first_event_id: U64
     last_event_id: U64
     pending_write_count: U64
+    completed_write_count: U64
     flush_required: Bool
+    flush_completed: Bool
     durability_failed: Bool
+
+    fn acknowledged(self) -> Bool {
+        if self.durability_failed {
+            return false
+        }
+        if self.completed_write_count < self.pending_write_count {
+            return false
+        }
+        if self.flush_required {
+            if self.flush_completed == false {
+                return false
+            }
+        }
+        return true
+    }
 }
 
 data StorageAppendResult {
@@ -64,13 +81,16 @@ data StorageWriter {
     }
 
     fn on_durability_completed(self, token: CommitToken) -> StorageAppendResult {
-        if token.durability_failed {
+        if token.acknowledged() == false {
             return StorageAppendResult(accepted = false, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1116)
         }
         return StorageAppendResult(accepted = true, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = token.flush_required, reject_code = 0)
     }
 
     fn publish_committed_group(self, token: CommitToken) -> CommittedAtomicGroup {
+        if token.acknowledged() == false {
+            return CommittedAtomicGroup(first_event_id = 0, last_event_id = 0)
+        }
         return CommittedAtomicGroup(first_event_id = token.first_event_id, last_event_id = token.last_event_id)
     }
 
