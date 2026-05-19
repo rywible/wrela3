@@ -134,6 +134,74 @@ type PackedSegment struct {
 	Index       []SegmentIndexEntry
 }
 
+type Extent struct {
+	StartLBA   uint64
+	BlockCount uint64
+}
+
+type FreeExtentList struct {
+	capacity uint64
+	extents  []Extent
+}
+
+func NewFreeExtentList(capacity uint64) *FreeExtentList {
+	return &FreeExtentList{capacity: capacity}
+}
+
+func (l *FreeExtentList) Allocate(blockCount uint64) Extent {
+	if blockCount == 0 {
+		return Extent{}
+	}
+	for i, extent := range l.extents {
+		if extent.BlockCount < blockCount {
+			continue
+		}
+		allocated := Extent{StartLBA: extent.StartLBA, BlockCount: blockCount}
+		if extent.BlockCount == blockCount {
+			l.extents = append(l.extents[:i], l.extents[i+1:]...)
+			return allocated
+		}
+		l.extents[i].StartLBA += blockCount
+		l.extents[i].BlockCount -= blockCount
+		return allocated
+	}
+	return Extent{}
+}
+
+func (l *FreeExtentList) Free(extent Extent) {
+	if extent.BlockCount == 0 || l.capacity == 0 {
+		return
+	}
+	l.extents = append(l.extents, extent)
+	sort.Slice(l.extents, func(i, j int) bool {
+		return l.extents[i].StartLBA < l.extents[j].StartLBA
+	})
+
+	coalesced := l.extents[:0]
+	for _, current := range l.extents {
+		if len(coalesced) == 0 {
+			coalesced = append(coalesced, current)
+			continue
+		}
+		last := &coalesced[len(coalesced)-1]
+		if last.StartLBA+last.BlockCount == current.StartLBA {
+			last.BlockCount += current.BlockCount
+			continue
+		}
+		coalesced = append(coalesced, current)
+	}
+	if uint64(len(coalesced)) > l.capacity {
+		coalesced = coalesced[:l.capacity]
+	}
+	l.extents = coalesced
+}
+
+func (l *FreeExtentList) Extents() []Extent {
+	extents := make([]Extent, len(l.extents))
+	copy(extents, l.extents)
+	return extents
+}
+
 func FinishBatch(activeLBASize, semanticSlots uint64) BatchPacking {
 	slotsPerLBA := activeLBASize / EventSlotSize
 	totalSlotPositions := semanticSlots

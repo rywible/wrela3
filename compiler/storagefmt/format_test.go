@@ -259,6 +259,34 @@ func TestPackedSegmentCodecStripsPadding(t *testing.T) {
 	}
 }
 
+func TestBlobAllocatorSplitsAndCoalesces(t *testing.T) {
+	a := NewFreeExtentList(1024)
+	a.Free(Extent{StartLBA: 100, BlockCount: 10})
+
+	got := a.Allocate(4)
+	if got.StartLBA != 100 || got.BlockCount != 4 {
+		t.Fatalf("allocated = %#v, want start 100 block count 4", got)
+	}
+	remaining := a.Extents()
+	if len(remaining) != 1 || remaining[0].StartLBA != 104 || remaining[0].BlockCount != 6 {
+		t.Fatalf("remaining free list = %#v, want one extent at 104 count 6", remaining)
+	}
+
+	a.Free(got)
+	if len(a.Extents()) != 1 || a.Extents()[0].StartLBA != 100 || a.Extents()[0].BlockCount != 10 {
+		t.Fatalf("free list did not coalesce: %#v", a.Extents())
+	}
+
+	capacity := NewFreeExtentList(1024)
+	for i := uint64(0); i < 1024; i++ {
+		capacity.Free(Extent{StartLBA: i * 2, BlockCount: 1})
+	}
+	capacity.Free(Extent{StartLBA: 4096, BlockCount: 1})
+	if got := len(capacity.Extents()); got != 1024 {
+		t.Fatalf("free list capacity = %d, want 1024", got)
+	}
+}
+
 func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	writer := WriterPolicy{}
 	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)

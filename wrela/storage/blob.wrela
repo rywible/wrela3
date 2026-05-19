@@ -1,0 +1,45 @@
+module storage.blob
+
+const BLOB_ALLOCATOR_FREE_EXTENT_LIMIT: U64 = 1024
+
+data BlobRef {
+    blob_id: U64
+}
+
+data Extent {
+    start_lba: U64
+    block_count: U64
+}
+
+data BlobManifest {
+    blob_id: U64
+    key_metadata_ref: U64
+    extent_count: U64
+    logical_bytes: U64
+}
+
+data BlobExtentAllocator {
+    free_extent_count: U64
+    first: Extent
+
+    fn allocate(self, block_count: U64) -> Extent {
+        if block_count == 0 {
+            return Extent(start_lba = 0, block_count = 0)
+        }
+        if self.first.block_count < block_count {
+            return Extent(start_lba = 0, block_count = 0)
+        }
+        return Extent(start_lba = self.first.start_lba, block_count = block_count)
+    }
+
+    fn free(self, extent: Extent) -> BlobExtentAllocator {
+        if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT {
+            return self
+        }
+        return BlobExtentAllocator(free_extent_count = self.free_extent_count + 1, first = extent)
+    }
+
+    fn extents(self) -> Extent {
+        return self.first
+    }
+}
