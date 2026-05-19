@@ -1,0 +1,144 @@
+module machine.x86_64.nvme
+
+use { MmioRegion } from platform.hardware.bytes
+use { BootPanic } from platform.hardware.panic
+use { PathIdentity } from machine.x86_64.cpu_state
+use { PciDevice, PciDeviceSet } from machine.x86_64.pci
+use { TopicPublisher } from machine.x86_64.topic
+
+const NVME_CLASS_MASS_STORAGE: U64 = 0x01
+const NVME_SUBCLASS_NVM: U64 = 0x08
+const NVME_PROGIF_EXPRESS: U64 = 0x02
+
+data NvmeNamespace {
+    namespace_id: U32
+    logical_block_size: U64
+    block_count: U64
+    zone_size_blocks: U64
+    supports_zns: Bool
+    supports_fua: Bool
+    atomic_write_unit_blocks: U32
+    power_fail_atomic_write_unit_blocks: U32
+    volatile_write_cache: Bool
+}
+
+data NvmeSubmission {
+    command_id: U16
+}
+
+data NvmeCompletionInterrupt {
+    queue_id: U16
+    completed_count: U32
+}
+
+data NvmeCompletionQueue {
+    queue_id: U16
+    head: U32
+    depth: U32
+    expected_phase: Bool
+    panic: BootPanic
+
+    fn advance(self, count: U32) {
+        self.panic.fail(code = 0xAC080033)
+    }
+
+    fn drain(self) -> NvmeCompletionInterrupt {
+        self.panic.fail(code = 0xAC080034)
+    }
+}
+
+data NvmeControllerRegisters {
+    mmio: MmioRegion
+    panic: BootPanic
+
+    fn read32(self, offset: U32) -> U32 {
+        return self.mmio.read32(offset = offset)
+    }
+
+    fn write32(self, offset: U32, value: U32) {
+        self.mmio.write32(offset = offset, value = value)
+    }
+}
+
+unique driver NvmeDriver {
+    device: PciDevice
+    registers: NvmeControllerRegisters
+    namespace: NvmeNamespace
+
+    fn claim_controller(self, devices: PciDeviceSet, occurrence: U64) -> PciDevice {
+        let seen = 0
+        let index = 0
+        while index < devices.count {
+            let candidate = devices.at(index = index)
+            if candidate.identity.class_code == NVME_CLASS_MASS_STORAGE {
+                if candidate.identity.subclass == NVME_SUBCLASS_NVM {
+                    if candidate.identity.prog_if == NVME_PROGIF_EXPRESS {
+                        if seen == occurrence {
+                            return candidate
+                        }
+                        seen = seen + 1
+                    }
+                }
+            }
+            index = index + 1
+        }
+        devices.panic.fail(code = 0xAC080029)
+    }
+
+    fn initialize(self, device: PciDevice) -> NvmeDriver {
+        let registers = NvmeControllerRegisters(mmio = device.window.mmio(bus = device.identity.bus, device = device.identity.device, function = device.identity.function), panic = device.panic)
+        let namespace = NvmeNamespace(namespace_id = 1, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false)
+        return NvmeDriver(device = device, registers = registers, namespace = namespace)
+    }
+
+    fn disable_controller(self) {
+        self.registers.panic.fail(code = 0xAC080031)
+    }
+
+    fn program_admin_queues(self) {
+        self.registers.panic.fail(code = 0xAC080032)
+    }
+
+    fn enable_controller(self) {
+        self.registers.panic.fail(code = 0xAC080035)
+    }
+
+    fn identify_controller(self) {
+        self.registers.panic.fail(code = 0xAC080036)
+    }
+
+    fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {
+        self.registers.panic.fail(code = 0xAC080037)
+    }
+}
+
+driver path NvmeIoPath {
+    identity: PathIdentity
+    registers: NvmeControllerRegisters
+    completion_queue: NvmeCompletionQueue
+    irq: TopicPublisher<NvmeCompletionInterrupt>
+
+    interrupt receiver -> NvmeCompletionInterrupt {
+        return self.drain_completion_queue()
+    }
+
+    fn drain_completion_queue(self) -> NvmeCompletionInterrupt {
+        self.registers.panic.fail(code = 0xAC080038)
+    }
+
+    fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
+        self.registers.panic.fail(code = 0xAC080039)
+    }
+
+    fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        self.registers.panic.fail(code = 0xAC08003A)
+    }
+
+    fn submit_flush(self, namespace_id: U32) -> NvmeSubmission {
+        self.registers.panic.fail(code = 0xAC080030)
+    }
+
+    fn submit_zone_append(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        self.registers.panic.fail(code = 0xAC08003B)
+    }
+}
