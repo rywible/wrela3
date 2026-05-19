@@ -1,0 +1,7 @@
+// expect: SEM0101: event with multiple layouts must mark exactly one current layout
+module negative.missing_current_event_layout
+
+event A id 1 {
+    layout 1 {}
+    layout 2 {}
+}

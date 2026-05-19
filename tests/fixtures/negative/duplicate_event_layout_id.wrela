@@ -1,0 +1,7 @@
+// expect: SEM0102: duplicate event layout id
+module negative.duplicate_event_layout_id
+
+event A id 1 {
+    layout 1 {}
+    layout 1 current {}
+}

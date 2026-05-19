@@ -16,10 +16,20 @@ type StorageIndex struct {
 }
 
 type EventInfo struct {
-	Module      string
-	Name        string
-	EventTypeID uint64
-	Span        source.Span
+	Module          string
+	Name            string
+	EventTypeID     uint64
+	Layouts         []EventLayoutInfo
+	CurrentLayoutID uint64
+	Span            source.Span
+}
+
+type EventLayoutInfo struct {
+	ID           uint64
+	Current      bool
+	PayloadSize  uint64
+	PayloadAlign uint64
+	Span         source.Span
 }
 
 type ProjectionInfo struct {
@@ -55,11 +65,14 @@ func (c *checker) recordStorageEvent(storage StorageIndex, moduleName string, de
 		c.error(decl.SpanV, diag.SEM0100, "invalid durable event type id "+decl.ID)
 		return
 	}
+	layouts, currentLayoutID := c.checkEventLayouts(moduleName, decl)
 	info := EventInfo{
-		Module:      moduleName,
-		Name:        decl.Name,
-		EventTypeID: id,
-		Span:        decl.SpanV,
+		Module:          moduleName,
+		Name:            decl.Name,
+		EventTypeID:     id,
+		Layouts:         layouts,
+		CurrentLayoutID: currentLayoutID,
+		Span:            decl.SpanV,
 	}
 	if _, ok := storage.EventsByTypeID[id]; ok {
 		c.error(decl.SpanV, diag.SEM0099, "duplicate durable event type id")
@@ -67,6 +80,106 @@ func (c *checker) recordStorageEvent(storage StorageIndex, moduleName string, de
 	}
 	storage.EventsByTypeID[id] = info
 	storage.EventsByKey[moduleName+"."+decl.Name] = info
+}
+
+func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]EventLayoutInfo, uint64) {
+	layouts := make([]EventLayoutInfo, 0, len(decl.Layouts))
+	layoutFields := map[uint64]map[string]bool{}
+	seen := map[uint64]source.Span{}
+	currentCount := 0
+	var currentLayoutID uint64
+
+	for _, layout := range decl.Layouts {
+		id, err := strconv.ParseUint(layout.ID, 10, 64)
+		if err != nil || id == 0 {
+			c.error(layout.Span, diag.SEM0102, "layout id 0 is reserved")
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			c.error(layout.Span, diag.SEM0102, "duplicate event layout id")
+			continue
+		}
+		seen[id] = layout.Span
+		if layout.Current {
+			currentCount++
+			currentLayoutID = id
+		}
+		payloadSize, payloadAlign, fieldNames := c.eventLayoutPayload(moduleName, layout)
+		layoutFields[id] = fieldNames
+		layouts = append(layouts, EventLayoutInfo{
+			ID:           id,
+			Current:      layout.Current,
+			PayloadSize:  payloadSize,
+			PayloadAlign: payloadAlign,
+			Span:         layout.Span,
+		})
+	}
+
+	if len(layouts) == 1 && currentCount == 0 {
+		layouts[0].Current = true
+		currentLayoutID = layouts[0].ID
+		currentCount = 1
+	}
+	if len(layouts) > 1 && currentCount != 1 {
+		c.error(decl.SpanV, diag.SEM0101, "event with multiple layouts must mark exactly one current layout")
+	}
+
+	c.checkEventUpcasts(decl, seen, layoutFields)
+	return layouts, currentLayoutID
+}
+
+func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl) (uint64, uint64, map[string]bool) {
+	fieldNames := map[string]bool{}
+	var payloadSize uint64
+	var payloadAlign uint64 = 1
+	for _, field := range layout.Fields {
+		fieldNames[field.Name] = true
+		typ, ds := c.index.LookupTypeRef(moduleName, field.Type, nil)
+		if len(ds) != 0 || typ == nil {
+			c.error(field.Span, diag.SEM0103, "invalid event layout field "+field.Name)
+			continue
+		}
+		fieldLayout, ok := semanticFieldSizeAndStorage(typ, map[string]bool{})
+		if !ok {
+			c.error(field.Span, diag.SEM0103, "invalid event layout field "+field.Name)
+			continue
+		}
+		payloadSize = alignPayloadOffset(payloadSize, fieldLayout.valueAlign)
+		payloadSize += fieldLayout.storageSize
+		if fieldLayout.valueAlign > payloadAlign {
+			payloadAlign = fieldLayout.valueAlign
+		}
+	}
+	payloadSize = alignPayloadOffset(payloadSize, payloadAlign)
+	if payloadSize > 448 {
+		c.error(layout.Span, diag.SEM0121, "event payload exceeds inline slot budget")
+	}
+	return payloadSize, payloadAlign, fieldNames
+}
+
+func (c *checker) checkEventUpcasts(decl *ast.EventDecl, layouts map[uint64]source.Span, layoutFields map[uint64]map[string]bool) {
+	for _, upcast := range decl.Upcasts {
+		fromID, fromErr := strconv.ParseUint(upcast.FromID, 10, 64)
+		toID, toErr := strconv.ParseUint(upcast.ToID, 10, 64)
+		if fromErr != nil || toErr != nil {
+			c.error(upcast.Span, diag.SEM0104, "invalid event upcast endpoint")
+			continue
+		}
+		if _, ok := layouts[fromID]; !ok {
+			c.error(upcast.Span, diag.SEM0104, "invalid event upcast endpoint")
+			continue
+		}
+		targetFields, ok := layoutFields[toID]
+		if !ok {
+			c.error(upcast.Span, diag.SEM0104, "invalid event upcast endpoint")
+			continue
+		}
+		for _, mapping := range upcast.Mappings {
+			if !targetFields[mapping.To] {
+				c.error(mapping.Span, diag.SEM0105, "missing event upcast field mapping")
+			}
+		}
+	}
 }
 
 func (c *checker) recordStorageProjection(storage StorageIndex, moduleName string, decl *ast.ProjectionDecl) {
