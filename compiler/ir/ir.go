@@ -140,6 +140,12 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *Copy:
 		return valuesFromValue(v.Target)
+	case *StorageSlotStore:
+		values := valuesFromValue(v.Slot)
+		values = append(values, valuesFromValue(v.Value)...)
+		return values
+	case *StoragePayloadZero:
+		return valuesFromValue(v.Slot)
 	case *ForBytes:
 		values := valuesFromOps(v.IterableOps)
 		values = append(values, valuesFromValue(v.Index)...)
@@ -257,6 +263,23 @@ type Copy struct {
 }
 
 func (Copy) isOperation() {}
+
+type StorageSlotStore struct {
+	Slot   Value
+	Offset uint64
+	Value  Value
+	Type   Type
+}
+
+func (*StorageSlotStore) isOperation() {}
+
+type StoragePayloadZero struct {
+	Slot   Value
+	Offset uint64
+	Length uint64
+}
+
+func (*StoragePayloadZero) isOperation() {}
 
 type FieldValue struct {
 	Name  string

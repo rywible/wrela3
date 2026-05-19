@@ -151,6 +151,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.program.APICMode = ctx.apicMode()
 
 	ctx.lowerStorageMetadata()
+	ctx.lowerEventEncoders()
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
@@ -267,6 +268,74 @@ func sortedStorageProjections(storage sem.StorageIndex) []sem.ProjectionInfo {
 		out = append(out, storage.ProjectionsByKey[key])
 	}
 	return out
+}
+
+func (ctx *lowerContext) lowerEventEncoders() {
+	for _, layout := range ctx.program.StorageEvents {
+		if !layout.Current {
+			continue
+		}
+		ctx.program.Functions = append(ctx.program.Functions, ctx.lowerEventEncoder(layout))
+	}
+}
+
+func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
+	slot := &Param{Symbol: "slot", Type: Type{Name: "StorageEventSlot", Module: "storage.format", Kind: TypeKindData}}
+	eventID := &Param{Symbol: "event_id", Type: storageIRType("U64")}
+	streamID := &Param{Symbol: "stream_id", Type: storageIRType("U64")}
+	streamSequence := &Param{Symbol: "stream_sequence", Type: storageIRType("U64")}
+	atomicGroupLen := &Param{Symbol: "atomic_group_len", Type: storageIRType("U32")}
+	atomicGroupIndex := &Param{Symbol: "atomic_group_index", Type: storageIRType("U32")}
+	payloadLength := &Param{Symbol: "payload_length", Type: storageIRType("U32")}
+	flags := &Param{Symbol: "flags", Type: storageIRType("U32")}
+
+	u16 := storageIRType("U16")
+	u32 := storageIRType("U32")
+	u64 := storageIRType("U64")
+	ops := []Operation{
+		storageSlotStore(slot, 0, eventID, u64),
+		storageSlotStore(slot, 8, streamID, u64),
+		storageSlotStore(slot, 16, streamSequence, u64),
+		storageSlotStore(slot, 24, storageConst(layout.EventTypeID, u32), u32),
+		storageSlotStore(slot, 28, storageConst(layout.LayoutID, u32), u32),
+		storageSlotStore(slot, 32, atomicGroupLen, u32),
+		storageSlotStore(slot, 36, atomicGroupIndex, u32),
+		storageSlotStore(slot, 40, payloadLength, u32),
+		storageSlotStore(slot, 44, flags, u32),
+		storageSlotStore(slot, 52, storageConst(1, u16), u16),
+		storageSlotStore(slot, 54, storageConst(0, u16), u16),
+		storageSlotStore(slot, 56, storageConst(0, u64), u64),
+		&StoragePayloadZero{Slot: slot, Offset: 64, Length: 448},
+		&Return{},
+	}
+
+	return Function{
+		Symbol: layout.EncoderSymbol,
+		Return: Type{Name: "void", Module: "builtin", Kind: TypeKindPrimitive},
+		Params: []Value{
+			slot,
+			eventID,
+			streamID,
+			streamSequence,
+			atomicGroupLen,
+			atomicGroupIndex,
+			payloadLength,
+			flags,
+		},
+		Blocks: []Block{{Label: "entry", Ops: ops}},
+	}
+}
+
+func storageSlotStore(slot Value, offset uint64, value Value, typ Type) *StorageSlotStore {
+	return &StorageSlotStore{Slot: slot, Offset: offset, Value: value, Type: typ}
+}
+
+func storageConst(value uint64, typ Type) *ConstInt {
+	return &ConstInt{Symbol: "storage_const", Value: value, Type: typ}
+}
+
+func storageIRType(name string) Type {
+	return Type{Name: name, Module: "builtin", Kind: TypeKindPrimitive}
 }
 
 func (ctx *lowerContext) addPrimitiveTypes() {
