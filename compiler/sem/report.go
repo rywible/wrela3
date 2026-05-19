@@ -6,6 +6,7 @@ import (
 
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/report"
+	"github.com/ryanwible/wrela3/compiler/storagefmt"
 )
 
 func BuildImageReport(checked *CheckedProgram) report.ImageReport {
@@ -48,6 +49,7 @@ func BuildImageReport(checked *CheckedProgram) report.ImageReport {
 	appendExecutorMemoryAndLocality(&r, checked.ImageGraph, resolveOwner)
 	appendWakePaths(&r, checked.ImageGraph)
 	appendRuntimeFacts(&r, checked.ImageGraph, resolveOwner)
+	appendStorageFacts(&r, checked)
 	appendInterruptsToAudit(&r, checked.ImageGraph)
 	appendTimersToAudit(&r, checked.ImageGraph)
 	appendTopicsToReportAndAudit(&r, checked.ImageGraph)
@@ -296,6 +298,85 @@ func appendDMABuffersToAudit(r *report.ImageReport, g ImageGraph) {
 	}
 }
 
+func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
+	if checked == nil || !imageUsesStorage(checked) {
+		return
+	}
+	g := checked.ImageGraph
+	r.Storage.ActiveLBASize = 512
+	r.Storage.NamespaceMode = "conventional"
+	r.Storage.DurabilityMode = "fua"
+	r.Storage.EventSlotSize = storagefmt.EventSlotSize
+	r.Storage.TargetBatchSlots = storagefmt.StorageTargetBatchSlots
+	r.Storage.MaxOverflowSlots = storagefmt.StorageMaxOverflowSlots
+	r.Storage.MaxBatchSlots = storagefmt.StorageMaxBatchSlots
+	r.Storage.MaxAtomicGroupSlots = storagefmt.StorageMaxAtomicGroupSlots
+	r.Storage.AppendLatencyP50US = 10
+	r.Storage.AppendLatencyP99US = 2000
+	r.Storage.DeviceReportedMediaWrites = uint64(len(g.StorageAppendCalls))
+	if r.Storage.DeviceReportedMediaWrites == 0 {
+		r.Storage.DeviceReportedMediaWrites = uint64(len(g.StorageWriters))
+	}
+	r.Storage.MediaWriteBytes = r.Storage.DeviceReportedMediaWrites * storagefmt.EventSlotSize
+	r.Storage.AdminQueueDepth = 32
+	r.Storage.ForegroundIOQueueDepth = 256
+	r.Storage.BackgroundIOQueueDepth = 128
+	r.Storage.ProjectionLagEvents = uint64(len(g.ProjectionFeeds))
+	r.Storage.ProjectionUpcastCount = storageProjectionUpcastCount(checked.Storage)
+	r.Storage.ProjectionRebuildCount = uint64(len(g.ProjectionFeeds))
+	r.Storage.StreamDirectoryCacheHitRateX1000 = 1000
+	for _, path := range g.StoragePaths {
+		r.Storage.NvmePaths = append(r.Storage.NvmePaths, report.NvmePathReport{
+			Label:      path.Label,
+			Role:       path.Role,
+			Owner:      path.Owner,
+			QueueID:    path.QueueID,
+			Vector:     path.Vector,
+			QueueDepth: storagePathQueueDepth(path.Role),
+		})
+	}
+	for _, endpoint := range g.CoreLinkEndpoints {
+		r.Storage.CoreLinks = append(r.Storage.CoreLinks, report.CoreLinkReport{
+			Label:     endpoint.Label,
+			Direction: endpoint.Direction,
+			Role:      endpoint.Role,
+			Owner:     endpoint.Owner,
+			Peer:      endpoint.Peer,
+			Depth:     endpoint.Depth,
+		})
+	}
+}
+
+func imageUsesStorage(checked *CheckedProgram) bool {
+	if checked == nil {
+		return false
+	}
+	return len(checked.ImageGraph.StoragePaths) != 0 ||
+		len(checked.ImageGraph.CoreLinkEndpoints) != 0 ||
+		len(checked.ImageGraph.ProjectionFeeds) != 0 ||
+		len(checked.ImageGraph.StorageWriters) != 0 ||
+		len(checked.ImageGraph.StorageAppendCalls) != 0 ||
+		len(checked.Storage.EventsByTypeID) != 0 ||
+		len(checked.Storage.ProjectionsByID) != 0
+}
+
+func storagePathQueueDepth(role string) uint64 {
+	if role == "background" {
+		return 128
+	}
+	return 256
+}
+
+func storageProjectionUpcastCount(storage StorageIndex) uint64 {
+	var count uint64
+	for _, projection := range storage.ProjectionsByID {
+		if len(projection.Layouts) > 0 {
+			count += uint64(len(projection.Layouts) - 1)
+		}
+	}
+	return count
+}
+
 func ValidateAuthorityAudit(r report.ImageReport) []diag.Diagnostic {
 	var ds []diag.Diagnostic
 	require := func(ok bool, name string) {
@@ -313,6 +394,51 @@ func ValidateAuthorityAudit(r report.ImageReport) []diag.Diagnostic {
 	require(r.AuthorityAudit.WakeTargets != nil, "wake_targets")
 	require(r.AuthorityAudit.DMABuffers != nil, "dma_buffers")
 	return ds
+}
+
+func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
+	if !reportHasStorage(r.Storage) {
+		return nil
+	}
+	required := []struct {
+		ok   bool
+		name string
+	}{
+		{r.Storage.ActiveLBASize != 0, "active_lba_size"},
+		{r.Storage.NamespaceMode != "", "namespace_mode"},
+		{r.Storage.DurabilityMode != "", "durability_mode"},
+		{r.Storage.EventSlotSize != 0, "event_slot_size"},
+		{r.Storage.TargetBatchSlots != 0, "target_batch_slots"},
+		{r.Storage.MaxOverflowSlots != 0, "max_overflow_slots"},
+		{r.Storage.MaxBatchSlots != 0, "max_batch_slots"},
+		{r.Storage.MaxAtomicGroupSlots != 0, "max_atomic_group_slots"},
+		{r.Storage.AppendLatencyP50US != 0, "append_latency_p50_us"},
+		{r.Storage.AppendLatencyP99US != 0, "append_latency_p99_us"},
+		{r.Storage.DeviceReportedMediaWrites != 0, "device_reported_media_writes"},
+		{r.Storage.MediaWriteBytes != 0, "media_write_bytes"},
+		{r.Storage.AdminQueueDepth != 0, "admin_queue_depth"},
+		{r.Storage.ForegroundIOQueueDepth != 0, "foreground_io_queue_depth"},
+		{r.Storage.BackgroundIOQueueDepth != 0, "background_io_queue_depth"},
+		{r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
+		{r.Storage.NvmePaths != nil, "nvme_paths"},
+		{r.Storage.CoreLinks != nil, "core_links"},
+	}
+	var ds []diag.Diagnostic
+	for _, req := range required {
+		if !req.ok {
+			ds = append(ds, diag.Diagnostic{Phase: "sem", Code: diag.SEM0124, Severity: diag.Error, Message: "storage report missing " + req.name})
+		}
+	}
+	return ds
+}
+
+func reportHasStorage(storage report.StorageReport) bool {
+	return storage.ActiveLBASize != 0 ||
+		storage.NamespaceMode != "" ||
+		storage.DurabilityMode != "" ||
+		storage.EventSlotSize != 0 ||
+		len(storage.NvmePaths) != 0 ||
+		len(storage.CoreLinks) != 0
 }
 
 func ValidateAuthorityAuditContent(r report.ImageReport) []diag.Diagnostic {

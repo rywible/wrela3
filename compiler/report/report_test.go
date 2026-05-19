@@ -130,6 +130,80 @@ func TestNewImageReportUsesEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestStorageMetricsReportShape(t *testing.T) {
+	r := NewImageReport("StorageImage")
+	r.Storage = StorageReport{
+		ActiveLBASize:                    512,
+		NamespaceMode:                    "conventional",
+		DurabilityMode:                   "fua",
+		EventSlotSize:                    512,
+		ReservedEmptySlots:               3,
+		TargetBatchSlots:                 64,
+		MaxOverflowSlots:                 8,
+		MaxBatchSlots:                    72,
+		MaxAtomicGroupSlots:              32,
+		AppendLatencyP50US:               10,
+		AppendLatencyP99US:               2000,
+		DeviceReportedMediaWrites:        123,
+		MediaWriteBytes:                  62976,
+		AdminQueueDepth:                  32,
+		ForegroundIOQueueDepth:           256,
+		BackgroundIOQueueDepth:           128,
+		BlobOrphanBytes:                  4096,
+		ProjectionLagEvents:              5,
+		ProjectionUpcastCount:            2,
+		ProjectionRebuildCount:           1,
+		StreamDirectoryCacheHitRateX1000: 875,
+		NvmePaths: []NvmePathReport{{
+			Label:      "nvme.foreground",
+			Role:       "foreground",
+			Owner:      "foreground",
+			QueueID:    1,
+			Vector:     80,
+			QueueDepth: 256,
+		}},
+		CoreLinks: []CoreLinkReport{{
+			Label:     "core_link.producer.0",
+			Direction: "tx",
+			Role:      "producer",
+			Owner:     "foreground",
+			Peer:      "maintenance",
+			Depth:     64,
+		}},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	var shaped struct {
+		Storage StorageReport `json:"storage"`
+	}
+	if err := json.Unmarshal(data, &shaped); err != nil {
+		t.Fatalf("unmarshal shaped report: %v", err)
+	}
+	if shaped.Storage.ActiveLBASize != 512 ||
+		shaped.Storage.NamespaceMode != "conventional" ||
+		shaped.Storage.DurabilityMode != "fua" ||
+		shaped.Storage.EventSlotSize != 512 ||
+		shaped.Storage.TargetBatchSlots != 64 ||
+		shaped.Storage.AppendLatencyP99US != 2000 ||
+		shaped.Storage.DeviceReportedMediaWrites != 123 ||
+		shaped.Storage.ForegroundIOQueueDepth != 256 ||
+		shaped.Storage.BlobOrphanBytes != 4096 ||
+		shaped.Storage.ProjectionLagEvents != 5 ||
+		shaped.Storage.ProjectionUpcastCount != 2 ||
+		shaped.Storage.ProjectionRebuildCount != 1 ||
+		shaped.Storage.StreamDirectoryCacheHitRateX1000 != 875 {
+		t.Fatalf("storage report = %#v in %s", shaped.Storage, data)
+	}
+	if len(shaped.Storage.NvmePaths) != 1 || shaped.Storage.NvmePaths[0].QueueDepth != 256 {
+		t.Fatalf("nvme paths = %#v in %s", shaped.Storage.NvmePaths, data)
+	}
+	if len(shaped.Storage.CoreLinks) != 1 || shaped.Storage.CoreLinks[0].Depth != 64 {
+		t.Fatalf("core links = %#v in %s", shaped.Storage.CoreLinks, data)
+	}
+}
+
 func TestZeroValueImageReportJSONShape(t *testing.T) {
 	r := ImageReport{
 		Version: 1,
