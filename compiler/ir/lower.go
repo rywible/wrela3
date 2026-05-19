@@ -288,6 +288,7 @@ func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
 	atomicGroupIndex := &Param{Symbol: "atomic_group_index", Type: storageIRType("U32")}
 	payloadLength := &Param{Symbol: "payload_length", Type: storageIRType("U32")}
 	flags := &Param{Symbol: "flags", Type: storageIRType("U32")}
+	checksum := &StorageCRC32C{Slot: slot, Length: 512, Type: storageIRType("U32")}
 
 	u16 := storageIRType("U16")
 	u32 := storageIRType("U32")
@@ -306,6 +307,9 @@ func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
 		storageSlotStore(slot, 54, storageConst(0, u16), u16),
 		storageSlotStore(slot, 56, storageConst(0, u64), u64),
 		&StoragePayloadZero{Slot: slot, Offset: 64, Length: 448},
+		storageSlotStore(slot, 48, storageConst(0, u32), u32),
+		checksum,
+		storageSlotStore(slot, 48, checksum, u32),
 		&Return{},
 	}
 

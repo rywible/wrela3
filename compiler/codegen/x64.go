@@ -110,6 +110,9 @@ func Compile(program *ir.Program) (*Image, []diag.Diagnostic) {
 		}
 		units = append(units, unit)
 	}
+	if programUsesStorageCRC32C(program) {
+		units = append(units, compileStorageCRC32CHelperUnit())
+	}
 	for _, method := range program.AsmMethods {
 		unit, ds := compileAsmMethodUnit(method)
 		if len(ds) != 0 {
@@ -777,6 +780,8 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitStorageSlotStore(e, frame, v)
 			case *ir.StoragePayloadZero:
 				emitStoragePayloadZero(e, frame, v)
+			case *ir.StorageCRC32C:
+				emitStorageCRC32C(e, frame, v)
 			case *ir.Binary:
 				emitBinary(e, v, frame)
 			case *ir.Call:
@@ -1150,6 +1155,8 @@ func valueSize(ctx compileContext, value ir.Value) int {
 	case ir.TopicIsWaitArmed:
 		return ctx.representationSize(v.Type.Name)
 	case *ir.VcpuStart:
+		return ctx.representationSize(v.Type.Name)
+	case *ir.StorageCRC32C:
 		return ctx.representationSize(v.Type.Name)
 	default:
 		return 8
@@ -1780,6 +1787,8 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitStorageSlotStore(e, frame, v)
 		case *ir.StoragePayloadZero:
 			emitStoragePayloadZero(e, frame, v)
+		case *ir.StorageCRC32C:
+			emitStorageCRC32C(e, frame, v)
 		case *ir.Binary:
 			emitBinary(e, v, frame)
 		case *ir.Call:
@@ -2629,6 +2638,17 @@ func emitStoragePayloadZero(e *Emitter, frame Frame, op *ir.StoragePayloadZero) 
 		emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(op.Offset+offset), asm.MustLookup("rax"), width)
 		offset += uint64(width / 8)
 	}
+}
+
+func emitStorageCRC32C(e *Emitter, frame Frame, op *ir.StorageCRC32C) {
+	emitLoadValue(e, frame, op.Slot, asm.MustLookup("rdi"))
+	emitMovImmToReg(e, asm.MustLookup("rsi"), int64(op.Length))
+	emitCallReloc(e, "_wrela_crc32c_castagnoli")
+	slot, ok := frame.Slots[op]
+	if !ok {
+		return
+	}
+	emitStoreSlotFromReg(e, asm.MustLookup("rax"), slot, storageSlotStoreWidthBits(e.ctx, op.Type))
 }
 
 func storageSlotStoreWidthBits(ctx compileContext, typ ir.Type) int {
@@ -3581,11 +3601,117 @@ func valueType(value ir.Value) ir.Type {
 		return v.Type
 	case *ir.VcpuStart:
 		return v.Type
+	case *ir.StorageCRC32C:
+		return v.Type
 	case ir.VcpuStart:
 		return v.Type
 	default:
 		return ir.Type{}
 	}
+}
+
+func programUsesStorageCRC32C(program *ir.Program) bool {
+	for _, fn := range program.Functions {
+		if opsUseStorageCRC32C(fn.Blocks) {
+			return true
+		}
+	}
+	return false
+}
+
+func opsUseStorageCRC32C(blocks []ir.Block) bool {
+	for _, block := range blocks {
+		if opListUsesStorageCRC32C(block.Ops) {
+			return true
+		}
+	}
+	return false
+}
+
+func opListUsesStorageCRC32C(ops []ir.Operation) bool {
+	for _, op := range ops {
+		switch v := op.(type) {
+		case *ir.StorageCRC32C:
+			return true
+		case *ir.If:
+			if opListUsesStorageCRC32C(v.ConditionOps) || opListUsesStorageCRC32C(v.Then) || opListUsesStorageCRC32C(v.Else) {
+				return true
+			}
+		case *ir.While:
+			if opListUsesStorageCRC32C(v.ConditionOps) || opListUsesStorageCRC32C(v.Body) {
+				return true
+			}
+		case *ir.ForBytes:
+			if opListUsesStorageCRC32C(v.IterableOps) || opListUsesStorageCRC32C(v.Body) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func compileStorageCRC32CHelperUnit() compiledUnit {
+	e := &Emitter{Labels: map[string]int{}}
+	crc := asm.MustLookup("rax")
+	index := asm.MustLookup("rdx")
+	byteValue := asm.MustLookup("rcx")
+	mask := asm.MustLookup("r8")
+	bit := asm.MustLookup("r9")
+	address := asm.MustLookup("r11")
+	byteLoop := e.newLabel("crc32c_byte")
+	bitLoop := e.newLabel("crc32c_bit")
+	noPoly := e.newLabel("crc32c_no_poly")
+	bitNext := e.newLabel("crc32c_bit_next")
+	byteDone := e.newLabel("crc32c_byte_done")
+	done := e.newLabel("crc32c_done")
+
+	emitMovImmToReg(e, crc, 0xffffffff)
+	emitMovImmToReg(e, index, 0)
+	e.bindLabel(byteLoop)
+	emitCmpRegReg(e, index, asm.MustLookup("rsi"))
+	e.emitJcc(0x83, done)
+	emitRegRegMove(e, address, asm.MustLookup("rdi"))
+	emitRegRegOp(e, 0x01, address, index)
+	emitMovImmToReg(e, byteValue, 0)
+	emitLoadMemToReg(e, byteValue, address, 0, 8)
+	emitRegRegOp(e, 0x31, crc, byteValue)
+	emitMovImmToReg(e, bit, 0)
+
+	e.bindLabel(bitLoop)
+	emitCmpRegImm(e, bit, 8)
+	e.emitJcc(0x83, byteDone)
+	emitRegRegMove(e, mask, crc)
+	emitMovImmToReg(e, byteValue, 1)
+	emitRegRegOp(e, 0x21, mask, byteValue)
+	emitCmpRegImm(e, mask, 0)
+	e.emitJcc(0x84, noPoly)
+	emitShiftImm(e, 0x05, crc, 1)
+	emitMovImmToReg(e, mask, 0x82f63b78)
+	emitRegRegOp(e, 0x31, crc, mask)
+	e.emitJmp(bitNext)
+
+	e.bindLabel(noPoly)
+	emitShiftImm(e, 0x05, crc, 1)
+	e.bindLabel(bitNext)
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+		asm.RegOperand{Reg: bit},
+		asm.ImmOperand{Value: 1},
+	}})
+	e.emitJmp(bitLoop)
+
+	e.bindLabel(byteDone)
+	e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+		asm.RegOperand{Reg: index},
+		asm.ImmOperand{Value: 1},
+	}})
+	e.emitJmp(byteLoop)
+
+	e.bindLabel(done)
+	emitMovImmToReg(e, mask, 0xffffffff)
+	emitRegRegOp(e, 0x31, crc, mask)
+	e.emitInstruction(asm.Instruction{Mnemonic: "ret"})
+	e.resolveJumps()
+	return compiledUnit{Symbol: "_wrela_crc32c_castagnoli", Bytes: e.Code}
 }
 
 func isComparisonOp(op string) bool {

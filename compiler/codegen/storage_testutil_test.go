@@ -11,6 +11,8 @@ func storageEncoderProgramForCodegenTest() *ir.Program {
 	slot := &ir.Param{Symbol: "slot", Type: ir.Type{Name: "StorageEventSlot", Module: "storage.format", Kind: ir.TypeKindData}}
 	eventTypeID := &ir.ConstInt{Symbol: "event_type_id", Value: 1001, Type: ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}}
 	payloadLayoutID := &ir.ConstInt{Symbol: "payload_layout_id", Value: 1, Type: ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}}
+	checksumZero := &ir.ConstInt{Symbol: "checksum_zero", Value: 0, Type: ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}}
+	checksum := &ir.StorageCRC32C{Slot: slot, Length: 512, Type: ir.Type{Name: "U32", Module: "builtin", Kind: ir.TypeKindPrimitive}}
 	return &ir.Program{
 		Functions: []ir.Function{{
 			Symbol: "_wrela_storage_event_app_FileCreated_layout_1_encode",
@@ -21,9 +23,13 @@ func storageEncoderProgramForCodegenTest() *ir.Program {
 				Ops: []ir.Operation{
 					eventTypeID,
 					payloadLayoutID,
+					checksumZero,
 					&ir.StorageSlotStore{Slot: slot, Offset: 24, Value: eventTypeID, Type: eventTypeID.Type},
 					&ir.StorageSlotStore{Slot: slot, Offset: 28, Value: payloadLayoutID, Type: payloadLayoutID.Type},
 					&ir.StoragePayloadZero{Slot: slot, Offset: 64, Length: 448},
+					&ir.StorageSlotStore{Slot: slot, Offset: 48, Value: checksumZero, Type: checksumZero.Type},
+					checksum,
+					&ir.StorageSlotStore{Slot: slot, Offset: 48, Value: checksum, Type: checksum.Type},
 					&ir.Return{},
 				},
 			}},

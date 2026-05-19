@@ -146,6 +146,8 @@ func valuesDefinedBy(op Operation) []Value {
 		return values
 	case *StoragePayloadZero:
 		return valuesFromValue(v.Slot)
+	case *StorageCRC32C:
+		return []Value{v}
 	case *ForBytes:
 		values := valuesFromOps(v.IterableOps)
 		values = append(values, valuesFromValue(v.Index)...)
@@ -280,6 +282,15 @@ type StoragePayloadZero struct {
 }
 
 func (*StoragePayloadZero) isOperation() {}
+
+type StorageCRC32C struct {
+	Slot   Value
+	Length uint64
+	Type   Type
+}
+
+func (*StorageCRC32C) isValue()     {}
+func (*StorageCRC32C) isOperation() {}
 
 type FieldValue struct {
 	Name  string
