@@ -1,0 +1,147 @@
+module storage.format
+
+const STORAGE_EVENT_SLOT_SIZE: U64 = 512
+const STORAGE_EVENT_HEADER_SIZE: U64 = 64
+const STORAGE_EVENT_PAYLOAD_BYTES: U64 = 448
+const STORAGE_TARGET_BATCH_SLOTS: U64 = 64
+const STORAGE_MAX_OVERFLOW_SLOTS: U64 = 8
+const STORAGE_MAX_BATCH_SLOTS: U64 = 72
+const STORAGE_MAX_ATOMIC_GROUP_SLOTS: U64 = 32
+const STORAGE_GROUP_COMMIT_TIMER_US: U64 = 2000
+const STORAGE_HOT_SEGMENT_SLOTS: U64 = 1048576
+const STORAGE_HOT_SEGMENT_BYTES: U64 = 536870912
+const STORAGE_SLOT_RESERVED_EMPTY: U64 = 1
+const STORAGE_DISK_BYTES: U64 = 4294967296
+const STORAGE_SUPERBLOCK_COPIES_OFFSET: U64 = 0
+const STORAGE_SUPERBLOCK_COPIES_BYTES: U64 = 8192
+const STORAGE_REGION_MAP_OFFSET: U64 = 8192
+const STORAGE_REGION_MAP_BYTES: U64 = 1048576
+const STORAGE_HOT_EVENT_REGION_OFFSET: U64 = 1056768
+const STORAGE_SEGMENT_MAP_OFFSET: U64 = 537927680
+const STORAGE_SEGMENT_MAP_BYTES: U64 = 67108864
+const STORAGE_SEALED_SEGMENT_EXTENTS_OFFSET: U64 = 605036544
+const STORAGE_SEALED_SEGMENT_EXTENTS_BYTES: U64 = 536870912
+const STORAGE_STREAM_DIRECTORY_OFFSET: U64 = 1141907456
+const STORAGE_STREAM_DIRECTORY_BYTES: U64 = 268435456
+const STORAGE_BLOB_EXTENTS_OFFSET: U64 = 1410342912
+const STORAGE_BLOB_EXTENTS_BYTES: U64 = 1610612736
+const STORAGE_BLOB_MANIFESTS_OFFSET: U64 = 3020955648
+const STORAGE_BLOB_MANIFESTS_BYTES: U64 = 268435456
+const STORAGE_PROJECTION_STORAGE_OFFSET: U64 = 3289391104
+const STORAGE_PROJECTION_STORAGE_BYTES: U64 = 536870912
+const STORAGE_MAINTENANCE_METADATA_OFFSET: U64 = 3826262016
+const STORAGE_MAINTENANCE_METADATA_BYTES: U64 = 268435456
+const STORAGE_RESERVED_TAIL_OFFSET: U64 = 4094697472
+const STORAGE_RESERVED_TAIL_BYTES: U64 = 72159232
+const STORAGE_ADMIN_QUEUE_DEPTH: U64 = 32
+const STORAGE_FOREGROUND_IO_QUEUE_DEPTH: U64 = 256
+const STORAGE_BACKGROUND_IO_QUEUE_DEPTH: U64 = 128
+const STORAGE_MAX_PRP_TRANSFER_BYTES: U64 = 131072
+const STORAGE_BLOB_INLINE_EXTENT_COUNT: U64 = 4
+const STORAGE_BLOB_MANIFEST_EXTENT_LIMIT: U64 = 128
+const STORAGE_BLOB_ALLOCATOR_FREE_EXTENT_LIMIT: U64 = 1024
+const STORAGE_BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
+
+data StorageRegion {
+    offset: U64
+    length: U64
+}
+
+data StorageSuperblock {
+    magic: U64
+    version: U64
+    generation: U64
+    region_map_offset: U64
+    region_map_bytes: U64
+    hot_event_region_offset: U64
+    hot_event_region_bytes: U64
+    checksum32: U32
+}
+
+data EventSlotHeader {
+    event_id: U64
+    stream_id: U64
+    stream_sequence: U64
+    event_type_id: U32
+    payload_layout_id: U32
+    atomic_group_len: U32
+    atomic_group_index: U32
+    payload_length: U32
+    flags: U32
+    checksum32: U32
+    header_version: U16
+    reserved16: U16
+    reserved64: U64
+}
+
+data StreamDirectoryEntry {
+    latest_sequence: U64
+    latest_event_id: U64
+    latest_checkpoint_ref: U64
+    flags: U64
+}
+
+data SegmentDescriptor {
+    first_event_id: U64
+    last_event_id: U64
+    offset: U64
+    length: U64
+    sealed: Bool
+}
+
+data BlobExtentRef {
+    offset: U64
+    length: U64
+    checksum32: U32
+}
+
+data BlobManifest {
+    blob_id: U64
+    key_metadata_ref: U64
+    extent_count: U64
+    logical_bytes: U64
+}
+
+data ProjectionRoot {
+    projection_id: U64
+    layout_id: U64
+    through_event_id: U64
+    root_ref: U64
+}
+
+data StorageMetrics {
+    foreground_path_owner: U64
+    foreground_path_queue_id: U64
+    foreground_path_vector: U64
+    background_path_owner: U64
+    background_path_queue_id: U64
+    background_path_vector: U64
+    selected_durability_mode: U64
+    event_slot_size: U64
+    event_header_size: U64
+    event_payload_bytes: U64
+    event_slots_written: U64
+    event_slots_reserved_empty: U64
+    event_slots_recovered: U64
+    blob_orphan_bytes: U64
+    projection_lag_events: U64
+    stream_directory_cache_hits: U64
+    stream_directory_cache_misses: U64
+    stream_directory_cache_hit_rate_ppm: U64
+    device_media_write_commands: U64
+    device_media_write_bytes: U64
+    target_batch_slots: U64
+    max_batch_slots: U64
+    batches_submitted: U64
+    batch_overflow_count: U64
+    append_latency_us: U64
+    durability_latency_us: U64
+    admin_queue_depth: U64
+    foreground_io_queue_depth: U64
+    background_io_queue_depth: U64
+    core_link_committed_groups: U64
+    core_link_backpressure_count: U64
+    event_upcast_count: U64
+    projection_upcast_count: U64
+    projection_rebuild_count: U64
+}
