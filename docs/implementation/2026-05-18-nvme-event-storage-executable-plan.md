@@ -2,89 +2,104 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Wrela's first direct-NVMe durable event store: interrupt-driven NVMe IO paths, fixed 512-byte event slots, atomic event groups, dense stream directories, encrypted-API blob extents, rebuildable projections, and replay after reboot.
+**Goal:** Build Wrela's first direct-NVMe durable event store: interrupt-driven NVMe paths, fixed 512-byte event slots, atomic event groups, dense stream directories, encrypted-API blob extents, rebuildable projections, and replay after reboot.
 
-**Architecture:** The foreground/app/display core owns the only `StorageWriter`, event ID allocation, durable frontier publication, stream directory heads, and acceptance of maintenance proposals. A separate maintenance core owns projection work, blob relocation, orphan collection, and cold event segment packing through a background NVMe path. NVMe is a private storage backend; application state is expressed as durable events, blob refs, checkpoints, and projection roots.
+**Architecture:** The foreground/app/display core owns the only `StorageWriter`, append-log `event_id` allocation, durable frontier publication, stream directory heads, and maintenance proposal acceptance. A maintenance core owns projection updates, blob relocation, orphan collection, checkpoint rebuild, and cold segment packing through a separate background NVMe path. NVMe is a private backend for events, blobs, checkpoints, and projections; it is not exposed as an ambient block device or filesystem.
 
-**Tech Stack:** Go 1.22+ compiler; existing Wrela lexer/parser/semantic checker/IR/x86_64 codegen; Wrela source modules under `wrela/`; QEMU q35 + OVMF + NVMe device for end-to-end tests; Go unit tests for compiler contracts and byte-format algorithms.
+**Tech Stack:** Go 1.22+; existing Wrela lexer/parser/semantic checker/IR/x86_64 codegen; Wrela modules under `wrela/`; QEMU q35 + OVMF + NVMe device for end-to-end tests; Go unit tests for compiler contracts and byte-format algorithms.
 
 ---
 
-## 0. How To Execute This Plan
+## 0. Execution Rules
 
-**Description:** This plan is written so a junior engineer can take any task, understand the exact contract, add the failing test first, implement the smallest matching change, and verify it without reopening design questions.
+**Description:** This plan is written so a junior engineer can implement one task without inventing missing contracts, test helpers, or storage behavior. Tasks are intentionally small. If a task appears to require a design decision not present here, stop and ask.
 
 **Acceptance Criteria:**
 
-- Every task ends with a commit whose message ends in `-Codex Automated`.
-- Each task's new tests fail before implementation and pass after implementation.
-- `git diff --check` passes before every commit.
-- Full-plan completion requires `go test ./...` and the storage QEMU tests listed in Task 24.
-- No task introduces POSIX filesystem semantics, SQL, ambient logging, multi-writer event logs, general query planning, production command inboxes, real key destruction, or full-disk encryption.
+- Every task has exact prerequisites, file ownership, step-by-step failing-test workflow, implementation code examples, verification commands, and commit command.
+- No task depends on a helper unless the helper is listed in Section 2 as existing or created by an earlier task.
+- Every task commit message ends with `-Codex Automated`.
+- Each task runs `git diff --check` before commit.
+- Full plan completion requires `go test ./...`, `go test ./tests/e2e -run NvmeEventStorage -v`, and a placeholder scan command that exits successfully only when no red-flag phrases are present.
 
 **Code Example:**
 
 ```bash
-go test ./compiler/parse -run TestParseEventDeclaration -v
-go test ./compiler/sem -run TestEventLayoutSemanticContracts -v
+go test ./compiler/storagefmt -run TestCRC32CVector -v
 git diff --check
-git add compiler/parse/parser.go compiler/parse/parser_test.go compiler/ast/ast.go
-git commit -m "feat: parse durable event declarations -Codex Automated"
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go
+git commit -m "test: add storage format harness -Codex Automated"
 ```
 
-Assumptions frozen for execution:
+Assumptions:
 
-- The physical arena memory, production substrate convergence, and language expressiveness implementation plans have landed before this plan is executed.
+- The physical arena memory, production substrate convergence, and language expressiveness plans have landed before this plan executes.
 - `event` and `projection` become top-level declaration keywords.
 - `id`, `layout`, `current`, and `upcast` are contextual identifiers, not global keywords.
-- There is no `worker` keyword in this milestone. Projection workers are ordinary executors or classes pinned to the maintenance core by boot wiring.
-- Blob payload encryption uses the final metadata/API shape in this milestone, but QEMU tests use an explicitly named `DevelopmentPassthroughAead`. Production constructors reject that mode unless the image opts into development storage.
-- V1 accepts active NVMe LBAs of 512 bytes or 4096 bytes. Other active LBA sizes fail during storage initialization with a boot-fatal panic.
-- V1 supports conventional namespaces fully. Zoned Namespace support is detected and represented in metadata; zone append is implemented as an optional path and exercised by unit tests with synthetic Identify data.
+- There is no `worker` keyword in this milestone; projection workers are ordinary classes/executors pinned by boot wiring.
+- `match` arms use the existing Wrela parser syntax `Pattern => { statements }`. The `->` token is valid for phase/function return types and storage upcast field mappings, not for `match` arms.
+- V1 accepts active NVMe LBAs of 512 or 4096 bytes. Other LBA sizes fail at storage initialization.
+- Conventional namespaces are required. Zoned Namespace support is detected and represented; zone append is optional and covered by unit tests with synthetic Identify data.
+- Stream IDs are never reused in v1, including after delete.
+- `event_type_id` means the durable event declaration ID from source, for example `event FileCreated id 1001`.
+- `event_id` means the append-log sequence number assigned by the `StorageWriter`.
+- The first append-log `event_id` is `0`. A two-event first atomic group therefore has `first_event_id = 0` and `last_event_id = 1`.
 
 Definition of done for one task:
 
-- The task's files changed only where listed.
-- The task's tests have the expected fail-before/pass-after loop.
-- The task's acceptance criteria are true.
-- The commit message matches the exact message shown by the task.
+- The failing test step fails with the expected missing symbol, diagnostic, or assertion.
+- The implementation step changes only the files listed in the task.
+- The passing test step passes.
+- `git diff --check` passes.
+- The exact commit command in the task succeeds.
 
-Definition of done for the whole plan:
+Definition of done for the full plan:
 
 - `go test ./...` passes.
-- `go test ./tests/e2e -run NvmeEventStorage -v` passes on a machine with QEMU and OVMF.
-- `go test ./tests/e2e -run NvmeEventStorageReplay -v` proves replay after reboot.
-- The placeholder phrase scan in Task 25 prints no matches.
-- The storage audit report contains foreground/background NVMe paths, the selected durability mode, event-slot metrics, blob orphan bytes, projection lag, and stream directory cache hit rate.
+- `go test ./tests/e2e -run NvmeEventStorage -v` passes on a QEMU/OVMF-capable machine.
+- Storage replay proves `last_event_id=1` for the first two-event atomic group.
+- Storage reports include foreground/background NVMe paths, selected durability mode, event-slot metrics, blob orphan bytes, projection lag, stream directory cache hit rate, and device media-write counters.
+- This command exits 0:
+
+```bash
+bad_terms='TO''DO|TB''D|fill'' in|implement'' later|Add'' appropriate|similar'' to'' Task|if'' needed|or'' equivalent'
+if rg -n "$bad_terms" wrela compiler tests docs/implementation/2026-05-18-nvme-event-storage-executable-plan.md; then
+  exit 1
+fi
+bad_match=$(printf '%s%s' 'match .*-' '>')
+if rg -n "$bad_match" docs/implementation/2026-05-18-nvme-event-storage-executable-plan.md tests/fixtures tests/e2e wrela; then
+  exit 1
+fi
+```
 
 ---
 
-## 1. Frozen Storage Decisions
+## 1. Frozen Storage Contracts
 
-**Description:** These are implementation decisions. Do not reinterpret them during task execution.
+**Description:** These contracts are implementation inputs, not suggestions. Do not reopen them inside task work.
 
 **Acceptance Criteria:**
 
-- All code, tests, docs, and examples use these names, sizes, constants, and boundaries.
-- Any change to this section requires a separate design update before implementation work continues.
+- Tests use these constants and values.
+- Runtime source mirrors these constants exactly.
+- Any proposed change to this section requires a separate design update.
 
 **Code Example:**
 
 ```wrela
 const STORAGE_EVENT_SLOT_SIZE: U64 = 512
 const STORAGE_EVENT_HEADER_SIZE: U64 = 64
-const STORAGE_EVENT_PAYLOAD_BYTES: U64 = STORAGE_EVENT_SLOT_SIZE - STORAGE_EVENT_HEADER_SIZE
+const STORAGE_EVENT_PAYLOAD_BYTES: U64 = 448
 const STORAGE_TARGET_BATCH_SLOTS: U64 = 64
 const STORAGE_MAX_OVERFLOW_SLOTS: U64 = 8
 const STORAGE_MAX_BATCH_SLOTS: U64 = 72
 const STORAGE_MAX_ATOMIC_GROUP_SLOTS: U64 = 32
 const STORAGE_GROUP_COMMIT_TIMER_US: U64 = 2000
 const STORAGE_HOT_SEGMENT_SLOTS: U64 = 1048576
+const STORAGE_HOT_SEGMENT_BYTES: U64 = 536870912
 ```
 
-On-disk byte order is little-endian.
-
-Hot event slot layout is exactly 512 bytes:
+Hot event slot layout is exactly 512 bytes, little-endian:
 
 ```text
 offset  size  field
@@ -104,10 +119,15 @@ offset  size  field
 64      448   payload
 ```
 
-Checksum rule:
+CRC32C:
 
 ```text
-checksum32 = crc32c(slot bytes 0..511 with bytes 48..51 set to zero)
+name: CRC32C / Castagnoli
+normal polynomial: 0x1EDC6F41
+reflected polynomial used by Go hash/crc32.MakeTable(crc32.Castagnoli): 0x82F63B78
+input for slot checksum: bytes 0..511 with bytes 48..51 set to zero
+digest byte order in slot: little-endian U32
+test vector: CRC32C("123456789") = 0xE3069283
 ```
 
 Reserved empty slot rule:
@@ -121,28 +141,37 @@ atomic_group_len = 0
 atomic_group_index = 0
 payload_length = 0
 flags has STORAGE_SLOT_RESERVED_EMPTY set
-event_id stores the consumed event ID position
+event_id stores the consumed append-log sequence position
 checksum32 is valid
 ```
 
-Batch policy constants:
+Batch policy:
 
 ```text
 target_batch_slots = 64
 max_overflow_slots = 8
 max_batch_slots = 72
 max_atomic_group_slots = 32
-group_commit_timer_us = 2000
 ```
 
-Superblock layout:
+Default 4 GiB QEMU storage layout. The raw disk file must be sparse-created with `os.Truncate`, not filled with zeros:
 
 ```text
-superblock copy A byte offset = 0
-superblock copy B byte offset = 4096
-superblock copy size = 4096 bytes
-region map byte offset = 8192
+offset bytes      size bytes        region
+0                 8192              double-buffered superblock copies
+8192              1048576           region map
+1056768           536870912         hot event slot region
+537927680         67108864          segment map
+605036544         536870912         sealed segment extents
+1141907456        268435456         stream directory and cache chunks
+1410342912        1610612736        blob extents
+3020955648        268435456         blob manifests and key metadata
+3289391104        536870912         projection storage
+3826262016        268435456         maintenance metadata
+4094697472        72159232          reserved tail
 ```
+
+This layout fits one 512 MiB hot segment and leaves room for blobs and projections. `hot_window_min_sealed_segments = 4` remains a production policy constant, not a requirement that the QEMU fixture preallocates four hot segments.
 
 Stream directory entry layout is exactly 32 bytes:
 
@@ -163,15 +192,7 @@ background_io_queue_depth = 128
 max_prp_transfer_bytes = 131072
 ```
 
-Segment lifecycle constants:
-
-```text
-hot_segment_slots = 1048576
-hot_window_min_sealed_segments = 4
-cold_codec_packed_v1 = 1
-```
-
-Blob constants:
+Blob limits:
 
 ```text
 blob_inline_extent_count = 4
@@ -180,166 +201,267 @@ blob_allocator_free_extent_limit = 1024
 blob_cipher_development_passthrough = 1
 ```
 
----
-
-## 2. Repository Layout And File Responsibilities
-
-**Description:** The implementation must create or modify only these files unless a task explicitly says to add a test fixture. File ownership is intentionally narrow so parallel workers do not step on each other.
-
-**Acceptance Criteria:**
-
-- The final implementation's storage-related files match this map.
-- Any extra file created during a task is listed in that task's commit message body with the reason.
-
-**Code Example:**
+NVMe controller bring-up sequence:
 
 ```text
-wrela/machine/x86_64/nvme.wrela
-  NVMe register view, controller initialization API, queue pair types, command submission, interrupt receiver shape, Identify result parsing, durability mode selection.
+1. Read CAP, VS, and doorbell stride from CAP.DSTRD.
+2. Write CC.EN = 0.
+3. Wait for CSTS.RDY = 0 with bounded reset timeout.
+4. Allocate admin SQ/CQ DMA memory.
+5. Program AQA, ASQ, and ACQ.
+6. Program CC with IOSQES=6, IOCQES=4, selected command set, and EN=1.
+7. Wait for CSTS.RDY = 1 with bounded ready timeout.
+8. Submit Identify Controller opcode 0x06, CNS=1.
+9. Submit Identify Namespace opcode 0x06, CNS=0, NSID=1.
+10. Create foreground and background IO completion queues.
+11. Create foreground and background IO submission queues.
+12. Route one MSI-X vector per IO completion queue when possible; fall back to MSI only when MSI-X is unavailable.
+```
 
-wrela/machine/x86_64/core_link.wrela
-  Paired foreground/maintenance SPSC descriptors with credits, wait arming, monitor/mwait-compatible wake metadata, and IPI fallback hooks.
+Identify Namespace byte offsets used by v1 tests:
 
-wrela/storage/format.wrela
-  Fixed storage constants, superblock, region map, event slot header, stream directory entry, segment metadata, metrics records.
+```text
+0..7      NSZE
+24       FLBAS active LBA format low nibble
+128..191 LBAF table entries, each 4 bytes
+LBAF[i] byte 2 contains LBADS, so logical_block_size = 1 << LBADS
+```
 
-wrela/storage/event_log.wrela
-  Event slot encoding, checksum, batch packing, reserved empty slots, recovery scan, segment sealing, packed cold segment codec.
+Identify Controller byte offsets used by v1 tests:
 
-wrela/storage/stream.wrela
-  Dense stream directory, expected sequence checks, new stream allocation, directory rebuild from recovered events.
+```text
+256      VWC volatile write cache bit 0
+512..513 AWUN
+514..515 AWUPF
+521      ONCS bit 3 means write zeroes, not FUA; FUA is command flag support in v1 policy source
+```
 
-wrela/storage/blob.wrela
-  Blob refs, extents, manifests, free extent allocator, development AEAD adapter, write/read/delete shape, orphan scanner, relocation proposals.
+Durability acknowledgement rule:
 
-wrela/storage/projection.wrela
-  Projection root refs, checkpoints, StateCell, DenseEntityMap, OrderedPages, ProjectionWriter, read-plane watermark behavior.
+```text
+selected mode FUA or PFAIL_ATOMIC_FUA:
+  acknowledge after all batch write completions succeed
 
-wrela/storage/writer.wrela
-  Single StorageWriter authority, append request batching, NVMe durability completion handling, maintenance proposal validation, metrics.
-
-wrela/storage/file_model.wrela
-  First file-like entity stream events and a small file state projection used by QEMU tests.
-
-compiler/lex/token.go
-compiler/lex/lexer_test.go
-  Adds event/projection keywords.
-
-compiler/ast/ast.go
-compiler/ast/ast_test.go
-  Adds EventDecl, ProjectionDecl, layout declarations, and deterministic debug output.
-
-compiler/parse/parser.go
-compiler/parse/parser_test.go
-  Parses event and projection durable ABI declarations.
-
-compiler/sem/storage.go
-compiler/sem/storage_test.go
-compiler/sem/storage_negative_test.go
-tests/fixtures/negative/*.wrela
-  Validates stable event IDs, layout IDs, current layout rules, upcast endpoints, projection IDs, storage authority, NVMe path ownership, and core-link endpoint ownership.
-
-compiler/ir/ir.go
-compiler/ir/lower.go
-compiler/ir/storage_test.go
-  Adds event/projection metadata to IR and lowers compiler-generated event encoders.
-
-compiler/codegen/x64.go
-compiler/codegen/storage_test.go
-  Emits event-slot field stores, CRC32C fallback calls, generated event encoders, and storage-format data objects.
-
-compiler/report/report.go
-compiler/report/report_test.go
-compiler/sem/report.go
-compiler/sem/report_test.go
-  Adds storage/NVMe/core-link/blob/projection metrics and audit entries.
-
-tests/e2e/nvme_event_storage_qemu_test.go
-tests/e2e/fixtures/nvme_event_storage/main.wrela
-tests/e2e/fixtures/nvme_event_storage/program.wrela
-  End-to-end append, replay, blob, projection, and metrics validation.
-
-docs/production-deferred-work.md
-  Records out-of-scope storage work that this milestone intentionally does not implement.
+selected mode WRITE_PLUS_FLUSH:
+  acknowledge only after all batch write completions and the following flush completion succeed
 ```
 
 ---
 
-## 3. Parallel Work Map
+## 2. Test Harness And Existing Helpers
 
-**Description:** The plan has a serial spine for syntax, semantic metadata, storage source contracts, and QEMU integration. Workers may run in parallel only at the merge gates below.
+**Description:** This section names every helper a later task may use. If a helper is not listed here, the task must create it before using it.
 
 **Acceptance Criteria:**
 
-- No task begins before its listed prerequisite lands.
-- Workers do not modify files outside their stream without coordinating through the tech lead.
+- Later tasks reference only helpers from this section or helpers created by their own steps.
+- Helper file ownership is exclusive to the task that creates it.
+
+**Code Example:**
+
+```go
+func TestStorageHarnessCompiles(t *testing.T) {
+	if CRC32C([]byte("123456789")) != 0xE3069283 {
+		t.Fatal("bad CRC32C vector")
+	}
+}
+```
+
+Existing helpers:
+
+```text
+compiler/sem/testutil_test.go:
+  parseModulesForTest
+  mustBuildIndex
+  mustCheck
+  mustBuildIndexAllowingMissingImage
+  checkAllowingMissingImage
+  typeDiagsForModules
+
+compiler/sem/hardware_authority_test.go:
+  checkUEFIModulesWithExtraSource
+
+compiler/sem/uefi_source_shape_test.go:
+  parseUEFIModuleSet
+  moduleType
+  fieldTypeName
+
+compiler/sem/types_test.go:
+  assertMethodExists
+
+compiler/negative_fixtures_test.go:
+  TestNegativeFixtures
+
+compiler/qemu/run.go:
+  qemu.Options
+  qemu.Run
+  qemu.Args
+```
+
+Source module loading rule:
+
+```text
+Tests that call parseUEFIModuleSet must update its hard-coded file list in the same task that creates a new machine-level runtime module.
+Tasks 27 and 29 do this for core_link.wrela and nvme.wrela.
+Storage modules under wrela/storage/* must use explicit parseModulesForTest/checkAllowingMissingImage source graphs in their own sem tests unless that task also updates parseUEFIModuleSet.
+```
+
+New helper packages created by this plan:
+
+```text
+compiler/storagefmt
+  Host-side mirror of fixed storage byte formats, CRC32C, batch packing, superblock selection, stream directory math, region layout, blob free-list logic, and recovery validation.
+
+compiler/nvmefmt
+  Host-side NVMe Identify parsing, durability mode selection, command dword construction, queue phase handling, and acknowledgement state machine.
+
+compiler/ir/storage_testutil_test.go
+  checkedStorageProgramForTest for IR metadata tests.
+
+compiler/codegen/storage_testutil_test.go
+  storageEncoderProgramForCodegenTest and findTextUnit for codegen tests.
+
+tests/e2e/nvme_testutil_test.go
+  createSparseRawDisk, runStorageQEMU, and qemu.Options NVMe argument extension.
+```
+
+Mirror contract:
+
+```text
+Every task that has a Go host mirror plus Wrela runtime source must prove the two stay aligned.
+If the behavior is tested only in compiler/storagefmt or compiler/nvmefmt, the paired Wrela task must also:
+  1. include the exact Wrela implementation block in the task,
+  2. compile and typecheck that Wrela source, and
+  3. add a mirror-contract test that compares exported names and constant values against the host helper.
+
+Compile-only Wrela tests are allowed for language wiring, but they are not sufficient for storage format, NVMe, stream directory, writer, blob, projection, or replay behavior.
+```
+
+---
+
+## 3. Repository Layout And File Ownership
+
+**Description:** These file ownership boundaries prevent the merge conflicts called out in review. Shared compiler files get narrow owner tasks; later tasks add storage-specific files instead of repeatedly editing `compiler/sem/check.go`.
+
+**Acceptance Criteria:**
+
+- `compiler/sem/check.go` is modified only in Tasks 9 and 12.
+- `compiler/ir/lower.go` is modified only in Tasks 14, 15, and 18.
+- `compiler/codegen/x64.go` is modified only in Tasks 17 and 18.
+- `compiler/sem/uefi_source_shape_test.go` module lists are modified only by tasks that create runtime modules used by `parseUEFIModuleSet`.
+- Runtime source tasks create or modify only their named `wrela/...` files plus any task-listed source compile tests or `parseUEFIModuleSet` registration edits.
+
+**Code Example:**
+
+```text
+compiler/sem/storage.go
+  All storage declaration validation and storage authority checks after Task 12.
+
+compiler/sem/storage_graph.go
+  Storage image graph nodes, NVMe path ownership, core-link endpoints, projection feeds.
+
+compiler/storagefmt/*.go
+  Behavior-testable host mirror for disk format algorithms.
+
+compiler/nvmefmt/*.go
+  Behavior-testable host mirror for NVMe identify, commands, and completion logic.
+```
+
+Runtime files:
+
+```text
+wrela/machine/x86_64/core_link.wrela
+wrela/machine/x86_64/nvme.wrela
+wrela/storage/format.wrela
+wrela/storage/event_log.wrela
+wrela/storage/stream.wrela
+wrela/storage/blob.wrela
+wrela/storage/projection.wrela
+wrela/storage/writer.wrela
+wrela/storage/file_model.wrela
+```
+
+Test files:
+
+```text
+compiler/storagefmt/*_test.go
+compiler/nvmefmt/*_test.go
+compiler/lex/lexer_test.go
+compiler/ast/ast_test.go
+compiler/parse/parser_test.go
+compiler/sem/storage_*_test.go
+compiler/ir/storage_*_test.go
+compiler/codegen/storage_*_test.go
+tests/e2e/nvme_event_storage_qemu_test.go
+tests/e2e/nvme_testutil_test.go
+```
+
+---
+
+## 4. Parallel Work Map
+
+**Description:** Parallel work is allowed only where file ownership is disjoint. The map below names the merge owner for shared files.
+
+**Acceptance Criteria:**
+
+- A worker starts a task only after its prerequisites have landed.
+- If a task needs a shared file outside its ownership, it stops and asks the merge owner.
 
 **Code Example:**
 
 ```text
 Merge Gate 0:
-  Task 1 lands first.
+  Tasks 1-4 land first. They create diagnostics and test harnesses.
 
-Stream A, Compiler Declarations:
-  Tasks 2-6, serial.
+Stream A, Durable Syntax:
+  Tasks 5-18.
+  Task 5 and Task 6 may run in parallel.
+  Task 7 waits for Tasks 5 and 6.
+  Tasks 8-12 are serial.
+  Tasks 13-18 are serial because they share IR and codegen ownership.
 
-Stream B, Core Link And NVMe:
-  Tasks 7-11, serial after Task 1.
+Stream B, Runtime Format/Event/Stream:
+  Tasks 19-26.
+  Tasks 19 and 21 may run in parallel after Tasks 2, 12, and 18.
+  Task 20 waits for Task 19.
+  Tasks 22-26 are serial because each builds on the previous storage writer surface.
 
-Stream C, Disk Format And Writer:
-  Tasks 12-17, serial after Tasks 6 and 11.
+Stream C, CoreLink And NVMe:
+  Tasks 27-34.
+  Task 27 may start after Task 4.
+  Task 29 waits for Tasks 3 and 27 because both source tasks update `compiler/sem/uefi_source_shape_test.go`.
+  Task 28 waits for Tasks 12 and 27.
+  Tasks 30-34 are serial after Task 29 because they share `wrela/machine/x86_64/nvme.wrela`.
 
-Stream D, Blob And Maintenance:
-  Tasks 18-20, serial after Tasks 12-17.
+Stream D, Blob:
+  Tasks 35-38.
+  Task 35 waits for Tasks 19 and 26.
+  Tasks 36-38 are serial.
 
-Stream E, Projections And File Model:
-  Tasks 21-22, serial after Tasks 6, 7, and 17.
+Stream E, Projections/File:
+  Tasks 39-42.
+  Starts after Tasks 12, 26, 34, and 38.
 
-Stream F, Integration And Reports:
-  Tasks 23-25, serial after Streams B, C, D, and E land.
+Stream F, E2E/Metrics:
+  Tasks 43-46.
+  Starts after Streams B-E land.
 ```
-
-Dependency rules:
-
-- Task 1 lands before all other tasks.
-- Tasks 2-6 are serial because parser, semantic, IR, and codegen contracts build on one another.
-- Task 7 may run after Task 1 and before NVMe work because it owns only core-link source and graph checks.
-- Tasks 8-11 are serial because NVMe source shape, Identify parsing, queue submission, and interrupt completion contracts build progressively.
-- Tasks 12-17 start only after Tasks 6 and 11 because event encoders and NVMe paths are prerequisites for storage writer behavior.
-- Tasks 18-20 start after Task 17 because blobs and maintenance proposals depend on writer publication rules.
-- Tasks 21-22 start after Tasks 6, 7, and 17 because projections need declarations, core links, and committed group feeds.
-- Tasks 23-25 are final integration and reporting.
 
 ---
 
-## 4. Phase 1: Freeze Diagnostics And Durable ABI Syntax
+## 5. Phase 0: Diagnostics And Test Harnesses
 
-**Description:** This phase reserves diagnostics and teaches the compiler to recognize durable event/projection declarations before any runtime storage code depends on them.
+**Description:** This phase creates the stable diagnostic and helper foundation. Later tasks must not invent test helpers.
 
 **Acceptance Criteria:**
 
-- Storage diagnostics are stable.
-- `event` and `projection` tokenize as keywords.
-- Event/projection AST nodes preserve every source field needed by semantic checking.
-- Parser tests cover current layout, historical layout, upcast mapping, projection containers, and contextual `id/layout/current/upcast` usage.
+- Storage diagnostic codes exist.
+- Host-side storage and NVMe behavior packages exist with vector tests.
+- QEMU helper APIs exist before E2E tasks reference them.
 
-**Phase Code Example:**
+### Task 1: Storage Diagnostics And Deferred Scope
 
-```wrela
-event FileRenamed id 17 {
-    file_id: FileId
-    directory_id: FileId
-    name_ref: BlobRef
-
-    layout 1 current {
-        file_id: U64 = self.file_id.value
-        directory_id: U64 = self.directory_id.value
-        name_ref: BlobRefPayload = self.name_ref.payload
-    }
-}
-```
-
-### Task 1: Storage Diagnostics And Deferred-Work Contract
+**Prerequisite:** None.
 
 **Files:**
 
@@ -347,114 +469,518 @@ event FileRenamed id 17 {
 - Modify: `compiler/diag/diag_test.go`
 - Modify: `docs/production-deferred-work.md`
 
-**Description:** Reserve stable diagnostic codes for storage declarations, storage authority, NVMe ownership, and core-link misuse. Record the exact storage scope so future work does not treat this milestone as a filesystem or database layer.
+**Description:** Reserve storage diagnostics and record what this milestone deliberately excludes.
 
 **Acceptance Criteria:**
 
-- `SEM0099` through `SEM0124` exist with the exact comments below.
-- `docs/production-deferred-work.md` lists storage work outside this milestone.
-- The diagnostic test fails before codes are added and passes after codes are added.
+- `SEM0099` through `SEM0124` exist with exact meanings below.
+- Deferred-work docs say POSIX, SQL, replication, production command inboxes, IOMMU isolation, full-disk encryption, SGL, tuned compression, and destructive retention remain outside this milestone.
 
 **Code Examples:**
 
-Add this test to `compiler/diag/diag_test.go`:
-
 ```go
 func TestStorageDiagnosticCodesExist(t *testing.T) {
-	codes := []string{
-		diag.SEM0099, diag.SEM0100, diag.SEM0101, diag.SEM0102,
-		diag.SEM0103, diag.SEM0104, diag.SEM0105, diag.SEM0106,
-		diag.SEM0107, diag.SEM0108, diag.SEM0109, diag.SEM0110,
-		diag.SEM0111, diag.SEM0112, diag.SEM0113, diag.SEM0114,
-		diag.SEM0115, diag.SEM0116, diag.SEM0117, diag.SEM0118,
-		diag.SEM0119, diag.SEM0120, diag.SEM0121, diag.SEM0122,
-		diag.SEM0123, diag.SEM0124,
+	want := map[string]string{
+		"SEM0099": diag.SEM0099,
+		"SEM0100": diag.SEM0100,
+		"SEM0101": diag.SEM0101,
+		"SEM0102": diag.SEM0102,
+		"SEM0103": diag.SEM0103,
+		"SEM0104": diag.SEM0104,
+		"SEM0105": diag.SEM0105,
+		"SEM0106": diag.SEM0106,
+		"SEM0107": diag.SEM0107,
+		"SEM0108": diag.SEM0108,
+		"SEM0109": diag.SEM0109,
+		"SEM0110": diag.SEM0110,
+		"SEM0111": diag.SEM0111,
+		"SEM0112": diag.SEM0112,
+		"SEM0113": diag.SEM0113,
+		"SEM0114": diag.SEM0114,
+		"SEM0115": diag.SEM0115,
+		"SEM0116": diag.SEM0116,
+		"SEM0117": diag.SEM0117,
+		"SEM0118": diag.SEM0118,
+		"SEM0119": diag.SEM0119,
+		"SEM0120": diag.SEM0120,
+		"SEM0121": diag.SEM0121,
+		"SEM0122": diag.SEM0122,
+		"SEM0123": diag.SEM0123,
+		"SEM0124": diag.SEM0124,
 	}
-	for _, code := range codes {
-		if code == "" {
-			t.Fatalf("storage diagnostic code must not be empty")
+	if len(want) != 26 {
+		t.Fatalf("diagnostic table size = %d, want 26", len(want))
+	}
+	seen := map[string]string{}
+	for expected, got := range want {
+		if got != expected {
+			t.Fatalf("%s constant = %q", expected, got)
 		}
+		if previous, ok := seen[got]; ok {
+			t.Fatalf("%s and %s both use %q", previous, expected, got)
+		}
+		seen[got] = expected
 	}
 }
 ```
 
-Add these constants after `SEM0098` in `compiler/diag/codes.go`:
-
 ```go
-	SEM0099  = "SEM0099"  // duplicate durable event type id
-	SEM0100  = "SEM0100"  // invalid durable event type id
-	SEM0101  = "SEM0101"  // invalid event layout current marker
-	SEM0102  = "SEM0102"  // duplicate event layout id
-	SEM0103  = "SEM0103"  // invalid event layout field
-	SEM0104  = "SEM0104"  // invalid event upcast endpoint
-	SEM0105  = "SEM0105"  // missing event upcast field mapping
-	SEM0106  = "SEM0106"  // duplicate projection id
-	SEM0107  = "SEM0107"  // invalid projection layout current marker
-	SEM0108  = "SEM0108"  // unsupported projection container shape
-	SEM0109  = "SEM0109"  // invalid projection upcast endpoint
-	SEM0110  = "SEM0110"  // storage disk region overlap or invalid size
-	SEM0111  = "SEM0111"  // NVMe queue path ownership mismatch
-	SEM0112  = "SEM0112"  // core link endpoint ownership mismatch
-	SEM0113  = "SEM0113"  // StorageWriter authority cannot be forged or shared
-	SEM0114  = "SEM0114"  // atomic event group exceeds configured maximum
-	SEM0115  = "SEM0115"  // unstable event id source is not allowed
-	SEM0116  = "SEM0116"  // storage append must observe durability result
-	SEM0117  = "SEM0117"  // blob ref references unpublished blob bytes
-	SEM0118  = "SEM0118"  // maintenance proposal mutates truth directly
-	SEM0119  = "SEM0119"  // projection root watermark is invalid
-	SEM0120  = "SEM0120"  // projection worker feed is not boot wired
-	SEM0121  = "SEM0121"  // event payload exceeds inline slot budget
-	SEM0122  = "SEM0122"  // active NVMe LBA size is unsupported by v1 storage
-	SEM0123  = "SEM0123"  // development blob cipher used without explicit opt in
-	SEM0124  = "SEM0124"  // storage metric publication is incomplete
+SEM0099  = "SEM0099"  // duplicate durable event type id
+SEM0100  = "SEM0100"  // invalid durable event type id
+SEM0101  = "SEM0101"  // invalid event layout current marker
+SEM0102  = "SEM0102"  // duplicate event layout id
+SEM0103  = "SEM0103"  // invalid event layout field
+SEM0104  = "SEM0104"  // invalid event upcast endpoint
+SEM0105  = "SEM0105"  // missing event upcast field mapping
+SEM0106  = "SEM0106"  // duplicate projection id
+SEM0107  = "SEM0107"  // invalid projection layout current marker
+SEM0108  = "SEM0108"  // unsupported projection container shape
+SEM0109  = "SEM0109"  // invalid projection upcast endpoint
+SEM0110  = "SEM0110"  // storage disk region overlap or invalid size
+SEM0111  = "SEM0111"  // NVMe queue path ownership mismatch
+SEM0112  = "SEM0112"  // core link endpoint ownership mismatch
+SEM0113  = "SEM0113"  // StorageWriter authority cannot be forged or shared
+SEM0114  = "SEM0114"  // atomic event group exceeds configured maximum
+SEM0115  = "SEM0115"  // unstable append-log event_id source is not allowed
+SEM0116  = "SEM0116"  // storage append must observe durability result
+SEM0117  = "SEM0117"  // blob ref references unpublished blob bytes
+SEM0118  = "SEM0118"  // maintenance proposal mutates truth directly
+SEM0119  = "SEM0119"  // projection root watermark is invalid
+SEM0120  = "SEM0120"  // projection worker feed is not boot wired
+SEM0121  = "SEM0121"  // event payload exceeds inline slot budget
+SEM0122  = "SEM0122"  // active NVMe LBA size is unsupported by v1 storage
+SEM0123  = "SEM0123"  // development blob cipher used without explicit opt in
+SEM0124  = "SEM0124"  // storage metric publication is incomplete
 ```
 
-Add this section to `docs/production-deferred-work.md`:
+- [ ] **Step 1: Add failing diagnostic test**
+
+Add `TestStorageDiagnosticCodesExist` to `compiler/diag/diag_test.go`.
+
+Run: `go test ./compiler/diag -run TestStorageDiagnosticCodesExist -v`
+
+Expected: FAIL with undefined identifiers such as `diag.SEM0099`.
+
+- [ ] **Step 2: Add diagnostic constants**
+
+Add constants after `SEM0098` in `compiler/diag/codes.go`.
+
+Run: `go test ./compiler/diag -run TestStorageDiagnosticCodesExist -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add deferred-work section**
+
+Append this section to `docs/production-deferred-work.md`:
 
 ```markdown
 ## Storage beyond the first NVMe event-store milestone
 - POSIX filesystem compatibility remains out of scope. The first storage surface is events, blobs, checkpoints, projections, and file-like entity streams.
-- SQL, relational query planning, general secondary indexes, and multi-writer event-log sharding remain out of scope.
-- Production command inboxes, idempotency records, replication, full-disk encryption, IOMMU-backed DMA isolation, SGL-heavy NVMe transfers, tuned compression codec selection, and destructive retention policies remain deferred.
-- The first blob cipher used by QEMU tests is a named development passthrough mode behind the final blob manifest API. Production images must not construct it without an explicit development-storage opt in.
+- SQL, relational query planning, general secondary indexes, multi-writer event-log sharding, and network replication remain out of scope.
+- Production command inboxes, idempotency records, full-disk encryption, IOMMU-backed DMA isolation, SGL-heavy NVMe transfers, tuned compression codec selection, and destructive retention policies remain deferred.
+- The first blob cipher used by QEMU tests is a named development passthrough mode behind the final blob manifest API. Production images must not construct it without explicit development-storage opt in.
 ```
 
-Verification:
+Run:
 
 ```bash
-go test ./compiler/diag -run TestStorageDiagnosticCodesExist -v
-rg -n "Storage beyond the first NVMe event-store milestone|development passthrough" docs/production-deferred-work.md
+rg -n "Storage beyond the first NVMe event-store milestone|POSIX filesystem compatibility remains out of scope" docs/production-deferred-work.md
 git diff --check
 ```
 
-Expected: the Go test passes, `rg` prints the new storage section, and `git diff --check` prints nothing.
+Expected: `rg` prints both matches and `git diff --check` prints nothing.
 
-Commit:
+- [ ] **Step 4: Commit**
 
 ```bash
+git diff --check
 git add compiler/diag/codes.go compiler/diag/diag_test.go docs/production-deferred-work.md
-git commit -m "docs: freeze nvme event storage contracts -Codex Automated"
+git commit -m "docs: freeze nvme event storage diagnostics -Codex Automated"
 ```
 
-### Task 2: Lexer Keywords For Durable Declarations
+### Task 2: Storage Format Behavior Harness
+
+**Prerequisite:** Task 1.
+
+**Files:**
+
+- Create: `compiler/storagefmt/format.go`
+- Create: `compiler/storagefmt/format_test.go`
+
+**Description:** Create a Go package that behavior-tests byte-format algorithms before Wrela runtime code mirrors them.
+
+**Acceptance Criteria:**
+
+- CRC32C Castagnoli vector passes.
+- Event slot header offsets are constants, not inferred by string scanning.
+- Batch packing for 512 and 4096 byte LBAs is behavior-tested.
+- Region layout sums to less than or equal to 4 GiB and has no overlaps.
+
+**Code Examples:**
+
+```go
+package storagefmt
+
+import "hash/crc32"
+
+const (
+	EventSlotSize          = 512
+	EventHeaderSize        = 64
+	EventPayloadBytes      = 448
+	EventTypeIDOffset      = 24
+	PayloadLayoutIDOffset  = 28
+	Checksum32Offset       = 48
+	StorageDiskBytes       = 4 * 1024 * 1024 * 1024
+	StorageHotSegmentBytes = 536870912
+)
+
+var crcTable = crc32.MakeTable(crc32.Castagnoli)
+
+func CRC32C(data []byte) uint32 {
+	return crc32.Checksum(data, crcTable)
+}
+
+type BatchPacking struct {
+	SemanticSlots      uint64
+	ReservedEmptySlots uint64
+	TotalSlotPositions uint64
+}
+
+func FinishBatch(activeLBASize, semanticSlots uint64) BatchPacking {
+	slotsPerLBA := activeLBASize / EventSlotSize
+	remainder := semanticSlots % slotsPerLBA
+	empty := uint64(0)
+	if remainder != 0 {
+		empty = slotsPerLBA - remainder
+	}
+	return BatchPacking{SemanticSlots: semanticSlots, ReservedEmptySlots: empty, TotalSlotPositions: semanticSlots + empty}
+}
+```
+
+```go
+func TestCRC32CVector(t *testing.T) {
+	if got, want := CRC32C([]byte("123456789")), uint32(0xE3069283); got != want {
+		t.Fatalf("CRC32C vector = %#x, want %#x", got, want)
+	}
+}
+
+func TestFourKiBUnderfillConsumesEmptySlots(t *testing.T) {
+	got := FinishBatch(4096, 3)
+	if got.ReservedEmptySlots != 5 || got.TotalSlotPositions != 8 {
+		t.Fatalf("FinishBatch(4096, 3) = %#v, want 5 empty and 8 total", got)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing tests**
+
+Create `compiler/storagefmt/format_test.go` with `TestCRC32CVector`, `TestFourKiBUnderfillConsumesEmptySlots`, and `TestRegionLayoutFitsSparse4GiBDisk`.
+
+Run: `go test ./compiler/storagefmt -v`
+
+Expected: FAIL because package files do not exist or symbols are undefined.
+
+- [ ] **Step 2: Add package implementation**
+
+Create `compiler/storagefmt/format.go` with constants, `CRC32C`, `FinishBatch`, `Region`, and `DefaultRegions`.
+
+Run: `go test ./compiler/storagefmt -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go
+git commit -m "test: add storage format behavior harness -Codex Automated"
+```
+
+### Task 3: NVMe Behavior Harness
+
+**Prerequisite:** Task 1.
+
+**Files:**
+
+- Create: `compiler/nvmefmt/nvme.go`
+- Create: `compiler/nvmefmt/nvme_test.go`
+
+**Description:** Create behavior-testable NVMe helpers for Identify parsing, durability selection, FUA command dword construction, completion phase handling, and acknowledgement state.
+
+**Acceptance Criteria:**
+
+- Identify Namespace parser returns 512 or 4096 from synthetic LBAF bytes.
+- Unsupported LBA size returns an explicit error.
+- Durability selection chooses FUA when supported and write-plus-flush otherwise.
+- Write command dword 12 sets bit 30 when FUA is requested.
+- Completion phase toggles when head wraps.
+
+**Code Examples:**
+
+```go
+package nvmefmt
+
+import "encoding/binary"
+
+type NamespaceFacts struct {
+	LogicalBlockSize uint64
+	SupportsFUA bool
+	VolatileWriteCache bool
+	PowerFailAtomicWriteUnitBlocks uint32
+}
+
+func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
+	flbas := data[24] & 0x0f
+	lbads := data[128+int(flbas)*4+2]
+	size := uint64(1) << lbads
+	if size != 512 && size != 4096 {
+		return NamespaceFacts{}, ErrUnsupportedLBA
+	}
+	return NamespaceFacts{LogicalBlockSize: size}, nil
+}
+
+func WriteCommandDword12(blockCount uint32, fua bool) uint32 {
+	value := blockCount - 1
+	if fua {
+		value |= 1 << 30
+	}
+	return value
+}
+
+func PutLE64(dst []byte, off int, value uint64) {
+	binary.LittleEndian.PutUint64(dst[off:off+8], value)
+}
+```
+
+- [ ] **Step 1: Add failing NVMe behavior tests**
+
+Create tests for `ParseIdentifyNamespace`, `WriteCommandDword12`, and completion phase wrap.
+
+Run: `go test ./compiler/nvmefmt -v`
+
+Expected: FAIL because package files do not exist or symbols are undefined.
+
+- [ ] **Step 2: Implement the minimal helpers**
+
+Create `compiler/nvmefmt/nvme.go` with the exact exported functions referenced by tests.
+
+Run: `go test ./compiler/nvmefmt -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add compiler/nvmefmt/nvme.go compiler/nvmefmt/nvme_test.go
+git commit -m "test: add nvme behavior harness -Codex Automated"
+```
+
+### Task 4: E2E NVMe QEMU Harness
+
+**Prerequisite:** Task 1.
+
+**Files:**
+
+- Modify: `compiler/qemu/run.go`
+- Modify: `compiler/qemu/run_test.go`
+- Create: `tests/e2e/nvme_testutil_test.go`
+
+**Description:** Add real QEMU helper APIs before storage E2E tasks use them. The current `qemu.Options` has no generic extra-arg field, so this task adds one.
+
+**Acceptance Criteria:**
+
+- `qemu.Options.ExtraArgs []string` exists and is appended at the end of `qemu.Args`.
+- `createSparseRawDisk(t, path, bytes)` uses `os.Truncate`.
+- `runStorageQEMU(t, disk, mode)` builds `tests/e2e/fixtures/nvme_event_storage/main.wrela`, runs QEMU with an NVMe drive, and returns serial output.
+- Disk size is `4 * 1024 * 1024 * 1024` bytes.
+
+**Code Examples:**
+
+```go
+type Options struct {
+	QEMUBinary string
+	OVMFCode string
+	OVMFVars string
+	ESPDir string
+	ImagePath string
+	SuccessText string
+	Timeout time.Duration
+	SMP int
+	ExtraArgs []string
+}
+
+func Args(opts Options) []string {
+	args := []string{
+		"-machine", "q35",
+		"-drive", "if=pflash,format=raw,readonly=on,file=" + opts.OVMFCode,
+		"-drive", "if=pflash,format=raw,file=" + opts.OVMFVars,
+		"-drive", "format=raw,file=fat:rw:" + opts.ESPDir,
+		"-serial", "stdio",
+		"-display", "none",
+		"-no-reboot",
+	}
+	args = append(args, opts.ExtraArgs...)
+	return args
+}
+```
+
+```go
+func createSparseRawDisk(t *testing.T, path string, bytes int64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(bytes); err != nil {
+		t.Fatal(err)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing qemu.Args test**
+
+Add a test in `compiler/qemu/run_test.go`:
+
+```go
+func TestArgsAppendsExtraArgs(t *testing.T) {
+	args := Args(Options{ImagePath: "boot.efi", ExtraArgs: []string{"-device", "nvme,serial=test"}})
+	if got := strings.Join(args, " "); !strings.Contains(got, "-device nvme,serial=test") {
+		t.Fatalf("QEMU args missing extra args: %s", got)
+	}
+}
+```
+
+Run: `go test ./compiler/qemu -run TestArgsAppendsExtraArgs -v`
+
+Expected: FAIL because `Options.ExtraArgs` is undefined.
+
+- [ ] **Step 2: Implement ExtraArgs**
+
+Modify `compiler/qemu/run.go` as shown.
+
+Run: `go test ./compiler/qemu -run TestArgsAppendsExtraArgs -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add E2E helper file**
+
+Create `tests/e2e/nvme_testutil_test.go`:
+
+```go
+package e2e
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/ryanwible/wrela3/compiler"
+	"github.com/ryanwible/wrela3/compiler/qemu"
+)
+
+const nvmeStorageDiskBytes int64 = 4 * 1024 * 1024 * 1024
+
+func createSparseRawDisk(t *testing.T, path string, bytes int64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(bytes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runStorageQEMU(t *testing.T, disk string, mode string) string {
+	t.Helper()
+	deps := requireQEMUDeps(t, false)
+	tmp := t.TempDir()
+	vars := filepath.Join(tmp, "OVMF_VARS.fd")
+	copyFile(t, deps.firmware.Vars, vars)
+	image := filepath.Join(tmp, "nvme-storage.efi")
+	_, err := compiler.Build(compiler.BuildOptions{
+		Mode: compiler.ModeDev,
+		RootPath: "tests/e2e/fixtures/nvme_event_storage/main.wrela",
+		OutputPath: image,
+		RepoRoot: ".",
+	})
+	if err != nil {
+		t.Fatalf("build nvme storage image: %v", err)
+	}
+	out, err := qemu.Run(qemu.Options{
+		QEMUBinary: deps.qemuBin,
+		OVMFCode: deps.firmware.Code,
+		OVMFVars: vars,
+		ESPDir: filepath.Join(tmp, "esp"),
+		ImagePath: image,
+		SuccessText: "NVME_STORAGE_DONE",
+		Timeout: qemuTimeout(),
+		SMP: 2,
+		ExtraArgs: []string{
+			"-drive", "file=" + disk + ",if=none,id=nvme0,format=raw",
+			"-device", "nvme,drive=nvme0,serial=wrela-storage-0",
+			"-fw_cfg", "name=wrela.storage.mode,string=" + mode,
+		},
+	})
+	if err != nil {
+		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
+	}
+	return out
+}
+```
+
+Run: `go test ./tests/e2e -run TestNonexistentNvmeHarnessCompile -count=0`
+
+Expected: PASS compile-only.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/qemu/run.go compiler/qemu/run_test.go tests/e2e/nvme_testutil_test.go
+git commit -m "test: add nvme qemu harness -Codex Automated"
+```
+
+---
+
+## 6. Phase 1: Durable Declaration Syntax
+
+**Description:** This phase adds event/projection syntax in small compiler slices: token, AST, parser, semantic IDs, layout rules, projection rules, IR metadata, and codegen hooks.
+
+**Acceptance Criteria:**
+
+- Lexer, AST, parser, semantic, IR, and codegen work each land in separate commits.
+- Parser tests assert AST fields, not source text.
+- Semantic tests assert diagnostics from compiler APIs.
+
+### Task 5: Lexer Keywords
+
+**Prerequisite:** Task 1.
 
 **Files:**
 
 - Modify: `compiler/lex/token.go`
 - Modify: `compiler/lex/lexer_test.go`
+- Modify: `compiler/parse/parser_test.go`
+- Modify: `wrela/machine/x86_64/edu.wrela`
+- Modify: `wrela/machine/x86_64/ivshmem.wrela`
+- Modify: `wrela/machine/x86_64/serial.wrela`
+- Modify: `tests/fixtures/negative/on_interrupt_rejected.wrela`
+- Modify: `tests/fixtures/negative/interrupt_event_call.wrela`
 
-**Description:** Add only the top-level keywords needed to enter durable declaration parsing. Keep `id`, `layout`, `current`, and `upcast` contextual so ordinary field and method names are not broken.
+**Description:** Rename existing source and parser-test identifiers named `event`, then add `event` and `projection` as keywords. Keep `id`, `layout`, `current`, and `upcast` contextual identifiers.
 
 **Acceptance Criteria:**
 
+- Existing runtime source, parser fixtures, and negative fixtures no longer use `event` as an identifier before the lexer reserves it.
 - `event` tokenizes as `KeywordEvent`.
 - `projection` tokenizes as `KeywordProjection`.
-- `layout`, `current`, `upcast`, and `id` continue to tokenize as identifiers.
-- All existing lexer tests pass.
+- `id`, `layout`, `current`, and `upcast` still tokenize as identifiers.
 
 **Code Examples:**
-
-Add this test to `compiler/lex/lexer_test.go`:
 
 ```go
 func TestStorageDeclarationKeywords(t *testing.T) {
@@ -462,7 +988,7 @@ func TestStorageDeclarationKeywords(t *testing.T) {
 	if len(diags) != 0 {
 		t.Fatalf("lex diagnostics: %#v", diags)
 	}
-	if toks[0].Kind != KeywordEvent || toks[0].Text != "event" {
+	if toks[0].Kind != KeywordEvent {
 		t.Fatalf("first token = %#v, want KeywordEvent", toks[0])
 	}
 	if toks[3].Kind != Identifier || toks[3].Text != "id" {
@@ -471,308 +997,176 @@ func TestStorageDeclarationKeywords(t *testing.T) {
 	if toks[6].Kind != Identifier || toks[6].Text != "layout" {
 		t.Fatalf("layout must remain contextual identifier, got %#v", toks[6])
 	}
-	foundProjection := false
-	for _, tok := range toks {
-		if tok.Kind == KeywordProjection {
-			foundProjection = true
-		}
-	}
-	if !foundProjection {
-		t.Fatalf("projection keyword not found in %#v", toks)
-	}
 }
 ```
 
-Add token constants after `KeywordStaticAssert`:
+- [ ] **Step 1: Confirm and remove current keyword collisions**
 
-```go
-	KeywordEvent
-	KeywordProjection
-```
-
-Add keyword map entries:
-
-```go
-	"event":        KeywordEvent,
-	"projection":   KeywordProjection,
-```
-
-Verification:
+Run this collision scan:
 
 ```bash
-go test ./compiler/lex -run TestStorageDeclarationKeywords -v
-go test ./compiler/lex -v
+rg -n '(\bevent:|value = event\b|Bind != "event"|ParamName != "event"|event = event\b|\(event\))' \
+  wrela/machine/x86_64/edu.wrela \
+  wrela/machine/x86_64/ivshmem.wrela \
+  wrela/machine/x86_64/serial.wrela \
+  compiler/parse/parser_test.go \
+  tests/fixtures/negative/on_interrupt_rejected.wrela \
+  tests/fixtures/negative/interrupt_event_call.wrela
+```
+
+Expected before this step: matches in the three runtime files, `compiler/parse/parser_test.go`, and the two negative fixtures.
+
+Rename these identifiers exactly:
+
+```wrela
+fn ack_completed(self, completion: EduInterrupt)
+fn ack_doorbell(self, doorbell: IvshmemDoorbellInterrupt)
+fn ack_receive(self, received: U8)
+Option.Some(value = rx_event) => {
+on serial_path.interrupt(serial_event: Option<U8>) {
+on serial_path.receive(serial_event: Option<U8>) {
+on p.interrupt(interrupt_payload: Event) {}
+on serial.interrupt(serial_payload: SerialInterrupt) {
+```
+
+Update parser assertions from `Bind != "event"` to `Bind != "rx_event"` and from `ParamName != "event"` to `ParamName != "serial_event"`.
+
+Run:
+
+```bash
+if rg -n '(\bevent:|value = event\b|Bind != "event"|ParamName != "event"|event = event\b|\(event\))' \
+  wrela/machine/x86_64/edu.wrela \
+  wrela/machine/x86_64/ivshmem.wrela \
+  wrela/machine/x86_64/serial.wrela \
+  compiler/parse/parser_test.go \
+  tests/fixtures/negative/on_interrupt_rejected.wrela \
+  tests/fixtures/negative/interrupt_event_call.wrela; then
+  exit 1
+fi
+```
+
+Expected: no output.
+
+- [ ] **Step 2: Add failing lexer test**
+
+Run: `go test ./compiler/lex -run TestStorageDeclarationKeywords -v`
+
+Expected: FAIL with `undefined: KeywordEvent`.
+
+- [ ] **Step 3: Add token constants and keyword map entries**
+
+Add `KeywordEvent` and `KeywordProjection` after `KeywordStaticAssert`. Add `"event": KeywordEvent` and `"projection": KeywordProjection`.
+
+Run: `go test ./compiler/lex -run TestStorageDeclarationKeywords -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
 git diff --check
+git add compiler/lex/token.go compiler/lex/lexer_test.go compiler/parse/parser_test.go wrela/machine/x86_64/edu.wrela wrela/machine/x86_64/ivshmem.wrela wrela/machine/x86_64/serial.wrela tests/fixtures/negative/on_interrupt_rejected.wrela tests/fixtures/negative/interrupt_event_call.wrela
+git commit -m "feat: tokenize storage declarations -Codex Automated"
 ```
 
-Expected: all tests pass after implementation.
+### Task 6: AST Nodes
 
-Commit:
-
-```bash
-git add compiler/lex/token.go compiler/lex/lexer_test.go
-git commit -m "feat: tokenize storage declaration keywords -Codex Automated"
-```
-
-### Task 3: AST Contracts For Events And Projections
+**Prerequisite:** Task 1.
 
 **Files:**
 
 - Modify: `compiler/ast/ast.go`
 - Modify: `compiler/ast/ast_test.go`
 
-**Description:** Add durable ABI declaration nodes. The AST stores source IDs as strings so semantic checking can produce precise diagnostics for overflow, zero IDs, and duplicate IDs.
+**Description:** Add AST nodes for event/projection declarations. Store numeric IDs as strings for precise semantic diagnostics.
 
 **Acceptance Criteria:**
 
-- `EventDecl` and `ProjectionDecl` implement `ast.Decl`.
-- Event layouts preserve field encode expressions.
-- Projection layouts preserve container fields.
-- Upcast mappings preserve `from -> to` names.
-- Debug output is deterministic and includes IDs, current markers, and upcasts.
+- `EventDecl` and `ProjectionDecl` implement `Decl`.
+- Layout fields preserve type and optional encode expression.
+- Upcast mappings preserve source and destination names.
+- `DebugDecl` has deterministic output for storage declarations.
 
 **Code Examples:**
 
-Add these AST types to `compiler/ast/ast.go`:
-
 ```go
 type EventDecl struct {
-	Name    string
-	ID      string
-	Fields  []Field
+	Name string
+	ID string
+	Fields []Field
 	Layouts []EventLayoutDecl
 	Upcasts []LayoutUpcastDecl
-	SpanV   source.Span
+	SpanV source.Span
 }
 
 func (d *EventDecl) Span() source.Span { return d.SpanV }
 
 type EventLayoutDecl struct {
-	ID      string
+	ID string
 	Current bool
-	Fields  []EventLayoutField
-	Span    source.Span
+	Fields []EventLayoutField
+	Span source.Span
 }
 
 type EventLayoutField struct {
-	Name   string
-	Type   TypeRef
+	Name string
+	Type TypeRef
 	Encode Expr
-	Span   source.Span
-}
-
-type LayoutUpcastDecl struct {
-	FromID   string
-	ToID     string
-	Mappings []LayoutUpcastMapping
-	Span     source.Span
-}
-
-type LayoutUpcastMapping struct {
-	From string
-	To   string
 	Span source.Span
 }
 
 type ProjectionDecl struct {
-	Name    string
-	ID      string
+	Name string
+	ID string
 	Layouts []ProjectionLayoutDecl
 	Upcasts []LayoutUpcastDecl
-	SpanV   source.Span
-}
-
-func (d *ProjectionDecl) Span() source.Span { return d.SpanV }
-
-type ProjectionLayoutDecl struct {
-	ID      string
-	Current bool
-	Fields  []Field
-	Span    source.Span
+	SpanV source.Span
 }
 ```
 
-Add deterministic debug helpers:
+- [ ] **Step 1: Add failing AST test**
 
-```go
-func DebugDecl(decl Decl) string {
-	switch d := decl.(type) {
-	case *EventDecl:
-		return "event " + d.Name + " id " + d.ID
-	case *ProjectionDecl:
-		return "projection " + d.Name + " id " + d.ID
-	default:
-		return "<decl>"
-	}
-}
-```
+Add `TestStorageASTContracts` that constructs an `EventDecl` and `ProjectionDecl` and asserts `DebugDecl(event) == "event FileRenamed id 17"`.
 
-Add this test to `compiler/ast/ast_test.go`:
+Run: `go test ./compiler/ast -run TestStorageASTContracts -v`
 
-```go
-func TestStorageASTContracts(t *testing.T) {
-	event := &EventDecl{
-		Name: "FileRenamed",
-		ID:   "17",
-		Fields: []Field{
-			{Name: "file_id", Type: TypeRef{Name: "FileId"}},
-		},
-		Layouts: []EventLayoutDecl{{
-			ID:      "1",
-			Current: true,
-			Fields: []EventLayoutField{{
-				Name:   "file_id",
-				Type:   TypeRef{Name: "U64"},
-				Encode: &FieldExpr{Base: &NameExpr{Name: "self"}, Field: "file_id"},
-			}},
-		}},
-	}
-	if event.Span().End != 0 {
-		t.Fatalf("zero-value span contract changed")
-	}
-	if got, want := DebugDecl(event), "event FileRenamed id 17"; got != want {
-		t.Fatalf("DebugDecl() = %q, want %q", got, want)
-	}
+Expected: FAIL with undefined `EventDecl`.
 
-	projection := &ProjectionDecl{
-		Name: "DirectoryChildren",
-		ID:   "12",
-		Layouts: []ProjectionLayoutDecl{{
-			ID:      "1",
-			Current: true,
-			Fields: []Field{{Name: "children", Type: TypeRef{Name: "OrderedPages", Args: []TypeRef{{Name: "FileId"}, {Name: "FileNameKey"}, {Name: "DirectoryChild"}}}}},
-		}},
-	}
-	if got, want := DebugDecl(projection), "projection DirectoryChildren id 12"; got != want {
-		t.Fatalf("DebugDecl() = %q, want %q", got, want)
-	}
-}
-```
+- [ ] **Step 2: Add AST structs and debug branch**
 
-Verification:
+Implement the structs and `DebugDecl` branches shown above.
+
+Run: `go test ./compiler/ast -run TestStorageASTContracts -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-go test ./compiler/ast -run TestStorageASTContracts -v
-go test ./compiler/ast -v
 git diff --check
-```
-
-Expected: all tests pass after implementation.
-
-Commit:
-
-```bash
 git add compiler/ast/ast.go compiler/ast/ast_test.go
-git commit -m "feat: add storage declaration ast contracts -Codex Automated"
+git commit -m "feat: add storage declaration ast -Codex Automated"
 ```
 
-### Task 4: Parser For Event And Projection Declarations
+### Task 7: Parser For Event Declarations
+
+**Prerequisites:** Tasks 5 and 6.
 
 **Files:**
 
 - Modify: `compiler/parse/parser.go`
 - Modify: `compiler/parse/parser_test.go`
 
-**Description:** Parse durable event and projection ABI declarations. Use contextual identifiers for `id`, `layout`, `current`, and `upcast`.
+**Description:** Parse `event Name id N` declarations, top-level semantic fields, layout fields, current marker, and upcast mappings.
 
 **Acceptance Criteria:**
 
-- `event Name id N { layout 1 current {} }` parses at module scope.
-- `projection Name id N { layout 1 current {} }` parses at module scope.
-- Event top-level fields use existing field syntax.
-- Event layout fields allow `name: Type` and `name: Type = expr`.
-- Projection layout fields use existing field syntax and normal generic type refs.
-- `upcast 1 -> 2 { old_name -> new_name }` parses for events and projections.
-- Parser rejects module-scope `layout` and `upcast` outside an event/projection with `PAR0002`.
+- Event declarations parse into `*ast.EventDecl`.
+- Layout field `name: Type = expr` preserves `Encode`.
+- `upcast 1 -> 2 { old -> new }` parses.
+- `id`, `layout`, `current`, and `upcast` remain contextual.
 
 **Code Examples:**
-
-Add parser switch cases:
-
-```go
-	case lex.KeywordEvent:
-		if unique {
-			return nil, p.err(p.peek(), diag.PAR0002, "event may not be unique")
-		}
-		return p.parseEventDecl()
-	case lex.KeywordProjection:
-		if unique {
-			return nil, p.err(p.peek(), diag.PAR0002, "projection may not be unique")
-		}
-		return p.parseProjectionDecl()
-```
-
-Add contextual helper:
-
-```go
-func (p *Parser) consumeContextualIdentifier(text string, message string) (lex.Token, []diag.Diagnostic) {
-	tok := p.peek()
-	if tok.Kind != lex.Identifier || tok.Text != text {
-		return tok, p.err(tok, diag.PAR0001, message)
-	}
-	p.next()
-	return tok, nil
-}
-```
-
-The event parser must follow this shape:
-
-```go
-func (p *Parser) parseEventDecl() (ast.Decl, []diag.Diagnostic) {
-	start := p.next()
-	name, ds := p.expectIdentifier("expected event name")
-	if len(ds) != 0 {
-		return nil, ds
-	}
-	if _, ds := p.consumeContextualIdentifier("id", "expected id after event name"); len(ds) != 0 {
-		return nil, ds
-	}
-	idTok, ds := p.consume(lex.Integer)
-	if len(ds) != 0 {
-		return nil, ds
-	}
-	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
-		return nil, ds
-	}
-
-	var fields []ast.Field
-	var layouts []ast.EventLayoutDecl
-	var upcasts []ast.LayoutUpcastDecl
-	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
-		p.skipSeparators()
-		if p.peek().Kind == lex.RBrace {
-			break
-		}
-		if p.peek().Kind == lex.Identifier && p.peek().Text == "layout" {
-			layout, layoutDs := p.parseEventLayoutDecl()
-			if len(layoutDs) != 0 {
-				return nil, layoutDs
-			}
-			layouts = append(layouts, layout)
-			continue
-		}
-		if p.peek().Kind == lex.Identifier && p.peek().Text == "upcast" {
-			upcast, upcastDs := p.parseLayoutUpcastDecl()
-			if len(upcastDs) != 0 {
-				return nil, upcastDs
-			}
-			upcasts = append(upcasts, upcast)
-			continue
-		}
-		field, fieldDs := p.parseField()
-		if len(fieldDs) != 0 {
-			return nil, fieldDs
-		}
-		fields = append(fields, field)
-	}
-	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
-		return nil, ds
-	}
-	return &ast.EventDecl{Name: name.Text, ID: idTok.Text, Fields: fields, Layouts: layouts, Upcasts: upcasts, SpanV: p.span(start.Start, p.previous().End)}, nil
-}
-```
-
-Add this parser test:
 
 ```go
 func TestParseEventDeclaration(t *testing.T) {
@@ -780,38 +1174,71 @@ func TestParseEventDeclaration(t *testing.T) {
 module storage.test
 event FileRenamed id 17 {
     file_id: FileId
-    directory_id: FileId
-    name_ref: BlobRef
-
     layout 1 {
-        file_id: U64
         old_name_ref: BlobRefPayload
     }
-
     layout 2 current {
         file_id: U64 = self.file_id.value
-        directory_id: U64 = self.directory_id.value
-        name_ref: BlobRefPayload = self.name_ref.payload
     }
-
     upcast 1 -> 2 {
         old_name_ref -> name_ref
     }
 }`)
-	if len(mod.Decls) != 1 {
-		t.Fatalf("decls = %d, want 1", len(mod.Decls))
-	}
-	ev, ok := mod.Decls[0].(*ast.EventDecl)
-	if !ok {
-		t.Fatalf("decl = %#v, want EventDecl", mod.Decls[0])
-	}
+	ev := mod.Decls[0].(*ast.EventDecl)
 	if ev.ID != "17" || len(ev.Layouts) != 2 || !ev.Layouts[1].Current || len(ev.Upcasts) != 1 {
 		t.Fatalf("event parsed incorrectly: %#v", ev)
 	}
 }
 ```
 
-Add projection parser test:
+- [ ] **Step 1: Add failing parser test**
+
+Run: `go test ./compiler/parse -run TestParseEventDeclaration -v`
+
+Expected: FAIL with parser diagnostic `expected declaration` or undefined AST fields.
+
+- [ ] **Step 2: Add parser switch case and contextual helper**
+
+Add `case lex.KeywordEvent: return p.parseEventDecl()`. Add `consumeContextualIdentifier`.
+
+Run: `go test ./compiler/parse -run TestParseEventDeclaration -v`
+
+Expected: FAIL later in event body parsing.
+
+- [ ] **Step 3: Implement event body parser**
+
+Add `parseEventDecl`, `parseEventLayoutDecl`, `parseEventLayoutField`, and `parseLayoutUpcastDecl`.
+
+Run: `go test ./compiler/parse -run TestParseEventDeclaration -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/parse/parser.go compiler/parse/parser_test.go
+git commit -m "feat: parse storage event declarations -Codex Automated"
+```
+
+### Task 8: Parser For Projection Declarations
+
+**Prerequisites:** Tasks 5 and 6.
+
+**Files:**
+
+- Modify: `compiler/parse/parser.go`
+- Modify: `compiler/parse/parser_test.go`
+
+**Description:** Parse projection declarations separately from events. Projection layouts use normal field syntax and optional upcasts.
+
+**Acceptance Criteria:**
+
+- `projection Name id N { layout 1 current { children: OrderedPages<A, B, C> } }` parses into `*ast.ProjectionDecl`.
+- Projection layout fields preserve generic type refs.
+- Projection upcasts reuse `LayoutUpcastDecl`.
+
+**Code Examples:**
 
 ```go
 func TestParseProjectionDeclaration(t *testing.T) {
@@ -822,1302 +1249,860 @@ projection DirectoryChildren id 12 {
         children: OrderedPages<FileId, FileNameKey, DirectoryChild>
     }
 }`)
-	proj, ok := mod.Decls[0].(*ast.ProjectionDecl)
-	if !ok {
-		t.Fatalf("decl = %#v, want ProjectionDecl", mod.Decls[0])
-	}
+	proj := mod.Decls[0].(*ast.ProjectionDecl)
 	if proj.ID != "12" || len(proj.Layouts) != 1 || !proj.Layouts[0].Current {
 		t.Fatalf("projection parsed incorrectly: %#v", proj)
 	}
+	if got := proj.Layouts[0].Fields[0].Type.String(); got != "OrderedPages<FileId, FileNameKey, DirectoryChild>" {
+		t.Fatalf("projection field type = %q", got)
+	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing projection parser test**
+
+Run: `go test ./compiler/parse -run TestParseProjectionDeclaration -v`
+
+Expected: FAIL with parser diagnostic `expected declaration`.
+
+- [ ] **Step 2: Implement projection parser**
+
+Add `case lex.KeywordProjection`, `parseProjectionDecl`, and `parseProjectionLayoutDecl`.
+
+Run: `go test ./compiler/parse -run TestParseProjectionDeclaration -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-go test ./compiler/parse -run 'TestParse(Event|Projection)Declaration' -v
-go test ./compiler/parse -v
 git diff --check
-```
-
-Expected: all tests pass after implementation.
-
-Commit:
-
-```bash
 git add compiler/parse/parser.go compiler/parse/parser_test.go
-git commit -m "feat: parse durable storage declarations -Codex Automated"
+git commit -m "feat: parse storage projection declarations -Codex Automated"
 ```
 
----
+### Task 9: Semantic Storage Index
 
-## 5. Phase 2: Semantic And IR Support For Durable Layouts
-
-**Description:** This phase validates durable ABI declarations and exposes stable metadata to IR/codegen. Storage sees compact IDs and bytes; typed user code gets generated constants, encoders, decoders, and upcasts.
-
-**Acceptance Criteria:**
-
-- Duplicate event IDs and projection IDs fail.
-- Event ID zero is rejected because `event_type_id = 0` is reserved for empty slots.
-- Event layout IDs are nonzero and unique within the event.
-- Multiple layouts require exactly one `current`.
-- A single layout without `current` becomes current.
-- Upcast endpoints must name existing layouts.
-- Current layout encode expressions typecheck against `self`.
-- Projection containers are limited to `StateCell<T>`, `DenseEntityMap<Id, T>`, and `OrderedPages<Partition, SortKey, Row>`.
-- IR contains event/projection metadata with stable ordering.
-
-**Phase Code Example:**
-
-```go
-type EventLayoutInfo struct {
-	Module          string
-	Name            string
-	EventTypeID     uint64
-	LayoutID        uint64
-	Current         bool
-	PayloadSize     uint64
-	PayloadAlign    uint64
-	EncoderSymbol   string
-	DecoderSymbol   string
-	UpcastToCurrent string
-}
-```
-
-### Task 5: Semantic Validation For Event And Projection ABI
+**Prerequisites:** Tasks 7 and 8.
 
 **Files:**
 
 - Create: `compiler/sem/storage.go`
-- Create: `compiler/sem/storage_test.go`
-- Create: `compiler/sem/storage_negative_test.go`
-- Add fixtures under: `tests/fixtures/negative/`
 - Modify: `compiler/sem/types.go`
 - Modify: `compiler/sem/check.go`
+- Create: `compiler/sem/storage_decl_test.go`
 
-**Description:** Add semantic storage declarations without changing ordinary data/class semantics. Events become `KindEvent`; projections become `KindProjection`.
+**Description:** Register events and projections in semantic storage metadata with stable ID maps. This is the only task that wires storage declarations into `Check`.
 
 **Acceptance Criteria:**
 
-- `sem.KindEvent` and `sem.KindProjection` exist.
-- `CheckedProgram` exposes `Storage StorageIndex`.
-- Duplicate event IDs emit `SEM0099`.
-- Event ID `0` emits `SEM0100`.
-- Duplicate layout IDs emit `SEM0102`.
-- Missing current layout in a multi-layout event emits `SEM0101`.
+- `KindEvent` and `KindProjection` exist.
+- `CheckedProgram.Storage` exists.
+- Duplicate durable `event_type_id` values emit `SEM0099`.
+- Durable `event_type_id = 0` emits `SEM0100`.
 - Duplicate projection IDs emit `SEM0106`.
-- Unsupported projection container emits `SEM0108`.
-- Negative fixtures fail with the exact expected codes.
 
 **Code Examples:**
 
-Add kinds:
-
-```go
-const (
-	KindPrimitive Kind = iota
-	KindData
-	KindClass
-	KindDriver
-	KindDriverPath
-	KindExecutor
-	KindImage
-	KindEnum
-	KindTrait
-	KindTypeParam
-	KindEvent
-	KindProjection
-)
-```
-
-Add storage index structs:
-
 ```go
 type StorageIndex struct {
-	EventsByID      map[uint64]EventInfo
-	EventsByKey     map[string]EventInfo
+	EventsByTypeID map[uint64]EventInfo
+	EventsByKey map[string]EventInfo
 	ProjectionsByID map[uint64]ProjectionInfo
 	ProjectionsByKey map[string]ProjectionInfo
 }
 
 type EventInfo struct {
-	Module          string
-	Name            string
-	ID              uint64
-	Fields          []Field
-	Layouts         []EventLayoutInfo
-	CurrentLayoutID uint64
-	Upcasts         []LayoutUpcastInfo
-	Span            source.Span
-}
-
-type EventLayoutInfo struct {
-	ID      uint64
-	Current bool
-	Fields  []EventLayoutFieldInfo
-	Span    source.Span
-}
-
-type EventLayoutFieldInfo struct {
-	Name   string
-	Type   *Type
-	Encode ast.Expr
-	Span   source.Span
-}
-
-type LayoutUpcastInfo struct {
-	FromID   uint64
-	ToID     uint64
-	Mappings []LayoutUpcastMappingInfo
-	Span     source.Span
-}
-
-type LayoutUpcastMappingInfo struct {
-	From string
-	To   string
+	Module string
+	Name string
+	EventTypeID uint64
 	Span source.Span
 }
-
-type ProjectionInfo struct {
-	Module          string
-	Name            string
-	ID              uint64
-	Layouts         []ProjectionLayoutInfo
-	CurrentLayoutID uint64
-	Upcasts         []LayoutUpcastInfo
-	Span            source.Span
-}
-
-type ProjectionLayoutInfo struct {
-	ID      uint64
-	Current bool
-	Fields  []Field
-	Span    source.Span
-}
 ```
 
-Add test source:
+- [ ] **Step 1: Add failing semantic positive test**
+
+Add `TestStorageIndexRecordsEventsAndProjections` using `parseModulesForTest`, `mustBuildIndexAllowingMissingImage`, and `checkAllowingMissingImage`.
+
+Run: `go test ./compiler/sem -run TestStorageIndexRecordsEventsAndProjections -v`
+
+Expected: FAIL with missing `CheckedProgram.Storage` or parse/check diagnostics.
+
+- [ ] **Step 2: Add storage types and check wiring**
+
+Add storage structs in `compiler/sem/storage.go`, add `Storage StorageIndex` to `CheckedProgram`, and call `checkStorageDecls` from `Check`.
+
+Run: `go test ./compiler/sem -run TestStorageIndexRecordsEventsAndProjections -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add failing duplicate durable ID tests**
+
+Add `TestStorageRejectsDuplicateEventTypeID` and `TestStorageRejectsDuplicateProjectionID`.
+
+Run: `go test ./compiler/sem -run 'TestStorageRejectsDuplicate(Event|Projection)ID' -v`
+
+Expected: FAIL because duplicate diagnostics are not emitted.
+
+- [ ] **Step 4: Implement duplicate and zero durable ID diagnostics**
+
+Use `strconv.ParseUint`; reject `event_type_id` `0`; reject projection ID `0` with `SEM0106` message `invalid projection id 0`.
+
+Run: `go test ./compiler/sem -run 'TestStorage(Index|Rejects)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --check
+git add compiler/sem/storage.go compiler/sem/types.go compiler/sem/check.go compiler/sem/storage_decl_test.go
+git commit -m "feat: index durable storage declarations -Codex Automated"
+```
+
+### Task 10: Event Layout Semantics
+
+**Prerequisite:** Task 9.
+
+**Files:**
+
+- Modify: `compiler/sem/storage.go`
+- Create: `compiler/sem/storage_event_layout_test.go`
+- Add fixtures: `tests/fixtures/negative/duplicate_event_layout_id.wrela`, `tests/fixtures/negative/missing_current_event_layout.wrela`, `tests/fixtures/negative/event_payload_layout_zero.wrela`
+
+**Description:** Validate event layout IDs, current layout rules, upcast endpoints, encode expression types, and inline payload budget.
+
+**Acceptance Criteria:**
+
+- Duplicate layout IDs emit `SEM0102`.
+- Layout ID `0` emits `SEM0102` with message `layout id 0 is reserved`.
+- Multi-layout event without exactly one `current` emits `SEM0101`.
+- Upcast endpoints must exist or emit `SEM0104`.
+- Missing upcast target field emits `SEM0105`.
+- Payload layout size greater than 448 emits `SEM0121`.
+- `payload_layout_id = 0` is reserved and never accepted for semantic events.
+
+**Code Examples:**
 
 ```go
-const validStorageDeclarations = `
-module storage.valid
-data FileId { value: U64 }
-data BlobRefPayload { blob_id: U64; byte_length: U64 }
-data BlobRef { payload: BlobRefPayload }
-data FileNameKey { hash: U64 }
-data DirectoryChild { file_id: FileId; name: BlobRefPayload }
-data StateCell<T> { value: T }
-data DenseEntityMap<Id, T> { root_ref: U64 }
-data OrderedPages<Partition, SortKey, Row> { root_ref: U64 }
-
-event FileRenamed id 17 {
-    file_id: FileId
-    directory_id: FileId
-    name_ref: BlobRef
-
-    layout 1 current {
-        file_id: U64 = self.file_id.value
-        directory_id: U64 = self.directory_id.value
-        name_ref: BlobRefPayload = self.name_ref.payload
-    }
+func TestEventLayoutCurrentRules(t *testing.T) {
+	_, ds := typeDiagsForModules(t, `
+module storage.bad
+event A id 1 {
+    layout 1 {}
+    layout 2 {}
+}`)
+	if !hasCode(ds, diag.SEM0101) {
+		t.Fatalf("diagnostics = %#v, want SEM0101", ds)
+	}
 }
-
-projection DirectoryChildren id 12 {
-    layout 1 current {
-        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
-    }
-}`
 ```
 
-Add positive test:
+- [ ] **Step 1: Add failing layout current test**
+
+Run: `go test ./compiler/sem -run TestEventLayoutCurrentRules -v`
+
+Expected: FAIL because `SEM0101` is not emitted.
+
+- [ ] **Step 2: Implement current layout validation**
+
+Count layouts per event; if one layout and no current marker, mark it current in `EventInfo.CurrentLayoutID`; if multiple, require exactly one current marker.
+
+Run: `go test ./compiler/sem -run TestEventLayoutCurrentRules -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add failing duplicate and zero layout tests**
+
+Run: `go test ./compiler/sem -run 'TestEventLayout(Duplicate|Zero)' -v`
+
+Expected: FAIL because duplicate/zero diagnostics are not emitted.
+
+- [ ] **Step 4: Implement layout ID validation**
+
+Reject duplicate and zero layout IDs in `checkEventLayouts`.
+
+Run: `go test ./compiler/sem -run 'TestEventLayout' -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Add negative fixtures and run global negative suite**
+
+Run: `go test ./compiler -run TestNegativeFixtures -v`
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git diff --check
+git add compiler/sem/storage.go compiler/sem/storage_event_layout_test.go tests/fixtures/negative/duplicate_event_layout_id.wrela tests/fixtures/negative/missing_current_event_layout.wrela tests/fixtures/negative/event_payload_layout_zero.wrela
+git commit -m "feat: validate storage event layouts -Codex Automated"
+```
+
+### Task 11: Projection Layout Semantics
+
+**Prerequisite:** Task 9.
+
+**Files:**
+
+- Modify: `compiler/sem/storage.go`
+- Create: `compiler/sem/storage_projection_layout_test.go`
+- Add fixture: `tests/fixtures/negative/unsupported_projection_container.wrela`
+
+**Description:** Validate projection layout IDs, current marker rules, upcast endpoints, and supported container set.
+
+**Acceptance Criteria:**
+
+- Duplicate projection layout IDs emit `SEM0107`.
+- Multiple projection layouts require exactly one current marker.
+- The semantic checker instantiates a three-parameter generic data type before `OrderedPages<Partition, SortKey, Row>` is accepted as a projection container.
+- Containers are only `StateCell<T>`, `DenseEntityMap<Id, T>`, and `OrderedPages<Partition, SortKey, Row>`.
+- Unsupported container emits `SEM0108`.
+
+**Code Examples:**
 
 ```go
-func TestEventLayoutSemanticContracts(t *testing.T) {
-	checked, ds := checkSource(t, validStorageDeclarations)
-	if len(ds) != 0 {
-		t.Fatalf("diagnostics: %#v", ds)
-	}
-	ev := checked.Storage.EventsByID[17]
-	if ev.Name != "FileRenamed" || ev.CurrentLayoutID != 1 {
-		t.Fatalf("event info = %#v", ev)
-	}
-	proj := checked.Storage.ProjectionsByID[12]
-	if proj.Name != "DirectoryChildren" || proj.CurrentLayoutID != 1 {
-		t.Fatalf("projection info = %#v", proj)
-	}
-}
-```
-
-Add negative fixture `tests/fixtures/negative/duplicate_event_id.wrela`:
-
-```wrela
-// expect: SEM0099: duplicate durable event type id 17
-module negative.duplicate_event_id
-event A id 17 { layout 1 current {} }
-event B id 17 { layout 1 current {} }
-```
-
-Add negative fixture `tests/fixtures/negative/unsupported_projection_container.wrela`:
-
-```wrela
-// expect: SEM0108: projection Unsupported layout 1 field bad uses unsupported container HashMap
-module negative.unsupported_projection_container
+func TestProjectionRejectsUnsupportedContainer(t *testing.T) {
+	_, ds := typeDiagsForModules(t, `
+module storage.bad_projection
 data HashMap<K, V> { root: U64 }
 data FileId { value: U64 }
 data Row { value: U64 }
-projection Unsupported id 9 {
+projection Bad id 3 {
     layout 1 current {
         bad: HashMap<FileId, Row>
     }
+}`)
+	if !hasCode(ds, diag.SEM0108) {
+		t.Fatalf("diagnostics = %#v, want SEM0108", ds)
+	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add three-generic semantic smoke test**
+
+Add `TestProjectionContainerThreeGenericInstantiation`:
+
+```go
+func TestProjectionContainerThreeGenericInstantiation(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module storage.three_generic
+data Triple<A, B, C> { a: A; b: B; c: C }
+data FileId { value: U64 }
+data FileNameKey { value: U64 }
+data DirectoryChild { value: U64 }
+data Holder { rows: Triple<FileId, FileNameKey, DirectoryChild> }
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+	mustCompleteGenericInstantiations(t, index)
+	if _, ok := index.Instantiations["storage.three_generic.Triple[storage.three_generic.FileId,storage.three_generic.FileNameKey,storage.three_generic.DirectoryChild]"]; !ok {
+		t.Fatalf("three-parameter generic instantiation missing from index")
+	}
+}
+```
+
+Run: `go test ./compiler/sem -run TestProjectionContainerThreeGenericInstantiation -v`
+
+Expected: PASS. If this fails, fix generic instantiation before implementing projection container validation.
+
+- [ ] **Step 2: Add failing projection container test**
+
+Run: `go test ./compiler/sem -run TestProjectionRejectsUnsupportedContainer -v`
+
+Expected: FAIL because `SEM0108` is not emitted.
+
+- [ ] **Step 3: Implement container validation**
+
+Add `projectionContainerKind(*Type) (string, bool)` and call it for every projection layout field.
+
+Run: `go test ./compiler/sem -run TestProjectionRejectsUnsupportedContainer -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Add current/duplicate tests and fixture**
+
+Run: `go test ./compiler/sem -run TestProjectionLayout -v && go test ./compiler -run TestNegativeFixtures -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-go test ./compiler/sem -run 'TestEventLayoutSemanticContracts|TestNegativeFixtures' -v
-go test ./compiler/sem -v
 git diff --check
+git add compiler/sem/storage.go compiler/sem/storage_projection_layout_test.go tests/fixtures/negative/unsupported_projection_container.wrela
+git commit -m "feat: validate storage projection layouts -Codex Automated"
 ```
 
-Expected: all semantic tests pass after implementation.
+### Task 12: Storage Authority Semantic Hooks
 
-Commit:
+**Prerequisites:** Tasks 9-11.
+
+**Files:**
+
+- Create: `compiler/sem/storage_graph.go`
+- Create: `compiler/sem/storage_authority_test.go`
+- Modify: `compiler/sem/storage.go`
+- Modify: `compiler/sem/image_graph.go`
+- Modify: `compiler/sem/check.go`
+- Add fixtures: `tests/fixtures/negative/forged_storage_writer.wrela`, `tests/fixtures/negative/ignored_storage_append_result.wrela`
+
+**Description:** Add storage-specific semantic graph nodes and authority checks without spreading logic through general checker files.
+
+**Acceptance Criteria:**
+
+- `StorageWriter` construction outside owned-hardware boot wiring emits `SEM0113`.
+- `StorageWriter` construction inside `phase owned_hardware` is allowed only when the constructor directly receives `ForegroundStoragePath`, `BackgroundStoragePath`, `StreamDirectory`, and `StorageMetrics` values created in that phase.
+- Ignored `StorageAppendResult` emits `SEM0116`.
+- Storage image graph can record NVMe path, core-link endpoint, and projection feed nodes for later tasks.
+
+**Code Examples:**
+
+```go
+type StoragePathNode struct {
+	Label string
+	Role string
+	Owner string
+	QueueID uint16
+	Vector uint8
+	Span source.Span
+}
+
+type ProjectionFeedNode struct {
+	Projection string
+	SourceLabel string
+	Owner string
+	Span source.Span
+}
+```
+
+Legal construction shape:
+
+```wrela
+phase owned_hardware(hardware: OwnedHardware) -> never {
+    let foreground = foreground_storage_path(path = foreground_nvme_path)
+    let background = background_storage_path(path = background_nvme_path)
+    let writer = StorageWriter(
+        foreground = foreground,
+        background = background,
+        stream_directory = StreamDirectory(next_stream_id = 0),
+        metrics = StorageMetrics()
+    )
+    while true {}
+}
+```
+
+- [ ] **Step 1: Add failing authority tests**
+
+Run: `go test ./compiler/sem -run 'TestStorageWriter(CannotBeForged|ConstructsInsideOwnedHardware)' -v`
+
+Expected: FAIL because `SEM0113` is not emitted.
+
+- [ ] **Step 2: Add legal construction positive test and storage graph hook**
+
+Add `TestStorageWriterConstructsInsideOwnedHardware` with the legal construction shape above. Add storage graph structs, append them to `ImageGraph`, and call `checkStorageAuthority` from `Check`. `checkStorageAuthority` must reject `StorageWriter(...)` unless `currentPhase == "owned_hardware"` and constructor arguments include direct same-phase `foreground`, `background`, `stream_directory`, and `metrics` values.
+
+Run: `go test ./compiler/sem -run 'TestStorageWriter(CannotBeForged|ConstructsInsideOwnedHardware)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add ignored append test**
+
+Run: `go test ./compiler/sem -run TestStorageAppendResultMustBeObserved -v`
+
+Expected: FAIL because `SEM0116` is not emitted.
+
+- [ ] **Step 4: Implement append-result observation**
+
+Mirror reliable topic result handling: expression statements that call `StorageWriter.enqueue_atomic_group` fail unless the result is matched, assigned, or returned.
+
+Run: `go test ./compiler/sem -run 'TestStorage(Writer|Append)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Add fixtures and commit**
 
 ```bash
-git add compiler/sem/storage.go compiler/sem/storage_test.go compiler/sem/storage_negative_test.go compiler/sem/types.go compiler/sem/check.go tests/fixtures/negative/duplicate_event_id.wrela tests/fixtures/negative/unsupported_projection_container.wrela
-git commit -m "feat: validate durable storage declarations -Codex Automated"
+go test ./compiler -run TestNegativeFixtures -v
+git diff --check
+git add compiler/sem/storage_graph.go compiler/sem/storage_authority_test.go compiler/sem/storage.go compiler/sem/image_graph.go compiler/sem/check.go tests/fixtures/negative/forged_storage_writer.wrela tests/fixtures/negative/ignored_storage_append_result.wrela
+git commit -m "feat: enforce storage writer authority -Codex Automated"
 ```
 
-### Task 6: IR Metadata And Generated Event Encoders
+### Task 13: IR Storage Metadata
+
+**Prerequisites:** Tasks 9-11.
+
+**Files:**
+
+- Modify: `compiler/ir/ir.go`
+- Create: `compiler/ir/storage_testutil_test.go`
+- Create: `compiler/ir/storage_metadata_test.go`
+
+**Description:** Add storage event/projection metadata to IR without lowering encoder bodies yet.
+
+**Acceptance Criteria:**
+
+- `ir.Program.StorageEvents` and `ir.Program.StorageProjections` exist.
+- `checkedStorageProgramForTest` is defined in `compiler/ir/storage_testutil_test.go`.
+- Shape tests can construct an `ir.Program` with event and projection metadata without calling `Lower`.
+- Helper tests prove `checkedStorageProgramForTest` returns a semantic program with one current event layout and one current projection layout.
+
+**Code Examples:**
+
+```go
+type EventLayout struct {
+	Module string
+	Name string
+	EventTypeID uint64
+	LayoutID uint64
+	Current bool
+	PayloadSize uint64
+	PayloadAlign uint64
+	EncoderSymbol string
+}
+```
+
+- [ ] **Step 1: Add failing IR metadata shape test**
+
+Add `TestStorageIRMetadataShape`:
+
+```go
+func TestStorageIRMetadataShape(t *testing.T) {
+	program := Program{
+		StorageEvents: []EventLayout{{
+			Module: "app",
+			Name: "FileCreated",
+			EventTypeID: 1001,
+			LayoutID: 1,
+			Current: true,
+			PayloadSize: 40,
+			PayloadAlign: 8,
+			EncoderSymbol: "_wrela_storage_event_app_FileCreated_layout_1_encode",
+		}},
+		StorageProjections: []ProjectionLayout{{
+			Module: "app",
+			Name: "DirectoryChildren",
+			ProjectionID: 12,
+			LayoutID: 1,
+			Current: true,
+		}},
+	}
+	if got := program.StorageEvents[0].EventTypeID; got != 1001 {
+		t.Fatalf("event_type_id = %d", got)
+	}
+	if got := program.StorageProjections[0].ProjectionID; got != 12 {
+		t.Fatalf("projection id = %d", got)
+	}
+}
+```
+
+Run: `go test ./compiler/ir -run TestStorageIRMetadataShape -v`
+
+Expected: FAIL with undefined `StorageEvents`.
+
+- [ ] **Step 2: Add IR structs and test helper**
+
+Implement `EventLayout`, `ProjectionLayout`, and `checkedStorageProgramForTest`.
+
+Run: `go test ./compiler/ir -run TestStorageIRMetadataShape -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit IR shape only**
+
+```bash
+git diff --check
+git add compiler/ir/ir.go compiler/ir/storage_testutil_test.go compiler/ir/storage_metadata_test.go
+git commit -m "feat: add storage metadata ir shape -Codex Automated"
+```
+
+### Task 14: Lower Storage Metadata
+
+**Prerequisite:** Task 13.
+
+**Files:**
+
+- Modify: `compiler/ir/lower.go`
+- Modify: `compiler/ir/storage_metadata_test.go`
+
+**Description:** Populate IR storage metadata from semantic storage declarations.
+
+**Acceptance Criteria:**
+
+- Event metadata includes event type ID, layout ID, current marker, payload size, and encoder symbol.
+- Projection metadata includes projection ID, layout ID, current marker, and container kinds.
+- Ordering is deterministic.
+
+**Code Examples:**
+
+```go
+func (ctx *lowerContext) lowerStorageMetadata() {
+	events := sortedStorageEvents(ctx.checked.Storage)
+	for _, event := range events {
+		for _, layout := range event.Layouts {
+			ctx.program.StorageEvents = append(ctx.program.StorageEvents, EventLayout{
+				Module: event.Module,
+				Name: event.Name,
+				EventTypeID: event.EventTypeID,
+				LayoutID: layout.ID,
+				Current: layout.Current,
+				EncoderSymbol: symbolName("event_encode", event.Module, event.Name, "layout_"+strconv.FormatUint(layout.ID, 10)),
+			})
+		}
+	}
+}
+```
+
+- [ ] **Step 1: Add failing lowering metadata test**
+
+Add `TestLowerStorageEventMetadata` to `compiler/ir/storage_metadata_test.go`. It must call `checkedStorageProgramForTest`, lower it, and assert the first event layout is `app.FileCreated`, `event_type_id=1001`, `layout_id=1`, `current=true`, and encoder symbol `_wrela_storage_event_app_FileCreated_layout_1_encode`.
+
+Run: `go test ./compiler/ir -run TestLowerStorageEventMetadata -v`
+
+Expected: FAIL because `program.StorageEvents` is empty.
+
+- [ ] **Step 2: Implement lowering**
+
+Call `ctx.lowerStorageMetadata()` in `Lower` after type info initialization and before source methods.
+
+Run: `go test ./compiler/ir -run TestLowerStorageEventMetadata -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add compiler/ir/lower.go compiler/ir/storage_metadata_test.go
+git commit -m "feat: lower storage metadata -Codex Automated"
+```
+
+### Task 15: Event Encoder IR
+
+**Prerequisite:** Task 14.
 
 **Files:**
 
 - Modify: `compiler/ir/ir.go`
 - Modify: `compiler/ir/lower.go`
-- Create: `compiler/ir/storage_test.go`
-- Modify: `compiler/codegen/x64.go`
-- Create: `compiler/codegen/storage_test.go`
+- Create: `compiler/ir/storage_encoder_test.go`
 
-**Description:** Lower semantic event/projection metadata into IR and emit compiler-generated encoder functions for current event layouts. Generated encoders write the 64-byte header and the current payload layout into caller-provided slot bytes without reflection, maps, or heap allocation.
+**Description:** Generate encoder IR for current event layouts. This task creates IR operations only; x64 emission lands in Task 18.
 
 **Acceptance Criteria:**
 
-- `ir.Program` includes `StorageEvents []EventLayout` and `StorageProjections []ProjectionLayout`.
-- Event metadata ordering is deterministic by `(module, name, layout_id)`.
-- Each current event layout gets an encoder symbol named `_wrela_event_encode_<module>_<event>_layout_<id>`.
-- Codegen emits stores for event header offsets defined in Section 1.
-- Payload writes begin at offset `64`.
-- Payload size greater than `448` emits `SEM0121`.
-- Codegen tests prove event type ID and payload layout ID immediates are present in generated bytes.
+- `StorageSlotStore` operation exists.
+- Encoder functions write all fixed header fields except checksum.
+- Payload writes start at offset `64`.
+- Encoder emits zero-fill operation for unused payload bytes.
 
 **Code Examples:**
 
-Add IR structs:
-
 ```go
-type EventLayout struct {
-	Module        string
-	Name          string
-	EventTypeID   uint64
-	LayoutID      uint64
-	Current       bool
-	PayloadSize   uint64
-	PayloadAlign  uint64
-	EncoderSymbol string
-	DecoderSymbol string
-}
-
-type ProjectionLayout struct {
-	Module       string
-	Name         string
-	ProjectionID uint64
-	LayoutID     uint64
-	Current      bool
-	Containers   []ProjectionContainer
-}
-
-type ProjectionContainer struct {
-	Name string
-	Kind string
+type StorageSlotStore struct {
+	Slot Value
+	Offset uint64
+	Value Value
 	Type Type
 }
 
-type StorageSlotStore struct {
-	Slot   Value
-	Offset uint64
-	Value  Value
-	Type   Type
-}
-
 func (*StorageSlotStore) isOperation() {}
-```
 
-Add to `Program`:
-
-```go
-type Program struct {
-	Entry              EntryAdapter
-	Functions          []Function
-	AsmMethods         []AsmMethod
-	Types              map[string]TypeInfo
-	StorageEvents      []EventLayout
-	StorageProjections []ProjectionLayout
+type StoragePayloadZero struct {
+	Slot Value
+	Offset uint64
+	Length uint64
 }
+
+func (*StoragePayloadZero) isOperation() {}
 ```
 
-Lowering example:
+- [ ] **Step 1: Add failing encoder IR test**
+
+Assert generated encoder contains stores at offsets `0, 8, 16, 24, 28, 32, 36, 40, 44, 52, 54, 56`.
+
+Run: `go test ./compiler/ir -run TestStorageEventEncoderIRStoresHeaderFields -v`
+
+Expected: FAIL with missing operation type or empty encoder body.
+
+- [ ] **Step 2: Add IR operations**
+
+Add `StorageSlotStore` and `StoragePayloadZero` to `compiler/ir/ir.go`. Extend the deterministic value traversal helper so it visits `StorageSlotStore.Slot`, `StorageSlotStore.Value`, and `StoragePayloadZero.Slot` in that order.
+
+Run: same command.
+
+Expected: FAIL because lowering still lacks operations.
+
+- [ ] **Step 3: Generate encoder functions**
+
+Implement `lowerEventEncoder` and append functions for current layouts.
+
+Run: `go test ./compiler/ir -run TestStorageEventEncoderIRStoresHeaderFields -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/ir/ir.go compiler/ir/lower.go compiler/ir/storage_encoder_test.go
+git commit -m "feat: generate storage event encoder ir -Codex Automated"
+```
+
+### Task 16: Codegen Test Harness For Storage Encoders
+
+**Prerequisite:** Task 15.
+
+**Files:**
+
+- Create: `compiler/codegen/storage_testutil_test.go`
+- Create: `compiler/codegen/storage_encoder_test.go`
+
+**Description:** Create codegen helpers only. The production codegen behavior test is added in Task 17 so this task can commit with a green repository.
+
+**Acceptance Criteria:**
+
+- `storageEncoderProgramForCodegenTest` builds an `ir.Program` with one encoder function.
+- `findTextUnit` returns a compiled text unit by symbol.
+- Harness tests pass without requiring `StorageSlotStore` x64 emission.
+
+**Code Examples:**
 
 ```go
-func (ctx *lowerContext) lowerStorageEvents() {
-	events := make([]sem.EventInfo, 0, len(ctx.checked.Storage.EventsByKey))
-	for _, event := range ctx.checked.Storage.EventsByKey {
-		events = append(events, event)
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].Module != events[j].Module {
-			return events[i].Module < events[j].Module
+func findTextUnit(t *testing.T, image Image, symbol string) Section {
+	t.Helper()
+	for _, section := range image.Sections {
+		if section.Name == ".text."+symbol {
+			return section
 		}
-		return events[i].Name < events[j].Name
-	})
-	for _, event := range events {
-		for _, layout := range event.Layouts {
-			symbol := symbolName("event_encode", event.Module, event.Name, "layout_"+strconv.FormatUint(layout.ID, 10))
-			ctx.program.StorageEvents = append(ctx.program.StorageEvents, EventLayout{
-				Module: event.Module, Name: event.Name, EventTypeID: event.ID,
-				LayoutID: layout.ID, Current: layout.Current, EncoderSymbol: symbol,
-			})
-			if layout.Current {
-				ctx.program.Functions = append(ctx.program.Functions, ctx.lowerEventEncoder(event, layout, symbol))
-			}
-		}
 	}
+	t.Fatalf("missing text unit %s", symbol)
+	return Section{}
 }
 ```
 
-Encoder IR body example:
+- [ ] **Step 1: Add failing harness test**
+
+Add `TestStorageEncoderCodegenHarnessBuildsProgram`:
 
 ```go
-func (ctx *lowerContext) lowerEventEncoder(event sem.EventInfo, layout sem.EventLayoutInfo, symbol string) Function {
-	slot := Param{Symbol: "slot", Type: Type{Name: "MutableBytes", Module: "machine.x86_64.executor_memory", Kind: TypeKindData}}
-	eventValue := Param{Symbol: "event", Type: Type{Name: event.Name, Module: event.Module, Kind: TypeKindData}}
-	eventType := &ConstInt{Symbol: "event_type_id", Value: event.ID, Type: Type{Name: "U64", Kind: TypeKindPrimitive}}
-	layoutID := &ConstInt{Symbol: "payload_layout_id", Value: layout.ID, Type: Type{Name: "U64", Kind: TypeKindPrimitive}}
-	return Function{
-		Symbol: symbol,
-		Return: Type{Name: "void", Kind: TypeKindPrimitive},
-		Params: []Value{slot, eventValue},
-		Blocks: []Block{{Label: "entry", Ops: []Operation{
-			eventType,
-			layoutID,
-			&StorageSlotStore{Slot: slot, Offset: 24, Value: eventType, Type: Type{Name: "U32", Kind: TypeKindPrimitive}},
-			&StorageSlotStore{Slot: slot, Offset: 28, Value: layoutID, Type: Type{Name: "U32", Kind: TypeKindPrimitive}},
-			&Return{},
-		}}},
-	}
-}
-```
-
-Add IR test:
-
-```go
-func TestLowerStorageEventMetadata(t *testing.T) {
-	checked := checkedStorageProgramForTest(t)
-	program, ds := Lower(checked)
-	if len(ds) != 0 {
-		t.Fatalf("lower diagnostics: %#v", ds)
-	}
-	if len(program.StorageEvents) != 1 {
-		t.Fatalf("storage events = %#v, want one", program.StorageEvents)
-	}
-	ev := program.StorageEvents[0]
-	if ev.EventTypeID != 17 || ev.LayoutID != 1 || !ev.Current || ev.EncoderSymbol == "" {
-		t.Fatalf("event metadata = %#v", ev)
-	}
-}
-```
-
-Add codegen test:
-
-```go
-func TestStorageEventEncoderWritesStableIds(t *testing.T) {
+func TestStorageEncoderCodegenHarnessBuildsProgram(t *testing.T) {
 	program := storageEncoderProgramForCodegenTest()
-	img, ds := Compile(program)
-	if len(ds) != 0 {
-		t.Fatalf("Compile diagnostics: %#v", ds)
+	if len(program.Functions) != 1 {
+		t.Fatalf("functions = %d, want 1", len(program.Functions))
 	}
-	unit := findTextUnit(t, img, "_wrela_event_encode_storage_test_FileRenamed_layout_1")
-	if !bytes.Contains(unit.Bytes, []byte{0x11, 0x00, 0x00, 0x00}) {
-		t.Fatalf("encoder must contain event_type_id 17 immediate: %#x", unit.Bytes)
-	}
-	if !bytes.Contains(unit.Bytes, []byte{0x01, 0x00, 0x00, 0x00}) {
-		t.Fatalf("encoder must contain layout id 1 immediate: %#x", unit.Bytes)
+	if program.Functions[0].Symbol == "" {
+		t.Fatalf("encoder symbol must not be empty")
 	}
 }
 ```
 
-Verification:
+Run: `go test ./compiler/codegen -run TestStorageEncoderCodegenHarnessBuildsProgram -v`
+
+Expected: FAIL with undefined `storageEncoderProgramForCodegenTest`.
+
+- [ ] **Step 2: Implement helpers**
+
+Implement `storageEncoderProgramForCodegenTest` and `findTextUnit`.
+
+Run: `go test ./compiler/codegen -run TestStorageEncoderCodegenHarnessBuildsProgram -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit green harness**
 
 ```bash
-go test ./compiler/ir -run TestLowerStorageEventMetadata -v
-go test ./compiler/codegen -run TestStorageEventEncoderWritesStableIds -v
-go test ./compiler/ir ./compiler/codegen -v
 git diff --check
+git add compiler/codegen/storage_testutil_test.go compiler/codegen/storage_encoder_test.go
+git commit -m "test: add storage encoder codegen harness -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 17: Codegen For Event Encoder Header Stores
 
-Commit:
+**Prerequisite:** Task 16.
+
+**Files:**
+
+- Modify: `compiler/codegen/x64.go`
+- Modify: `compiler/codegen/storage_encoder_test.go`
+
+**Description:** Emit little-endian stores for `StorageSlotStore` and zero fill for `StoragePayloadZero`.
+
+**Acceptance Criteria:**
+
+- Generated code uses field offsets from IR.
+- Test asserts stores are emitted for offsets 24 and 28 by decoding instructions or checking relocation-free generated operation metadata from a helper, not by searching for common byte patterns.
+- Payload zero fill emits stores or a bounded loop over bytes 64..511.
+
+**Code Examples:**
+
+```go
+case *ir.StorageSlotStore:
+	e.emitValueToReg(v.Value, asm.MustLookup("rax"), frame)
+	e.emitValueToReg(v.Slot, asm.MustLookup("r11"), frame)
+	emitStoreRegAtOffset(e, asm.MustLookup("r11"), int64(v.Offset), asm.MustLookup("rax"), v.Type)
+```
+
+- [ ] **Step 1: Add failing codegen test**
+
+Add `TestStorageSlotStoreCodegen` to `compiler/codegen/storage_encoder_test.go`. The test must compile `storageEncoderProgramForCodegenTest`, call `findTextUnit`, and assert the generated metadata contains slot stores at offsets `24` and `28`.
+
+Run: `go test ./compiler/codegen -run TestStorageSlotStoreCodegen -v`
+
+Expected: FAIL with unsupported operation.
+
+- [ ] **Step 2: Implement `StorageSlotStore` emitter**
+
+Add a `compileFunction` operation case and this helper signature in `compiler/codegen/x64.go`:
+
+```go
+func emitStoreRegAtOffset(e *Emitter, base asm.Reg, offset int64, value asm.Reg, typ ir.Type) {
+	width := e.ctx.storageSizeForType(typ) * 8
+	if width == 0 {
+		width = valueWidthBitsFromType(typ.Name)
+	}
+	emitStoreMemFromReg(e, base, offset, value, width)
+}
+```
+
+Run: `go test ./compiler/codegen -run TestStorageSlotStoreCodegen -v`
+
+Expected: PASS for header stores, FAIL for zero fill if not implemented.
+
+- [ ] **Step 3: Implement `StoragePayloadZero` emitter**
+
+Emit a fixed bounded loop or unrolled stores for the requested length.
+
+Run: `go test ./compiler/codegen -run TestStorageSlotStoreCodegen -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add compiler/ir/ir.go compiler/ir/lower.go compiler/ir/storage_test.go compiler/codegen/x64.go compiler/codegen/storage_test.go
-git commit -m "feat: lower durable event metadata -Codex Automated"
+git diff --check
+git add compiler/codegen/x64.go compiler/codegen/storage_encoder_test.go
+git commit -m "feat: emit storage event encoder stores -Codex Automated"
+```
+
+### Task 18: Event Encoder CRC Operation
+
+**Prerequisites:** Tasks 2 and 17.
+
+**Files:**
+
+- Modify: `compiler/ir/ir.go`
+- Modify: `compiler/ir/lower.go`
+- Modify: `compiler/codegen/x64.go`
+- Modify: `compiler/ir/storage_encoder_test.go`
+- Modify: `compiler/codegen/storage_encoder_test.go`
+
+**Description:** Add checksum calculation as an explicit IR/codegen operation. Use Castagnoli CRC32C and write the little-endian digest at offset 48.
+
+**Acceptance Criteria:**
+
+- Encoder zeroes checksum bytes before computing CRC.
+- CRC32C vector matches `0xE3069283`.
+- Encoded slot with fixed fields has the same checksum in `compiler/storagefmt` and generated code test harness.
+
+**Code Examples:**
+
+```go
+type StorageCRC32C struct {
+	Slot Value
+	Length uint64
+	Type Type
+}
+
+func (*StorageCRC32C) isValue() {}
+func (*StorageCRC32C) isOperation() {}
+```
+
+- [ ] **Step 1: Add failing IR CRC test**
+
+Run: `go test ./compiler/ir -run TestStorageEventEncoderComputesCRC32C -v`
+
+Expected: FAIL because `StorageCRC32C` is undefined.
+
+- [ ] **Step 2: Add IR operation and lowering**
+
+Insert checksum zero stores, `StorageCRC32C`, and checksum field store.
+
+Run: `go test ./compiler/ir -run TestStorageEventEncoderComputesCRC32C -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add failing codegen CRC test**
+
+Run: `go test ./compiler/codegen -run TestStorageCRC32CCodegen -v`
+
+Expected: FAIL because codegen does not emit CRC.
+
+- [ ] **Step 4: Implement codegen CRC fallback**
+
+Use a small generated helper symbol `_wrela_crc32c_castagnoli` with table-free bitwise fallback for v1. The helper must use reflected polynomial `0x82F63B78`.
+
+Run:
+
+```bash
+go test ./compiler/codegen -run 'TestStorage(CRC32C|SlotStore)' -v
+go test ./compiler/storagefmt -run TestCRC32CVector -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --check
+git add compiler/ir/ir.go compiler/ir/lower.go compiler/codegen/x64.go compiler/ir/storage_encoder_test.go compiler/codegen/storage_encoder_test.go
+git commit -m "feat: emit storage crc32c checksum -Codex Automated"
 ```
 
 ---
 
-## 6. Phase 3: Paired-Core Link And NVMe Driver
+## 7. Phase 2: Runtime Format, Event Log, Streams, And Writer
 
-**Description:** This phase adds the permanent foreground/maintenance communication primitive and the minimal interrupt-driven NVMe driver. The event store consumes `NvmeIoPath` capabilities; it never exposes a generic ambient block device API.
-
-**Acceptance Criteria:**
-
-- Core links are SPSC descriptor pairs with explicit endpoint ownership and wake metadata.
-- NVMe claims class `0x01`, subclass `0x08`, programming interface `0x02`.
-- Foreground and background storage paths each own one NVMe IO queue pair.
-- Completions are interrupt-driven through driver path interrupt receivers.
-- Identify parsing chooses namespace mode, active LBA size, durability mode, and queue features.
-
-**Phase Code Example:**
-
-```wrela
-let foreground_path = nvme.create_io_path(
-    identity = PathIdentity(label = "storage.foreground"),
-    owner = foreground_slot,
-    role = NvmePathRole(role = NVME_PATH_FOREGROUND),
-    route = foreground_route,
-    irq = foreground_completion_topic.publisher()
-)
-```
-
-### Task 7: CoreLink Source And Ownership Checks
-
-**Files:**
-
-- Create: `wrela/machine/x86_64/core_link.wrela`
-- Create: `compiler/sem/core_link_test.go`
-- Modify: `compiler/sem/image_graph.go`
-- Modify: `compiler/sem/check.go`
-- Modify: `compiler/sem/report.go`
-- Modify: `compiler/report/report.go`
-- Modify: `compiler/report/report_test.go`
-
-**Description:** Add a typed paired-core link for foreground/maintenance descriptor passing. This is not a broadcast topic. Each direction has one producer and one consumer, and both endpoints are boot-wired to executor slots.
+**Description:** This phase mirrors the behavior-tested Go contracts into Wrela source and adds the single-writer append path.
 
 **Acceptance Criteria:**
 
-- `CoreLink<A, B>` exposes `a_to_b_producer`, `a_to_b_consumer`, `b_to_a_producer`, and `b_to_a_consumer`.
-- Endpoint construction records owner slot labels in the image graph.
-- Using one producer from two executors emits `SEM0112`.
-- Using one consumer from the wrong executor emits `SEM0112`.
-- Report output includes core-link labels, endpoint owners, depths, and wake strategies.
+- Runtime source constants match `compiler/storagefmt`.
+- Append-log `event_id` values start at `0`.
+- A first two-event group reports `last_event_id = 1`.
 
-**Code Examples:**
+### Task 19: Wrela Storage Format Source
 
-Create `wrela/machine/x86_64/core_link.wrela`:
-
-```wrela
-module machine.x86_64.core_link
-
-use { Option, Result, Unit } from wrela.lang.core
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { WakeStrategy } from machine.x86_64.executor_loop
-use { Slots } from machine.x86_64.executor_memory
-
-data CoreLinkIdentity {
-    label: StringLiteral
-}
-
-data CoreLinkEndpointIdentity {
-    label: StringLiteral
-}
-
-data CoreLinkFull {}
-
-class CoreSpscProducer<T> {
-    identity: CoreLinkEndpointIdentity
-    owner: ExecutorSlot
-    peer: ExecutorSlot
-    slots: Slots<T>
-    capacity: U64
-    head: U64
-    tail: U64
-    credits: U64
-    wake_strategy: WakeStrategy
-
-    asm fn try_send(self, value: T) -> Result<Unit, CoreLinkFull> {
-        ret
-    }
-}
-
-class CoreSpscConsumer<T> {
-    identity: CoreLinkEndpointIdentity
-    owner: ExecutorSlot
-    peer: ExecutorSlot
-    slots: Slots<T>
-    capacity: U64
-    head: U64
-    tail: U64
-    wait_armed: Bool
-    wake_strategy: WakeStrategy
-
-    asm fn try_recv(self) -> Option<T> {
-        ret
-    }
-
-    fn arm_wait(self) {
-        self.wait_armed = true
-    }
-
-    fn is_wait_armed(self) -> Bool {
-        return self.wait_armed
-    }
-}
-
-data CoreLink<A, B> {
-    identity: CoreLinkIdentity
-    a_slot: ExecutorSlot
-    b_slot: ExecutorSlot
-    a_to_b_producer: CoreSpscProducer<A>
-    a_to_b_consumer: CoreSpscConsumer<A>
-    b_to_a_producer: CoreSpscProducer<B>
-    b_to_a_consumer: CoreSpscConsumer<B>
-}
-```
-
-Add graph node:
-
-```go
-type CoreLinkEndpointNode struct {
-	Label     string
-	Direction string
-	Role      string
-	Owner     string
-	Peer      string
-	Depth     uint64
-	Span      source.Span
-}
-```
-
-Add semantic test:
-
-```go
-func TestCoreLinkEndpointsRecordOwners(t *testing.T) {
-	checked, ds := checkUEFIModulesWithExtraSource(t, "core-link-storage.wrela", `
-module examples.core_link_storage
-use { CoreLinkIdentity, CoreLinkEndpointIdentity, CoreSpscProducer, CoreSpscConsumer } from machine.x86_64.core_link
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { WakeStrategy } from machine.x86_64.executor_loop
-use { Slots } from machine.x86_64.executor_memory
-data CommittedAtomicGroup { first_event_id: U64; last_event_id: U64 }
-data MaintenanceProposal { kind: U64 }
-data Wiring {
-    fg: CoreSpscProducer<CommittedAtomicGroup>
-    bg: CoreSpscConsumer<CommittedAtomicGroup>
-}
-`)
-	if len(ds) != 0 {
-		t.Fatalf("diagnostics: %#v", ds)
-	}
-	if checked == nil {
-		t.Fatalf("checked program must not be nil")
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/sem -run TestCoreLinkEndpointsRecordOwners -v
-go test ./compiler/report -run CoreLink -v
-go test ./compiler/sem ./compiler/report -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/machine/x86_64/core_link.wrela compiler/sem/core_link_test.go compiler/sem/image_graph.go compiler/sem/check.go compiler/sem/report.go compiler/report/report.go compiler/report/report_test.go
-git commit -m "feat: add paired core storage links -Codex Automated"
-```
-
-### Task 8: NVMe Source Surface And PCI Claim Shape
-
-**Files:**
-
-- Create: `wrela/machine/x86_64/nvme.wrela`
-- Create: `compiler/sem/nvme_contract_test.go`
-- Modify: `compiler/sem/check.go`
-- Modify: `compiler/sem/image_graph.go`
-- Modify: `compiler/sem/report.go`
-
-**Description:** Add the NVMe driver and driver path source surface. The driver claims a PCI NVMe function and returns path capabilities for foreground and background storage IO.
-
-**Acceptance Criteria:**
-
-- `NvmeDriver.initialize(device: PciDevice) -> NvmeDriver` exists.
-- `NvmeDriver.create_io_path` returns `NvmeIoPath`.
-- `NvmeIoPath` is a `driver path` with an `interrupt receiver -> NvmeCompletionInterrupt`.
-- `NvmeNamespace` stores namespace ID, LBA size, block count, ZNS support, FUA support, and atomic write unit fields.
-- Source contains class match constants for NVMe PCI: base class `0x01`, subclass `0x08`, prog-if `0x02`.
-- Semantic graph records hardware claim key `pci:nvme:<segment>:<bus>:<device>:<function>`.
-
-**Code Examples:**
-
-Create the opening of `wrela/machine/x86_64/nvme.wrela`:
-
-```wrela
-module machine.x86_64.nvme
-
-use { DmaBuffer } from platform.hardware.memory
-use { MmioRegion } from platform.hardware.bytes
-use { BootPanic } from platform.hardware.panic
-use { PciDevice, PciInterruptRoute } from machine.x86_64.pci
-use { PathIdentity, DriverMemory } from machine.x86_64.cpu_state
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { TopicPublisher } from machine.x86_64.topic
-use { Result, Unit } from wrela.lang.core
-
-const NVME_CLASS_MASS_STORAGE: U64 = 0x01
-const NVME_SUBCLASS_NVM: U64 = 0x08
-const NVME_PROGIF_EXPRESS: U64 = 0x02
-const NVME_PATH_FOREGROUND: U64 = 1
-const NVME_PATH_BACKGROUND: U64 = 2
-
-data NvmeNamespace {
-    namespace_id: U32
-    logical_block_size: U64
-    block_count: U64
-    zone_size_blocks: U64
-    supports_zns: Bool
-    supports_fua: Bool
-    atomic_write_unit_blocks: U32
-    power_fail_atomic_write_unit_blocks: U32
-    volatile_write_cache: Bool
-}
-
-data NvmeCompletionEntry {
-    command_id: U16
-    status: U16
-    result: U64
-}
-
-data NvmeSubmission {
-    command_id: U16
-}
-
-data NvmeCompletionInterrupt {
-    queue_id: U16
-    completed_count: U16
-}
-
-data NvmePathRole {
-    role: U64
-}
-```
-
-Add driver/path shape:
-
-```wrela
-data NvmeControllerRegisters {
-    mmio: MmioRegion
-    panic: BootPanic
-
-    fn cap_low(self) -> U32 { return self.mmio.read32(offset = 0x00) }
-    fn cap_high(self) -> U32 { return self.mmio.read32(offset = 0x04) }
-    fn version(self) -> U32 { return self.mmio.read32(offset = 0x08) }
-    fn controller_config(self) -> U32 { return self.mmio.read32(offset = 0x14) }
-    fn write_controller_config(self, value: U32) { self.mmio.write32(offset = 0x14, value = value) }
-    fn controller_status(self) -> U32 { return self.mmio.read32(offset = 0x1C) }
-    fn write_admin_queue_attrs(self, value: U32) { self.mmio.write32(offset = 0x24, value = value) }
-    fn write_admin_submission_queue(self, low: U32, high: U32) {
-        self.mmio.write32(offset = 0x28, value = low)
-        self.mmio.write32(offset = 0x2C, value = high)
-    }
-    fn write_admin_completion_queue(self, low: U32, high: U32) {
-        self.mmio.write32(offset = 0x30, value = low)
-        self.mmio.write32(offset = 0x34, value = high)
-    }
-    fn ring_submission_doorbell(self, queue_id: U16, tail: U16) {
-        self.mmio.write32(offset = 0x1000 + (queue_id << 3), value = tail)
-    }
-    fn ring_completion_doorbell(self, queue_id: U16, head: U16) {
-        self.mmio.write32(offset = 0x1000 + (queue_id << 3) + 4, value = head)
-    }
-}
-
-unique driver NvmeDriver {
-    registers: NvmeControllerRegisters
-    memory: DriverMemory
-    namespace: NvmeNamespace
-
-    fn initialize(self, device: PciDevice) -> NvmeDriver
-    fn create_io_path(
-        self,
-        identity: PathIdentity,
-        owner: ExecutorSlot,
-        role: NvmePathRole,
-        route: PciInterruptRoute,
-        irq: TopicPublisher<NvmeCompletionInterrupt>
-    ) -> NvmeIoPath
-}
-
-driver path NvmeIoPath {
-    identity: PathIdentity
-    owner: ExecutorSlot
-    role: NvmePathRole
-    registers: NvmeControllerRegisters
-    namespace: NvmeNamespace
-    route: PciInterruptRoute
-    irq: TopicPublisher<NvmeCompletionInterrupt>
-
-    interrupt receiver -> NvmeCompletionInterrupt
-
-    fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U64, into: DmaBuffer<U8>) -> NvmeSubmission
-    fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U64, from: DmaBuffer<U8>, fua: Bool) -> NvmeSubmission
-    fn submit_flush(self, namespace_id: U32) -> NvmeSubmission
-    fn submit_zone_append(self, namespace_id: U32, zone_start_lba: U64, block_count: U64, from: DmaBuffer<U8>) -> NvmeSubmission
-    fn ack_completed(self, event: NvmeCompletionInterrupt)
-}
-```
-
-Add semantic source-shape test:
-
-```go
-func TestNvmeSourceContract(t *testing.T) {
-	modules := parseUEFIModuleSet(t)
-	index, ds := BuildIndex(modules)
-	if len(ds) != 0 {
-		t.Fatalf("build index diagnostics: %#v", ds)
-	}
-	driver := moduleType(t, index, "machine.x86_64.nvme", "NvmeDriver")
-	assertMethodExists(t, driver, "initialize")
-	assertMethodExists(t, driver, "create_io_path")
-	path := moduleType(t, index, "machine.x86_64.nvme", "NvmeIoPath")
-	assertMethodExists(t, path, "submit_read")
-	assertMethodExists(t, path, "submit_write")
-	assertMethodExists(t, path, "submit_flush")
-	assertMethodExists(t, path, "submit_zone_append")
-	ns := moduleType(t, index, "machine.x86_64.nvme", "NvmeNamespace")
-	for _, field := range []string{"logical_block_size", "supports_zns", "supports_fua", "power_fail_atomic_write_unit_blocks", "volatile_write_cache"} {
-		_ = fieldTypeName(t, ns, field)
-	}
-	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
-	for _, want := range []string{"0x01", "0x08", "0x02", "interrupt receiver -> NvmeCompletionInterrupt"} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("nvme source missing %q", want)
-		}
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/sem -run TestNvmeSourceContract -v
-go test ./compiler/sem -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/machine/x86_64/nvme.wrela compiler/sem/nvme_contract_test.go compiler/sem/check.go compiler/sem/image_graph.go compiler/sem/report.go
-git commit -m "feat: add nvme driver source contract -Codex Automated"
-```
-
-### Task 9: NVMe Identify Parsing And Durability Mode Selection
-
-**Files:**
-
-- Modify: `wrela/machine/x86_64/nvme.wrela`
-- Create: `compiler/sem/nvme_identify_test.go`
-- Create: `compiler/ir/nvme_test.go`
-
-**Description:** Implement the minimum controller initialization metadata path: controller reset/ready waits, admin queue setup shape, Identify Controller, Identify Namespace, active LBA size parsing, namespace mode parsing, and durability mode selection.
-
-**Acceptance Criteria:**
-
-- Active LBA size 512 selects `NVME_LBA_SIZE_512`.
-- Active LBA size 4096 selects `NVME_LBA_SIZE_4096`.
-- Any active LBA size below 512 or not divisible by 512 records unsupported v1 storage and maps to `SEM0122` in compile-time source checks or boot panic in runtime paths.
-- Volatile write cache plus no FUA selects write-plus-flush mode.
-- FUA support selects FUA mode.
-- Power-fail atomic write unit large enough for the batch is recorded separately from FUA/flush.
-- Identify parsing does not poll completion queues for command completion outside bounded controller-ready waits.
-
-**Code Examples:**
-
-Add durability constants:
-
-```wrela
-const NVME_DURABILITY_WRITE_PLUS_FLUSH: U64 = 1
-const NVME_DURABILITY_FUA: U64 = 2
-const NVME_DURABILITY_PFAIL_ATOMIC_FUA: U64 = 3
-const NVME_NAMESPACE_CONVENTIONAL: U64 = 1
-const NVME_NAMESPACE_ZONED: U64 = 2
-const NVME_LBA_SIZE_512: U64 = 512
-const NVME_LBA_SIZE_4096: U64 = 4096
-
-data NvmeDurabilityMode {
-    mode: U64
-    requires_flush: Bool
-    use_fua: Bool
-    power_fail_atomic_write_unit_blocks: U32
-}
-
-data NvmeIdentifyFacts {
-    namespace: NvmeNamespace
-    durability: NvmeDurabilityMode
-    namespace_mode: U64
-}
-```
-
-Add mode selection:
-
-```wrela
-data NvmeDurabilitySelector {
-    panic: BootPanic
-
-    fn choose(self, namespace: NvmeNamespace, target_batch_blocks: U32) -> NvmeDurabilityMode {
-        if namespace.logical_block_size != 512 {
-            if namespace.logical_block_size != 4096 {
-                self.panic.fail(code = 0xAC080122)
-            }
-        }
-        let pf_atomic = namespace.power_fail_atomic_write_unit_blocks >= target_batch_blocks
-        if pf_atomic {
-            if namespace.supports_fua {
-                return NvmeDurabilityMode(mode = NVME_DURABILITY_PFAIL_ATOMIC_FUA, requires_flush = false, use_fua = true, power_fail_atomic_write_unit_blocks = namespace.power_fail_atomic_write_unit_blocks)
-            }
-        }
-        if namespace.supports_fua {
-            return NvmeDurabilityMode(mode = NVME_DURABILITY_FUA, requires_flush = false, use_fua = true, power_fail_atomic_write_unit_blocks = namespace.power_fail_atomic_write_unit_blocks)
-        }
-        return NvmeDurabilityMode(mode = NVME_DURABILITY_WRITE_PLUS_FLUSH, requires_flush = true, use_fua = false, power_fail_atomic_write_unit_blocks = namespace.power_fail_atomic_write_unit_blocks)
-    }
-}
-```
-
-Add semantic test:
-
-```go
-func TestNvmeDurabilityModeSourceShape(t *testing.T) {
-	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
-	for _, want := range []string{
-		"NVME_DURABILITY_WRITE_PLUS_FLUSH",
-		"NVME_DURABILITY_FUA",
-		"NVME_DURABILITY_PFAIL_ATOMIC_FUA",
-		"namespace.logical_block_size != 512",
-		"namespace.logical_block_size != 4096",
-		"namespace.supports_fua",
-		"requires_flush = true",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("nvme identify source missing %q", want)
-		}
-	}
-}
-```
-
-Add IR test for no polling helper:
-
-```go
-func TestNvmeCompletionContractHasNoPollingPath(t *testing.T) {
-	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
-	for _, forbidden := range []string{"poll_completion", "spin_until_complete", "completion_status_loop"} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("nvme source must not contain polling completion helper %q", forbidden)
-		}
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/sem -run TestNvmeDurabilityModeSourceShape -v
-go test ./compiler/ir -run TestNvmeCompletionContractHasNoPollingPath -v
-go test ./compiler/sem ./compiler/ir -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/machine/x86_64/nvme.wrela compiler/sem/nvme_identify_test.go compiler/ir/nvme_test.go
-git commit -m "feat: select nvme namespace durability mode -Codex Automated"
-```
-
-### Task 10: NVMe Queue Pair Submission And Interrupt Completion
-
-**Files:**
-
-- Modify: `wrela/machine/x86_64/nvme.wrela`
-- Create: `compiler/codegen/nvme_test.go`
-- Modify: `compiler/sem/nvme_contract_test.go`
-
-**Description:** Implement PRP-only bounded queue submission and interrupt-driven completion publication. Larger blob transfers are split by higher storage code into chunks no larger than `131072` bytes.
-
-**Acceptance Criteria:**
-
-- Foreground and background queue pair structs include submission/completion DMA buffers, head/tail, phase bit, queue ID, depth, and next command ID.
-- `submit_read`, `submit_write`, `submit_flush`, and `submit_zone_append` allocate command IDs and ring the submission doorbell.
-- `submit_write` with `fua = true` sets the NVMe FUA bit in command dword 12.
-- Interrupt receiver drains completion entries until phase mismatch, advances completion head, rings completion doorbell, publishes one `NvmeCompletionInterrupt` with count.
-- Completion correlation is by `command_id`.
-- No code path exposes arbitrary user block writes as application API.
-
-**Code Examples:**
-
-Add queue pair shape:
-
-```wrela
-data NvmeQueuePair {
-    queue_id: U16
-    depth: U16
-    submission: DmaBuffer<U8>
-    completion: DmaBuffer<U8>
-    submission_tail: U16
-    completion_head: U16
-    completion_phase: Bool
-    next_command_id: U16
-}
-
-data NvmeCommandStatus {
-    command_id: U16
-    completed: Bool
-    status: U16
-    result: U64
-}
-```
-
-Add command ID helper:
-
-```wrela
-data NvmeQueuePairOps {
-    panic: BootPanic
-
-    fn next_command(self, queue: NvmeQueuePair) -> NvmeSubmission {
-        let id = queue.next_command_id
-        queue.next_command_id = queue.next_command_id + 1
-        if queue.next_command_id == 0 {
-            queue.next_command_id = 1
-        }
-        return NvmeSubmission(command_id = id)
-    }
-}
-```
-
-Write submission shape:
-
-```wrela
-fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U64, from: DmaBuffer<U8>, fua: Bool) -> NvmeSubmission {
-    let submission = NvmeQueuePairOps(panic = self.registers.panic).next_command(queue = self.queue)
-    let command_offset = self.queue.submission_tail * 64
-    self.write_command_header(offset = command_offset, opcode = 0x01, command_id = submission.command_id, namespace_id = namespace_id)
-    self.write_prp(offset = command_offset, buffer = from)
-    let flags = block_count - 1
-    if fua {
-        flags = flags | (1 << 30)
-    }
-    self.write_command_dword(offset = command_offset, dword = 10, value = start_lba & 0xFFFFFFFF)
-    self.write_command_dword(offset = command_offset, dword = 11, value = start_lba >> 32)
-    self.write_command_dword(offset = command_offset, dword = 12, value = flags)
-    self.queue.submission_tail = (self.queue.submission_tail + 1) % self.queue.depth
-    self.registers.ring_submission_doorbell(queue_id = self.queue.queue_id, tail = self.queue.submission_tail)
-    return submission
-}
-```
-
-Interrupt receiver shape:
-
-```wrela
-interrupt receiver -> NvmeCompletionInterrupt {
-    let completed = self.drain_completion_queue()
-    if completed != 0 {
-        self.registers.ring_completion_doorbell(queue_id = self.queue.queue_id, head = self.queue.completion_head)
-    }
-    return NvmeCompletionInterrupt(queue_id = self.queue.queue_id, completed_count = completed)
-}
-```
-
-Add codegen test:
-
-```go
-func TestNvmeSubmitWriteRingsSubmissionDoorbell(t *testing.T) {
-	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
-	for _, want := range []string{
-		"opcode = 0x01",
-		"flags = flags | (1 << 30)",
-		"ring_submission_doorbell",
-		"ring_completion_doorbell",
-		"interrupt receiver -> NvmeCompletionInterrupt",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("nvme submission source missing %q", want)
-		}
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/codegen -run TestNvmeSubmitWriteRingsSubmissionDoorbell -v
-go test ./compiler/sem -run TestNvmeSourceContract -v
-go test ./compiler/codegen ./compiler/sem -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/machine/x86_64/nvme.wrela compiler/codegen/nvme_test.go compiler/sem/nvme_contract_test.go
-git commit -m "feat: add interrupt driven nvme queue pairs -Codex Automated"
-```
-
-### Task 11: Foreground And Background Storage Path Wiring
-
-**Files:**
-
-- Modify: `wrela/machine/x86_64/nvme.wrela`
-- Modify: `wrela/platform/hardware/discovery.wrela`
-- Create: `compiler/sem/storage_path_test.go`
-- Modify: `compiler/sem/check.go`
-- Modify: `compiler/sem/report.go`
-- Modify: `compiler/report/report.go`
-
-**Description:** Boot images can wire two NVMe paths: foreground for event append and hot reads, background for maintenance IO. The semantic checker enforces that the path owner matches the executor slot using it.
-
-**Acceptance Criteria:**
-
-- `ForegroundStoragePath` and `BackgroundStoragePath` are named role constants or wrappers over `NvmeIoPath`.
-- A foreground `StorageWriter` cannot be constructed with a background path.
-- A maintenance worker cannot submit maintenance IO through the foreground path.
-- Wrong owner slot emits `SEM0111`.
-- Report includes both path labels, queue IDs, role, owner slot, and interrupt vector.
-
-**Code Examples:**
-
-Add role wrappers:
-
-```wrela
-data ForegroundStoragePath {
-    path: NvmeIoPath
-}
-
-data BackgroundStoragePath {
-    path: NvmeIoPath
-}
-
-data NvmeStoragePaths {
-    foreground: ForegroundStoragePath
-    background: BackgroundStoragePath
-}
-```
-
-Add construction helpers:
-
-```wrela
-fn foreground_storage_path(self, path: NvmeIoPath) -> ForegroundStoragePath {
-    if path.role.role != NVME_PATH_FOREGROUND {
-        path.registers.panic.fail(code = 0xAC080111)
-    }
-    return ForegroundStoragePath(path = path)
-}
-
-fn background_storage_path(self, path: NvmeIoPath) -> BackgroundStoragePath {
-    if path.role.role != NVME_PATH_BACKGROUND {
-        path.registers.panic.fail(code = 0xAC080112)
-    }
-    return BackgroundStoragePath(path = path)
-}
-```
-
-Add semantic negative fixture `tests/fixtures/negative/storage_wrong_nvme_path_owner.wrela`:
-
-```wrela
-// expect: SEM0111: NVMe path storage.foreground is owned by foreground but used by maintenance
-module negative.storage_wrong_nvme_path_owner
-use { ExecutorSlot } from machine.x86_64.executor_slot
-use { ForegroundStoragePath } from machine.x86_64.nvme
-executor Maintenance {
-    slot: ExecutorSlot
-    path: ForegroundStoragePath
-    start fn run(self) -> never {
-        while true {}
-    }
-}
-```
-
-Add report assertion:
-
-```go
-func TestStoragePathsAppearInReport(t *testing.T) {
-	report := report.ImageReport{
-		Storage: report.StorageReport{
-			NvmePaths: []report.NvmePathReport{{
-				Label: "storage.foreground",
-				Role: "foreground",
-				Owner: "foreground",
-				QueueID: 1,
-				Vector: 0x50,
-			}},
-		},
-	}
-	if report.Storage.NvmePaths[0].Role != "foreground" {
-		t.Fatalf("storage path report = %#v", report.Storage.NvmePaths[0])
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/sem -run 'TestStoragePaths|TestNegativeFixtures' -v
-go test ./compiler/report -run TestStoragePathsAppearInReport -v
-go test ./compiler/sem ./compiler/report -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/machine/x86_64/nvme.wrela wrela/platform/hardware/discovery.wrela compiler/sem/storage_path_test.go compiler/sem/check.go compiler/sem/report.go compiler/report/report.go tests/fixtures/negative/storage_wrong_nvme_path_owner.wrela
-git commit -m "feat: wire foreground and background nvme paths -Codex Automated"
-```
-
----
-
-## 7. Phase 4: Disk Format, Event Log, Streams, And Writer
-
-**Description:** This phase adds the actual event-store storage format and the single-writer append path. The writer acknowledges only after the NVMe durability condition is satisfied.
-
-**Acceptance Criteria:**
-
-- Disk regions are deterministic and non-overlapping.
-- Superblocks are double-buffered and checksummed.
-- Hot event slots are exactly 512 bytes.
-- 4 KiB underfilled LBAs seal unused slots as reserved empty slots.
-- Atomic groups are never split across acknowledged durable batches.
-- Recovery stops at the first invalid tail and exposes only complete valid atomic groups.
-- Stream directory is rebuildable from events.
-
-**Phase Code Example:**
-
-```wrela
-let result = writer.append_atomic_group(group = group)
-match result {
-    StorageAppendResult.Accepted(token = token) -> self.last_commit = token.last_event_id
-    StorageAppendResult.Rejected(error = error) -> self.last_error = error.code
-}
-```
-
-### Task 12: Storage Format Source Contracts
+**Prerequisites:** Tasks 2 and 14.
 
 **Files:**
 
 - Create: `wrela/storage/format.wrela`
 - Create: `compiler/sem/storage_format_test.go`
-- Create: `compiler/ir/storage_format_test.go`
 
-**Description:** Define fixed source-level storage structs and constants for superblocks, regions, event slots, stream directory entries, segment metadata, and metrics.
+**Description:** Add Wrela source constants and structs for superblocks, regions, event slots, stream entries, segments, and metrics. Behavior remains covered by `compiler/storagefmt`; this task's compiler test verifies that Wrela code can import and typecheck the runtime format module.
 
 **Acceptance Criteria:**
 
-- Constants from Section 1 exist in `wrela/storage/format.wrela`.
-- `StorageSuperblock` includes store UUID, format version, generation, active namespace mode, active LBA size, region map root, segment map root, atomic group frontier, and checksum.
-- `StorageRegionMap` supports at least 16 entries.
-- `EventSlotHeader` field names match Section 1.
-- `StorageMetrics` contains every metric listed in the design's metrics section that is in v1 scope, including device media writes, estimated drive writes per day, payload utilization, payload overflow count, compressed lookup latency, and projection layout upcast count.
-- Source-shape tests verify constants and field names.
+- Constants match Section 1.
+- `StorageMetrics` includes every metric from Section 1 and the design metrics list.
+- `StreamDirectoryEntry` is 32 bytes by field shape.
+- Mirror-contract test compares exported Wrela constants against `compiler/storagefmt` constants by name and value.
 
 **Code Examples:**
-
-Create `wrela/storage/format.wrela`:
 
 ```wrela
 module storage.format
 
-const STORAGE_FORMAT_VERSION: U64 = 1
 const STORAGE_EVENT_SLOT_SIZE: U64 = 512
 const STORAGE_EVENT_HEADER_SIZE: U64 = 64
 const STORAGE_EVENT_PAYLOAD_BYTES: U64 = 448
-const STORAGE_TARGET_BATCH_SLOTS: U64 = 64
-const STORAGE_MAX_OVERFLOW_SLOTS: U64 = 8
-const STORAGE_MAX_BATCH_SLOTS: U64 = 72
-const STORAGE_MAX_ATOMIC_GROUP_SLOTS: U64 = 32
-const STORAGE_GROUP_COMMIT_TIMER_US: U64 = 2000
-const STORAGE_HOT_SEGMENT_SLOTS: U64 = 1048576
 const STORAGE_SLOT_RESERVED_EMPTY: U64 = 1
-
-data StorageUuid {
-    low: U64
-    high: U64
-}
-
-data StorageSuperblock {
-    store_uuid: StorageUuid
-    format_version: U64
-    generation: U64
-    active_namespace_mode: U64
-    active_lba_size: U64
-    region_map_root_lba: U64
-    segment_map_root_lba: U64
-    atomic_group_frontier: U64
-    checksum32: U32
-}
-
-data StorageRegionEntry {
-    kind: U64
-    start_lba: U64
-    block_count: U64
-    format_version: U64
-    flags: U64
-    checksum32: U32
-}
-
-data StorageRegionMap {
-    generation: U64
-    entry_count: U64
-    entry0: StorageRegionEntry
-    entry1: StorageRegionEntry
-    entry2: StorageRegionEntry
-    entry3: StorageRegionEntry
-    entry4: StorageRegionEntry
-    entry5: StorageRegionEntry
-    entry6: StorageRegionEntry
-    entry7: StorageRegionEntry
-    entry8: StorageRegionEntry
-    entry9: StorageRegionEntry
-    entry10: StorageRegionEntry
-    entry11: StorageRegionEntry
-    entry12: StorageRegionEntry
-    entry13: StorageRegionEntry
-    entry14: StorageRegionEntry
-    entry15: StorageRegionEntry
-}
 
 data EventSlotHeader {
     event_id: U64
@@ -2134,319 +2119,75 @@ data EventSlotHeader {
     reserved16: U16
     reserved64: U64
 }
-
-data StreamDirectoryEntry {
-    latest_sequence: U64
-    latest_event_id: U64
-    latest_checkpoint_ref: U64
-    flags: U64
-}
 ```
 
-Add metrics struct:
+- [ ] **Step 1: Add failing semantic source compile test**
 
-```wrela
-data StorageMetrics {
-    active_lba_size: U64
-    namespace_mode: U64
-    durability_mode: U64
-    event_slot_size: U64
-    atomic_groups_per_second: U64
-    events_per_atomic_group: U64
-    batch_overflow_slots_used: U64
-    rejected_oversized_atomic_groups: U64
-    events_per_committed_lba: U64
-    sealed_event_block_count: U64
-    underfilled_lba_count: U64
-    reserved_empty_hot_slots: U64
-    bytes_written_per_durable_event: U64
-    estimated_drive_writes_per_day: U64
-    device_reported_media_writes: U64
-    durable_events_per_second: U64
-    writer_cpu_cycles_per_event: U64
-    group_commit_latency_p50_us: U64
-    group_commit_latency_p99_us: U64
-    group_commit_latency_p999_us: U64
-    append_ack_latency_p50_us: U64
-    append_ack_latency_p99_us: U64
-    append_ack_latency_p999_us: U64
-    payload_utilization_x1000: U64
-    payload_overflow_count: U64
-    hot_bytes_per_event: U64
-    packed_bytes_per_event: U64
-    compressed_bytes_per_event: U64
-    compression_ratio_x1000: U64
-    compression_cpu_time_us: U64
-    compressed_segment_lookup_latency_us: U64
-    cold_compression_backlog: U64
-    foreground_queue_depth: U64
-    background_queue_depth: U64
-    foreground_completion_latency_us: U64
-    background_completion_latency_us: U64
-    core_link_queue_depth: U64
-    core_link_wake_count: U64
-    blob_extent_count_per_file: U64
-    orphaned_extent_bytes: U64
-    projection_lag_events: U64
-    projection_rebuild_time_us: U64
-    projection_spsc_depth: U64
-    projection_backpressure_count: U64
-    projection_layout_upcast_count: U64
-    projection_layout_rebuild_count: U64
-    stream_directory_cache_hit_rate_x1000: U64
-}
-```
+Test imports `storage.format` from a tiny Wrela source and uses `sizeof(EventSlotHeader)`.
 
-Add test:
+The test must include a table of host/Wrela constant names:
 
 ```go
-func TestStorageFormatSourceConstants(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/format.wrela")
-	for _, want := range []string{
-		"STORAGE_EVENT_SLOT_SIZE: U64 = 512",
-		"STORAGE_EVENT_HEADER_SIZE: U64 = 64",
-		"STORAGE_EVENT_PAYLOAD_BYTES: U64 = 448",
-		"atomic_group_frontier",
-		"segment_map_root_lba",
-		"reserved_empty_hot_slots",
-		"projection_lag_events",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("storage format source missing %q", want)
-		}
+func assertWrelaConstU64(t *testing.T, index *Index, moduleName, constName string, want uint64) {
+	t.Helper()
+	got, ok := index.LookupConst(moduleName, constName)
+	if !ok {
+		t.Fatalf("missing const %s.%s", moduleName, constName)
 	}
+	if got.Value != want {
+		t.Fatalf("%s.%s = %d, want %d", moduleName, constName, got.Value, want)
+	}
+}
+
+for name, want := range map[string]uint64{
+	"STORAGE_EVENT_SLOT_SIZE": storagefmt.EventSlotSize,
+	"STORAGE_EVENT_HEADER_SIZE": storagefmt.EventHeaderSize,
+	"STORAGE_EVENT_PAYLOAD_BYTES": storagefmt.EventPayloadBytes,
+} {
+	assertWrelaConstU64(t, index, "storage.format", name, want)
 }
 ```
 
-Verification:
+Run: `go test ./compiler/sem -run TestStorageFormatSourceCompiles -v`
+
+Expected: FAIL because module does not exist.
+
+- [ ] **Step 2: Add `wrela/storage/format.wrela`**
+
+Implement constants and structs.
+
+Run: `go test ./compiler/sem -run TestStorageFormatSourceCompiles -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-go test ./compiler/sem -run TestStorageFormatSourceConstants -v
-go test ./compiler/ir -run StorageFormat -v
-go test ./compiler/sem ./compiler/ir -v
 git diff --check
+git add wrela/storage/format.wrela compiler/sem/storage_format_test.go
+git commit -m "feat: add storage format source -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 20: Event Slot Encoding Algorithms
 
-Commit:
-
-```bash
-git add wrela/storage/format.wrela compiler/sem/storage_format_test.go compiler/ir/storage_format_test.go
-git commit -m "feat: define nvme storage disk format -Codex Automated"
-```
-
-### Task 13: Superblock And Region Map
+**Prerequisites:** Tasks 2, 18, and 19.
 
 **Files:**
 
-- Modify: `wrela/storage/format.wrela`
 - Create: `wrela/storage/event_log.wrela`
-- Create: `compiler/sem/storage_region_test.go`
-- Create: `compiler/codegen/storage_region_test.go`
+- Create: `compiler/sem/event_log_source_test.go`
+- Modify: `compiler/storagefmt/format_test.go`
 
-**Description:** Implement deterministic region layout and double-buffered superblock selection. Recovery picks the highest valid superblock generation with a valid checksum.
-
-**Acceptance Criteria:**
-
-- Region layout has fixed order: superblock, hot event slots, segment map, sealed segment extents, stream directory, blob extents, blob manifest/key metadata, projection storage, maintenance metadata.
-- Region entries cannot overlap; overlap emits `SEM0110` in compile-time tests for static examples and boot panic for runtime discovery.
-- Superblock copy A is at byte 0 and copy B is at byte 4096.
-- Highest valid generation wins.
-- Invalid checksum copy is ignored.
-
-**Code Examples:**
-
-Add region constants:
-
-```wrela
-const STORAGE_REGION_SUPERBLOCK: U64 = 1
-const STORAGE_REGION_HOT_EVENT_SLOTS: U64 = 2
-const STORAGE_REGION_SEGMENT_MAP: U64 = 3
-const STORAGE_REGION_SEALED_SEGMENTS: U64 = 4
-const STORAGE_REGION_STREAM_DIRECTORY: U64 = 5
-const STORAGE_REGION_BLOB_EXTENTS: U64 = 6
-const STORAGE_REGION_BLOB_MANIFESTS: U64 = 7
-const STORAGE_REGION_PROJECTION_STORAGE: U64 = 8
-const STORAGE_REGION_MAINTENANCE_METADATA: U64 = 9
-```
-
-Create region validator:
-
-```wrela
-module storage.event_log
-
-use { BootPanic } from platform.hardware.panic
-use { StorageRegionEntry, StorageRegionMap, StorageSuperblock } from storage.format
-
-data StorageRegionValidator {
-    panic: BootPanic
-
-    fn validate_pair(self, a: StorageRegionEntry, b: StorageRegionEntry) {
-        let a_end = a.start_lba + a.block_count
-        let b_end = b.start_lba + b.block_count
-        if a.block_count == 0 {
-            self.panic.fail(code = 0xAC090110)
-        }
-        if b.block_count == 0 {
-            self.panic.fail(code = 0xAC090110)
-        }
-        if a.start_lba < b_end {
-            if b.start_lba < a_end {
-                self.panic.fail(code = 0xAC090110)
-            }
-        }
-    }
-}
-```
-
-Superblock choice:
-
-```wrela
-data SuperblockPair {
-    a: StorageSuperblock
-    b: StorageSuperblock
-
-    fn choose(self) -> StorageSuperblock {
-        let a_valid = self.a.format_version == STORAGE_FORMAT_VERSION
-        let b_valid = self.b.format_version == STORAGE_FORMAT_VERSION
-        if a_valid {
-            if b_valid {
-                if self.b.generation > self.a.generation {
-                    return self.b
-                }
-            }
-            return self.a
-        }
-        if b_valid {
-            return self.b
-        }
-        return self.a
-    }
-}
-```
-
-Add test:
-
-```go
-func TestStorageRegionOrderIsFrozen(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/format.wrela")
-	order := []string{
-		"STORAGE_REGION_SUPERBLOCK",
-		"STORAGE_REGION_HOT_EVENT_SLOTS",
-		"STORAGE_REGION_SEGMENT_MAP",
-		"STORAGE_REGION_SEALED_SEGMENTS",
-		"STORAGE_REGION_STREAM_DIRECTORY",
-		"STORAGE_REGION_BLOB_EXTENTS",
-		"STORAGE_REGION_BLOB_MANIFESTS",
-		"STORAGE_REGION_PROJECTION_STORAGE",
-		"STORAGE_REGION_MAINTENANCE_METADATA",
-	}
-	last := -1
-	for _, name := range order {
-		idx := strings.Index(source, name)
-		if idx < 0 {
-			t.Fatalf("missing region constant %s", name)
-		}
-		if idx <= last {
-			t.Fatalf("region constant %s is out of order", name)
-		}
-		last = idx
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler/sem -run TestStorageRegionOrderIsFrozen -v
-go test ./compiler/codegen -run StorageRegion -v
-go test ./compiler/sem ./compiler/codegen -v
-git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/format.wrela wrela/storage/event_log.wrela compiler/sem/storage_region_test.go compiler/codegen/storage_region_test.go
-git commit -m "feat: add storage superblock region map -Codex Automated"
-```
-
-### Task 14: Event Slot Encoding, CRC32C, And 4 KiB Packing
-
-**Files:**
-
-- Modify: `wrela/storage/event_log.wrela`
-- Create: `compiler/codegen/event_slot_test.go`
-- Create: `compiler/ir/event_slot_test.go`
-
-**Description:** Encode hot event slots with exact header offsets, zeroed payload padding, CRC32C checksum, and immutable 4 KiB underfill behavior.
+**Description:** Add Wrela event slot writer, reserved empty slot constructor, and batch packer. Behavior must match `compiler/storagefmt`.
 
 **Acceptance Criteria:**
 
-- Encoder writes exactly 512 bytes per slot.
-- Payload length greater than 448 rejects the append with `StorageAppendError(code = STORAGE_APPEND_PAYLOAD_TOO_LARGE)`.
-- CRC32C computes with checksum bytes zeroed.
-- For 512-byte LBA, one slot maps to one LBA.
-- For 4096-byte LBA, eight slots map to one LBA.
-- Underfilled 4096-byte durable batch fills remaining LBA slots with reserved empty slots and consumes event IDs.
-- Reserved empty slots are never delivered to streams or projections.
+- `EventSlotWriter.slots_per_lba()` returns 1 for 512 and 8 for 4096.
+- `BatchPacker.finish_batch(3)` on 4096 returns 5 empty slots and 8 total positions.
+- Reserved empty slot has valid append-log `event_id`, `event_type_id = 0`, `payload_layout_id = 0`, and reserved flag.
+- Mirror contract: the Wrela `BatchPacker.finish_batch` body is exactly the code block below, and host tests use the same exported constants.
 
 **Code Examples:**
-
-Add event slot writer:
-
-```wrela
-data EventSlotWriter {
-    active_lba_size: U64
-
-    fn slots_per_lba(self) -> U64 {
-        return self.active_lba_size / STORAGE_EVENT_SLOT_SIZE
-    }
-
-    fn lba_for_event(self, event_region_base_lba: U64, event_id: U64) -> U64 {
-        return event_region_base_lba + (event_id / self.slots_per_lba())
-    }
-
-    fn slot_in_lba(self, event_id: U64) -> U64 {
-        return event_id % self.slots_per_lba()
-    }
-
-    fn payload_fits(self, payload_length: U64) -> Bool {
-        return payload_length <= STORAGE_EVENT_PAYLOAD_BYTES
-    }
-}
-```
-
-Add reserved empty constructor:
-
-```wrela
-data ReservedEmptySlot {
-    event_id: U64
-
-    fn header(self) -> EventSlotHeader {
-        return EventSlotHeader(
-            event_id = self.event_id,
-            stream_id = 0,
-            stream_sequence = 0,
-            event_type_id = 0,
-            payload_layout_id = 0,
-            atomic_group_len = 0,
-            atomic_group_index = 0,
-            payload_length = 0,
-            flags = STORAGE_SLOT_RESERVED_EMPTY,
-            checksum32 = 0,
-            header_version = 1,
-            reserved16 = 0,
-            reserved64 = 0
-        )
-    }
-}
-```
-
-Batch fill algorithm:
 
 ```wrela
 data BatchPackingResult {
@@ -2470,694 +2211,1117 @@ data BatchPacker {
 }
 ```
 
-Add test:
+- [ ] **Step 1: Add failing compile test**
 
-```go
-func TestFourKiBUnderfillConsumesEmptySlots(t *testing.T) {
-	packer := batchPackerForTest{activeLBASize: 4096}
-	got := packer.finishBatch(3)
-	if got.reservedEmptySlots != 5 || got.totalSlotPositions != 8 {
-		t.Fatalf("finishBatch(3) = %#v, want 5 empty and 8 total", got)
-	}
-}
-```
+Run: `go test ./compiler/sem -run TestEventLogSourceCompiles -v`
 
-Add codegen byte-offset test:
+Expected: FAIL because module does not exist.
 
-```go
-func TestEventSlotHeaderOffsetsAreStable(t *testing.T) {
-	offsets := map[string]int{
-		"event_id": 0, "stream_id": 8, "stream_sequence": 16,
-		"event_type_id": 24, "payload_layout_id": 28,
-		"atomic_group_len": 32, "atomic_group_index": 36,
-		"payload_length": 40, "flags": 44, "checksum32": 48,
-	}
-	for name, want := range offsets {
-		if got := eventSlotHeaderOffsetForTest(name); got != want {
-			t.Fatalf("%s offset = %d, want %d", name, got, want)
-		}
-	}
-}
-```
+- [ ] **Step 2: Add event log source and mirror contract**
 
-Verification:
+Create `wrela/storage/event_log.wrela` with `EventSlotWriter`, `ReservedEmptySlot`, and `BatchPacker`.
+
+Add `TestEventLogBatchPackerMirrorContract` to `compiler/sem/event_log_source_test.go`; it must assert `BatchPacker.finish_batch`, `EventSlotWriter.slots_per_lba`, and `ReservedEmptySlot.header` exist and that `STORAGE_EVENT_SLOT_SIZE` equals `storagefmt.EventSlotSize`.
+
+Run: `go test ./compiler/sem -run 'TestEventLog(SourceCompiles|BatchPackerMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Strengthen host behavior tests**
+
+Add `TestReservedEmptySlotHeader` to `compiler/storagefmt/format_test.go`.
+
+Run: `go test ./compiler/storagefmt -run 'Test(ReservedEmpty|FourKiB)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/ir -run TestFourKiBUnderfillConsumesEmptySlots -v
-go test ./compiler/codegen -run TestEventSlotHeaderOffsetsAreStable -v
-go test ./compiler/ir ./compiler/codegen -v
 git diff --check
+git add wrela/storage/event_log.wrela compiler/sem/event_log_source_test.go compiler/storagefmt/format_test.go
+git commit -m "feat: add storage event slot algorithms -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 21: Superblock And Region Map Behavior
 
-Commit:
-
-```bash
-git add wrela/storage/event_log.wrela compiler/codegen/event_slot_test.go compiler/ir/event_slot_test.go
-git commit -m "feat: encode fixed storage event slots -Codex Automated"
-```
-
-### Task 15: Atomic Group Batch Policy And StorageWriter Authority
+**Prerequisite:** Task 2.
 
 **Files:**
 
-- Create: `wrela/storage/writer.wrela`
-- Create: `compiler/sem/storage_writer_test.go`
-- Create: `tests/fixtures/negative/forged_storage_writer.wrela`
-- Create: `tests/fixtures/negative/oversized_atomic_group.wrela`
-- Modify: `compiler/sem/check.go`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Modify: `wrela/storage/event_log.wrela`
 
-**Description:** Implement the single foreground `StorageWriter` authority and the exact batch overflow policy from the design. The writer is the only source of durable append acknowledgement.
+**Description:** Implement double-buffered superblock choice and region overlap validation in the host harness, then mirror the API in Wrela.
 
 **Acceptance Criteria:**
 
-- `StorageWriter` is a unique authority that cannot be directly constructed in user source outside the owned-hardware boot phase.
-- Forged writer construction emits `SEM0113`.
-- Atomic group size greater than `32` emits `SEM0114` for statically known groups and returns rejection for dynamic groups.
-- The writer never splits one atomic group across acknowledged batches.
-- A two-event group arriving at 63 open slots is admitted into a 65-slot overflow batch and flushes immediately.
-- Append result must be observed; ignored durable append result emits `SEM0116`.
+- Highest valid generation wins.
+- Invalid checksum copy is ignored.
+- Overlapping region entries return `ErrRegionOverlap`.
+- Default region table matches Section 1.
+- Mirror contract: Wrela methods `SuperblockPair.choose` and `StorageRegionValidator.validate_pair` use the same names and return fields as host helpers `ChooseSuperblock` and `ValidateRegions`.
 
 **Code Examples:**
 
-Create writer surface:
-
-```wrela
-module storage.writer
-
-use { Result } from wrela.lang.core
-use { ForegroundStoragePath } from machine.x86_64.nvme
-use { CoreSpscProducer, CoreSpscConsumer } from machine.x86_64.core_link
-use { EventSlotHeader, StorageMetrics } from storage.format
-
-const STORAGE_APPEND_OK: U64 = 0
-const STORAGE_APPEND_TRANSACTION_TOO_LARGE: U64 = 1
-const STORAGE_APPEND_PAYLOAD_TOO_LARGE: U64 = 2
-
-data CommitToken {
-    first_event_id: U64
-    last_event_id: U64
-}
-
-data StorageAppendError {
-    code: U64
-}
-
-enum StorageAppendResult {
-    Accepted(token: CommitToken)
-    Rejected(error: StorageAppendError)
-}
-
-data PendingAtomicGroup {
-    first_stream_id: U64
-    semantic_event_count: U64
-    payload_bytes: U64
-}
-
-data CommittedAtomicGroup {
-    first_event_id: U64
-    last_event_id: U64
-    slot_range_start_lba: U64
-    slot_range_block_count: U64
-    semantic_event_count: U64
-    event_type_summary_ref: U64
-    affected_streams_ref: U64
-}
-
-unique class StorageWriter {
-    path: ForegroundStoragePath
-    next_event_id: U64
-    next_stream_id: U64
-    slot_durable_frontier: U64
-    atomic_group_frontier: U64
-    open_batch_slots: U64
-    metrics: StorageMetrics
-    committed_groups: CoreSpscProducer<CommittedAtomicGroup>
-
-    fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult
-    fn on_durability_completed(self, completion_command_id: U16)
+```go
+func ChooseSuperblock(a, b Superblock) (Superblock, error) {
+	av := a.Valid()
+	bv := b.Valid()
+	if av && bv && b.Generation > a.Generation {
+		return b, nil
+	}
+	if av {
+		return a, nil
+	}
+	if bv {
+		return b, nil
+	}
+	return Superblock{}, ErrNoValidSuperblock
 }
 ```
 
-Batch policy implementation:
+- [ ] **Step 1: Add failing superblock tests**
 
-```wrela
-fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult {
-    if group.semantic_event_count > STORAGE_MAX_ATOMIC_GROUP_SLOTS {
-        self.metrics.rejected_oversized_atomic_groups = self.metrics.rejected_oversized_atomic_groups + 1
-        return StorageAppendResult.Rejected(error = StorageAppendError(code = STORAGE_APPEND_TRANSACTION_TOO_LARGE))
-    }
-    if self.open_batch_slots + group.semantic_event_count <= STORAGE_TARGET_BATCH_SLOTS {
-        return self.add_group_to_open_batch(group = group, flush_after = false)
-    }
-    if self.open_batch_slots + group.semantic_event_count <= STORAGE_MAX_BATCH_SLOTS {
-        self.metrics.batch_overflow_slots_used = self.metrics.batch_overflow_slots_used + ((self.open_batch_slots + group.semantic_event_count) - STORAGE_TARGET_BATCH_SLOTS)
-        return self.add_group_to_open_batch(group = group, flush_after = true)
-    }
-    self.flush_open_batch()
-    let result = self.add_group_to_open_batch(group = group, flush_after = group.semantic_event_count >= STORAGE_TARGET_BATCH_SLOTS)
-    return result
-}
+Run: `go test ./compiler/storagefmt -run 'TestChooseSuperblock|TestRegionOverlap' -v`
+
+Expected: FAIL because helpers are undefined.
+
+- [ ] **Step 2: Implement host behavior**
+
+Add `Superblock`, `ChooseSuperblock`, `ValidateRegions`, and errors.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela API**
+
+Add `SuperblockPair.choose()` and `StorageRegionValidator.validate_pair()` to `wrela/storage/event_log.wrela`.
+
+Add `TestEventLogSuperblockMirrorContract`; it must assert methods `SuperblockPair.choose`, `StorageRegionValidator.validate_pair`, and result fields `selected_generation` and `valid` exist.
+
+Run: `go test ./compiler/sem -run 'TestEventLog(SourceCompiles|SuperblockMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go wrela/storage/event_log.wrela
+git commit -m "feat: add storage superblock region behavior -Codex Automated"
 ```
 
-Negative fixture for forged writer:
+### Task 22: Recovery Scanner Behavior
 
-```wrela
-// expect: SEM0113: StorageWriter authority cannot be constructed here
-module negative.forged_storage_writer
-use { StorageWriter } from storage.writer
-use { ForegroundStoragePath } from machine.x86_64.nvme
-executor Bad {
-    path: ForegroundStoragePath
-    start fn run(self) -> never {
-        let writer = StorageWriter(path = self.path, next_event_id = 0, next_stream_id = 0)
-        while true {}
-    }
-}
-```
+**Prerequisite:** Task 20.
 
-Batch policy test:
+**Files:**
+
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Modify: `wrela/storage/event_log.wrela`
+
+**Description:** Add recovery validation for complete atomic groups and invalid tails.
+
+**Acceptance Criteria:**
+
+- Recovery stops before checksum mismatch.
+- Recovery stops before incomplete atomic group.
+- Empty event type without reserved-empty flag is invalid.
+- Reserved empty slots are skipped and not delivered.
+- Mirror contract: Wrela `RecoveryResult` and stop-reason constants match the host `RecoveryResult` fields and stop-reason names one-for-one.
+
+**Code Examples:**
 
 ```go
-func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
-	writer := storageWriterPolicyForTest{openBatchSlots: 63}
-	result := writer.enqueueAtomicGroup(2)
-	if !result.accepted || writer.openBatchSlots != 65 || !writer.flushRequested {
-		t.Fatalf("two-event overflow group result = %#v writer=%#v", result, writer)
+type RecoveryStopReason uint8
+
+const (
+	StopCleanEOF RecoveryStopReason = iota
+	StopChecksumMismatch
+	StopIncompleteAtomicGroup
+	StopInvalidEmptySlot
+)
+
+type Slot struct {
+	Header EventSlotHeader
+	Payload [EventPayloadBytes]byte
+}
+
+type RecoveryResult struct {
+	VisibleEvents uint64
+	NextEventID uint64
+	LastCommittedGroupEnd uint64
+	StopReason RecoveryStopReason
+}
+
+func RecoverSlots(slots []Slot) RecoveryResult {
+	// Implementation walks expected event_id in order and validates each group.
+}
+
+func TestRecoveryRejectsEmptySlotOutsidePadding(t *testing.T) {
+	slot := ValidSlotForTest(7)
+	slot.Header.EventTypeID = 0
+	slot.Header.Flags = 0
+	got := RecoverSlots([]Slot{slot})
+	if got.StopReason != StopInvalidEmptySlot || got.VisibleEvents != 0 {
+		t.Fatalf("recovery = %#v", got)
 	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing recovery tests**
+
+Run: `go test ./compiler/storagefmt -run TestRecovery -v`
+
+Expected: FAIL because recovery symbols are undefined.
+
+- [ ] **Step 2: Implement host recovery**
+
+Add exactly the `RecoveryStopReason`, `Slot`, `RecoveryResult`, and `RecoverSlots(slots []Slot) RecoveryResult` API shown above. `RecoverSlots` must increment `NextEventID` across reserved empty slots, must not increment `VisibleEvents` for reserved empty slots, and must stop before returning an incomplete atomic group.
+
+Run: `go test ./compiler/storagefmt -run TestRecovery -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela recovery structs**
+
+Add `RecoveryResult`, stop reason constants, and `EventRecoveryScanner.validate_group_member`. Also add `TestEventLogRecoveryMirrorContract` to `compiler/sem/event_log_source_test.go`; it must assert the Wrela source exports `RecoveryResult.visible_events`, `RecoveryResult.next_event_id`, `RecoveryResult.last_committed_group_end`, `RecoveryResult.stop_reason`, and constants `STORAGE_RECOVERY_STOP_CLEAN_EOF`, `STORAGE_RECOVERY_STOP_CHECKSUM_MISMATCH`, `STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP`, and `STORAGE_RECOVERY_STOP_INVALID_EMPTY_SLOT`.
+
+Run: `go test ./compiler/sem -run 'TestEventLog(SourceCompiles|RecoveryMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run 'TestStorageWriterBatchOverflowDoesNotSplitGroup|TestNegativeFixtures' -v
-go test ./compiler/sem -v
 git diff --check
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go wrela/storage/event_log.wrela
+git commit -m "feat: add event recovery scanner -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 23: Segment Lifecycle And Packed Codec
 
-Commit:
+**Prerequisite:** Task 22.
+
+**Files:**
+
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Modify: `wrela/storage/event_log.wrela`
+
+**Description:** Add sealed segment metadata, segment-map lookup, ZNS metadata, and packed/no-op codec behavior.
+
+**Acceptance Criteria:**
+
+- Segment states are open hot, sealed hot, compressible, and compressed.
+- ZNS fields `zone_start_lba` and `zone_block_count` exist.
+- Packed codec removes zero padding and indexes every configured stride.
+- Segment map lookup preserves stable append-log `event_id` values.
+- Mirror contract: Wrela `EventSegment`, `SegmentIndexEntry`, and `PackedSegmentCodec` expose the same fields as host `EventSegment`, `SegmentIndexEntry`, and `PackedSegment`.
+
+**Code Examples:**
+
+```go
+func TestPackedSegmentCodecStripsPadding(t *testing.T) {
+	slot := ValidSlotForTest(0)
+	slot.Header.PayloadLength = 12
+	packed := PackSlots([]Slot{slot}, 16)
+	if got, want := len(packed.Bytes), EventHeaderSize+12; got != want {
+		t.Fatalf("packed bytes = %d, want %d", got, want)
+	}
+	if len(packed.Index) != 1 || packed.Index[0].EventIDDelta != 0 {
+		t.Fatalf("packed index = %#v", packed.Index)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing packed codec test**
+
+Run: `go test ./compiler/storagefmt -run TestPackedSegmentCodecStripsPadding -v`
+
+Expected: FAIL because `PackSlots` is undefined.
+
+- [ ] **Step 2: Implement host packed codec**
+
+Add `EventSegment`, `SegmentIndexEntry`, `PackedSegment`, and `PackSlots`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela segment structs**
+
+Add `EventSegment`, `SegmentIndexEntry`, `EventSegmentMap`, `PackedSegmentCodec` to `wrela/storage/event_log.wrela`.
+
+Add `TestEventLogSegmentMirrorContract`; it must assert `EventSegment.state`, `EventSegment.zone_start_lba`, `EventSegment.zone_block_count`, `SegmentIndexEntry.event_id_delta`, and `PackedSegmentCodec.pack_slots` exist.
+
+Run: `go test ./compiler/sem -run 'TestEventLog(SourceCompiles|SegmentMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add wrela/storage/writer.wrela compiler/sem/storage_writer_test.go compiler/sem/check.go tests/fixtures/negative/forged_storage_writer.wrela tests/fixtures/negative/oversized_atomic_group.wrela
-git commit -m "feat: add single storage writer authority -Codex Automated"
+git diff --check
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go wrela/storage/event_log.wrela
+git commit -m "feat: add storage segment lifecycle -Codex Automated"
 ```
 
-### Task 16: Dense Stream Directory And Append Validation
+### Task 24: Stream Directory And Checkpoints
+
+**Prerequisites:** Tasks 2 and 19.
 
 **Files:**
 
 - Create: `wrela/storage/stream.wrela`
-- Create: `compiler/sem/stream_directory_test.go`
-- Modify: `wrela/storage/writer.wrela`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Create: `compiler/sem/stream_source_test.go`
 
-**Description:** Add store-assigned sequential stream IDs, direct stream directory lookup, expected sequence checks, and directory rebuild inputs. The directory is acceleration; event recovery remains truth.
+**Description:** Add dense stream directory math, expected sequence validation, non-reused stream IDs, simple stream checkpoints, and a direct chunk cache metric.
 
 **Acceptance Criteria:**
 
-- New stream ID is `next_stream_id`; first stream ID is `0`.
-- Stream existence check is `stream_id < next_stream_id`.
-- Directory entry address uses `base + stream_id * 32`.
-- Expected sequence mismatch rejects append before event slots are encoded.
-- Creating a stream appends first event with sequence `1`.
-- `StreamCheckpoint` records `stream_id`, `through_sequence`, `state_layout_id`, and `state_blob_ref`.
-- A checkpoint whose state layout does not match current code is ignored and the stream replays from its initial state.
-- Directory updates happen only after the atomic group is durable.
+- `entry_byte_offset(stream_id) = stream_id * 32`.
+- `exists(stream_id) = stream_id < next_stream_id`.
+- Stream IDs are never reused.
+- Checkpoint with stale `state_layout_id` is ignored.
+- Cache hit rate metric is backed by `StreamDirectoryCache`.
+- Mirror contract: `stream.wrela` exports `StreamDirectory`, `StreamDirectoryEntry`, `StreamCheckpoint`, and `StreamDirectoryCache` with names matching host helpers.
 
 **Code Examples:**
 
-Create stream source:
-
-```wrela
-module storage.stream
-
-use { StreamDirectoryEntry } from storage.format
-
-data StreamAppendExpectation {
-    stream_id: U64
-    expected_sequence: U64
-}
-
-data StreamAppendDecision {
-    accepted: Bool
-    next_sequence: U64
-}
-
-data StreamCheckpoint {
-    stream_id: U64
-    through_sequence: U64
-    state_layout_id: U64
-    state_blob_ref: U64
-}
-
-class StreamDirectory {
-    base_lba: U64
-    entry_count: U64
-    next_stream_id: U64
-
-    fn exists(self, stream_id: U64) -> Bool {
-        return stream_id < self.next_stream_id
-    }
-
-    fn entry_byte_offset(self, stream_id: U64) -> U64 {
-        return stream_id * 32
-    }
-
-    fn check_append(self, entry: StreamDirectoryEntry, expected: StreamAppendExpectation) -> StreamAppendDecision {
-        if entry.latest_sequence != expected.expected_sequence {
-            return StreamAppendDecision(accepted = false, next_sequence = entry.latest_sequence)
-        }
-        return StreamAppendDecision(accepted = true, next_sequence = entry.latest_sequence + 1)
-    }
-
-    fn allocate_stream_id(self) -> U64 {
-        let id = self.next_stream_id
-        self.next_stream_id = self.next_stream_id + 1
-        return id
-    }
-
-    fn checkpoint_usable(self, checkpoint: StreamCheckpoint, current_state_layout_id: U64) -> Bool {
-        if checkpoint.state_layout_id != current_state_layout_id {
-            return false
-        }
-        return checkpoint.stream_id < self.next_stream_id
-    }
-}
-```
-
-Add source-shape test:
-
 ```go
-func TestStreamDirectoryUsesDenseMath(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/stream.wrela")
-	for _, want := range []string{
-		"stream_id < self.next_stream_id",
-		"return stream_id * 32",
-		"entry.latest_sequence != expected.expected_sequence",
-		"self.next_stream_id = self.next_stream_id + 1",
-		"data StreamCheckpoint",
-		"checkpoint.state_layout_id != current_state_layout_id",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("stream directory source missing %q", want)
-		}
+func TestStreamDirectoryMath(t *testing.T) {
+	dir := StreamDirectory{NextStreamID: 8}
+	if !dir.Exists(7) || dir.Exists(8) {
+		t.Fatalf("stream existence broken")
+	}
+	if got := dir.EntryOffset(5); got != 160 {
+		t.Fatalf("entry offset = %d, want 160", got)
 	}
 }
 ```
 
-Writer integration example:
+- [ ] **Step 1: Add failing host stream tests**
 
-```wrela
-fn publish_stream_head(self, stream_id: U64, sequence: U64, event_id: U64) {
-    let entry = StreamDirectoryEntry(
-        latest_sequence = sequence,
-        latest_event_id = event_id,
-        latest_checkpoint_ref = 0,
-        flags = 0
-    )
-    self.write_stream_directory_entry(stream_id = stream_id, entry = entry)
+Run: `go test ./compiler/storagefmt -run TestStreamDirectory -v`
+
+Expected: FAIL because stream helpers are undefined.
+
+- [ ] **Step 2: Implement host stream helpers**
+
+Add `StreamDirectory`, `StreamCheckpoint`, and `StreamDirectoryCache`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela stream source and mirror test**
+
+Create `wrela/storage/stream.wrela`; add compile test importing it. Add `TestStreamSourceMirrorContract` to `compiler/sem/stream_source_test.go`:
+
+```go
+func TestStreamSourceMirrorContract(t *testing.T) {
+	index := checkedStreamSourceIndex(t)
+	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectory"), "entry_byte_offset")
+	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectory"), "exists")
+	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectoryCache"), "record_hit")
+	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectoryCache"), "hit_rate_x1000")
 }
 ```
 
-Verification:
+Run: `go test ./compiler/sem -run 'TestStreamSource(Compiles|MirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run TestStreamDirectoryUsesDenseMath -v
-go test ./compiler/sem -v
 git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/stream.wrela wrela/storage/writer.wrela compiler/sem/stream_directory_test.go
+git add wrela/storage/stream.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go compiler/sem/stream_source_test.go
 git commit -m "feat: add dense stream directory -Codex Automated"
 ```
 
-### Task 17: Recovery Scanner And Segment Lifecycle
+### Task 25: Storage Writer Batch Policy
+
+**Prerequisites:** Tasks 12, 20, and 24.
 
 **Files:**
 
-- Modify: `wrela/storage/event_log.wrela`
-- Modify: `wrela/storage/writer.wrela`
-- Create: `compiler/sem/event_recovery_test.go`
-- Create: `compiler/ir/segment_lifecycle_test.go`
+- Create: `wrela/storage/writer.wrela`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Create: `compiler/sem/storage_writer_source_test.go`
 
-**Description:** Recover the valid atomic-group prefix, seal hot segments, and add packed/no-op cold segment metadata behind the final compression API.
+**Description:** Add single-writer source shape and behavior-tested batch policy.
 
 **Acceptance Criteria:**
 
-- Recovery scans slots in event ID order.
-- Recovery stops at checksum mismatch, unexpected event ID, invalid reserved empty slot, incomplete group, or mismatched group index.
-- `event_type_id = 0` is legal only for reserved empty slots created by underfilled committed LBA padding.
-- Segment states are `OpenHotSegment`, `SealedHotSegment`, `CompressibleSegment`, and `CompressedSegment`.
-- Segment seal records first/last event ID, fixed slot ref, and checksum.
-- On ZNS namespaces, sealed hot segments record `zone_start_lba` and `zone_block_count`; reclaim after accepted compression resets the old zone.
-- Cold reads use segment map lookup before decoding packed segment bytes.
-- Packed cold codec strips zero padding and builds segment-local index entries.
-- Writer validates `SegmentCompressed` proposals before publishing segment map updates.
+- `StorageWriter` owns `next_event_id`, `next_stream_id`, durable frontier, open batch slots, metrics, and committed group producer.
+- `EnqueueAtomicGroup` rejects groups larger than 32.
+- A two-event group at 63 open slots produces 65-slot overflow and requests flush.
+- First two-event atomic group gets append-log `event_id` values 0 and 1.
+- Mirror contract: Wrela `StorageWriter.enqueue_atomic_group` field updates match host `WriterPolicy.EnqueueAtomicGroup` for accept/reject, open-slot count, flush request, and assigned `event_id` range.
 
 **Code Examples:**
 
-Add recovery result:
-
-```wrela
-data RecoveryResult {
-    valid: Bool
-    next_event_id: U64
-    atomic_group_frontier: U64
-    stopped_reason: U64
+```go
+type WriterPolicy struct {
+	NextEventID uint64
+	NextStreamID uint64
+	OpenBatchSlots uint64
+	DurableFrontier uint64
 }
 
-const RECOVERY_STOP_CHECKSUM: U64 = 1
-const RECOVERY_STOP_UNEXPECTED_EVENT_ID: U64 = 2
-const RECOVERY_STOP_INVALID_EMPTY_SLOT: U64 = 3
-const RECOVERY_STOP_INCOMPLETE_GROUP: U64 = 4
-const RECOVERY_STOP_GROUP_INDEX: U64 = 5
-```
-
-Recovery validation shape:
-
-```wrela
-data EventRecoveryScanner {
-    active_lba_size: U64
-
-    fn validate_group_member(self, header: EventSlotHeader, expected_event_id: U64, group_len: U32, group_index: U32) -> Bool {
-        if header.event_id != expected_event_id {
-            return false
-        }
-        if header.event_type_id == 0 {
-            return header.flags == STORAGE_SLOT_RESERVED_EMPTY
-        }
-        if header.atomic_group_len != group_len {
-            return false
-        }
-        if header.atomic_group_index != group_index {
-            return false
-        }
-        return true
-    }
-}
-```
-
-Segment metadata:
-
-```wrela
-const SEGMENT_STATE_OPEN_HOT: U64 = 1
-const SEGMENT_STATE_SEALED_HOT: U64 = 2
-const SEGMENT_STATE_COMPRESSIBLE: U64 = 3
-const SEGMENT_STATE_COMPRESSED: U64 = 4
-
-data EventSegment {
-    segment_id: U64
-    first_event_id: U64
-    last_event_id: U64
-    state: U64
-    fixed_slot_ref: U64
-    zone_start_lba: U64
-    zone_block_count: U64
-    compressed_ref: U64
-    compressed_bytes: U64
-    uncompressed_bytes: U64
-    index_stride: U64
-    index_ref: U64
-    checksum32: U32
+type EnqueueResult struct {
+	Accepted bool
+	FirstEventID uint64
+	LastEventID uint64
+	OpenBatchSlots uint64
+	FlushRequested bool
+	RejectCode string
 }
 
-data SegmentIndexEntry {
-    event_id_delta: U64
-    uncompressed_offset: U64
+func (w WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+	if semanticSlots > StorageMaxAtomicGroupSlots {
+		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
+	}
+	first := w.NextEventID
+	last := first + semanticSlots - 1
+	open := w.OpenBatchSlots + semanticSlots
+	return EnqueueResult{
+		Accepted: true,
+		FirstEventID: first,
+		LastEventID: last,
+		OpenBatchSlots: open,
+		FlushRequested: open >= StorageTargetBatchSlots,
+	}
 }
 
-data EventSegmentMapLookup {
-    found: Bool
-    segment: EventSegment
-}
-
-class EventSegmentMap {
-    fn lookup(self, event_id: U64) -> EventSegmentMapLookup {
-        let segment = self.find_segment(event_id = event_id)
-        if event_id < segment.first_event_id {
-            return EventSegmentMapLookup(found = false, segment = segment)
-        }
-        if event_id > segment.last_event_id {
-            return EventSegmentMapLookup(found = false, segment = segment)
-        }
-        return EventSegmentMapLookup(found = true, segment = segment)
-    }
+func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: 63}
+	got := writer.EnqueueAtomicGroup(2)
+	if !got.Accepted || got.OpenBatchSlots != 65 || !got.FlushRequested {
+		t.Fatalf("enqueue = %#v", got)
+	}
 }
 ```
 
-Packed codec shape:
+- [ ] **Step 1: Add failing host writer policy tests**
 
-```wrela
-data PackedSegmentCodec {
-    fn packed_event_bytes(self, header: EventSlotHeader) -> U64 {
-        return STORAGE_EVENT_HEADER_SIZE + header.payload_length
-    }
+Run: `go test ./compiler/storagefmt -run TestStorageWriter -v`
 
-    fn should_index(self, event_id_delta: U64, stride: U64) -> Bool {
-        return event_id_delta % stride == 0
-    }
-}
+Expected: FAIL because `WriterPolicy` is undefined.
+
+- [ ] **Step 2: Implement host writer policy**
+
+Add exactly `WriterPolicy`, `EnqueueResult`, and `(WriterPolicy).EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult` as shown above. Add `AssignEventIDs(first uint64, count uint64) (firstEventID uint64, lastEventID uint64)` and make it return `(first, first+count-1)`; callers must reject `count == 0` before calling it.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela writer source and mirror test**
+
+Create `wrela/storage/writer.wrela` with `StorageWriter`, `PendingAtomicGroup`, `CommittedAtomicGroup`, `CommitToken`, and `StorageAppendResult`.
+
+Add `TestStorageWriterSourceMirrorContract` to assert `StorageWriter.enqueue_atomic_group`, `StorageWriter.on_durability_completed`, `StorageWriter.publish_committed_group`, and `StorageWriter.publish_blob_ref` exist with those exact names.
+
+Run: `go test ./compiler/sem -run 'TestStorageWriterSource(Compiles|MirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add wrela/storage/writer.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go compiler/sem/storage_writer_source_test.go
+git commit -m "feat: add storage writer batch policy -Codex Automated"
 ```
 
-Add test:
+### Task 26: Durability Completion State Machine
+
+**Prerequisites:** Tasks 3 and 25.
+
+**Files:**
+
+- Modify: `compiler/nvmefmt/nvme.go`
+- Modify: `compiler/nvmefmt/nvme_test.go`
+- Modify: `wrela/storage/writer.wrela`
+
+**Description:** Acknowledge appended groups only after the selected durability condition is met.
+
+**Acceptance Criteria:**
+
+- FUA mode acknowledges after all writes complete.
+- Write-plus-flush mode acknowledges after writes and flush complete.
+- Failed write or flush rejects the batch.
+- Writer publishes `CommittedAtomicGroup` only after acknowledgement.
+- Mirror contract: Wrela `StorageWriter.on_durability_completed` and `publish_committed_group` use the same acknowledgement states as host `DurabilityState`.
+
+**Code Examples:**
 
 ```go
-func TestRecoveryRejectsEmptySlotOutsidePadding(t *testing.T) {
-	header := EventSlotHeaderForTest{
-		EventID: 7,
-		EventTypeID: 0,
-		Flags: 0,
+func TestWritePlusFlushAcknowledgesAfterFlushOnly(t *testing.T) {
+	sm := DurabilityState{Mode: DurabilityWritePlusFlush, PendingWrites: 2}
+	sm.CompleteWrite(1, true)
+	sm.CompleteWrite(2, true)
+	if sm.Acknowledged() {
+		t.Fatal("must not ack before flush")
 	}
-	if validateRecoveredHeaderForTest(header, 7) {
-		t.Fatalf("empty event type without reserved flag must be invalid")
+	sm.CompleteFlush(true)
+	if !sm.Acknowledged() {
+		t.Fatal("must ack after flush")
 	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing durability state tests**
+
+Run: `go test ./compiler/nvmefmt -run TestWritePlusFlushAcknowledgesAfterFlushOnly -v`
+
+Expected: FAIL because `DurabilityState` is undefined.
+
+- [ ] **Step 2: Implement durability state**
+
+Add `DurabilityState`, modes, write completion, and flush completion.
+
+Run: `go test ./compiler/nvmefmt -run TestWritePlusFlushAcknowledgesAfterFlushOnly -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror writer source hook**
+
+Add `StorageWriter.on_durability_completed` and `StorageWriter.publish_committed_group`.
+
+Add `TestStorageWriterDurabilityMirrorContract`; it must assert methods `on_durability_completed`, `publish_committed_group`, and fields `pending_write_count`, `flush_required`, and `durability_failed` exist.
+
+Run: `go test ./compiler/sem -run 'TestStorageWriter(SourceCompiles|DurabilityMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run TestRecoveryRejectsEmptySlotOutsidePadding -v
-go test ./compiler/ir -run SegmentLifecycle -v
-go test ./compiler/sem ./compiler/ir -v
 git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/event_log.wrela wrela/storage/writer.wrela compiler/sem/event_recovery_test.go compiler/ir/segment_lifecycle_test.go
-git commit -m "feat: recover and seal storage event segments -Codex Automated"
+git add compiler/nvmefmt/nvme.go compiler/nvmefmt/nvme_test.go wrela/storage/writer.wrela
+git commit -m "feat: gate storage ack on nvme durability -Codex Automated"
 ```
 
 ---
 
-## 8. Phase 5: Blob Storage And Maintenance Proposals
+## 8. Phase 3: CoreLink And NVMe Runtime
 
-**Description:** This phase adds blob refs, extents, manifests, development AEAD wiring, orphan collection, relocation, and writer-validated maintenance proposals. Blob bytes are the large/sensitive data plane; event slots store compact refs.
+**Description:** This phase adds foreground/maintenance links and the interrupt-driven NVMe driver in small slices.
 
 **Acceptance Criteria:**
 
-- New blob bytes and key metadata are durable before an event can reference the blob.
-- `BlobRef` records blob ID, byte length, content hash, key ID, extent count, and inline extents or manifest ref.
-- Free extent allocation splits and coalesces extents.
-- Orphan collection derives liveness from acknowledged events, not allocator summaries.
-- Relocation is copy-on-write and truth changes only when the foreground writer accepts a proposal.
+- Foreground and maintenance use explicit SPSC core links.
+- NVMe completions use interrupt receivers.
+- Path ownership is semantically checked.
 
-**Phase Code Example:**
+### Task 27: CoreLink Source
 
-```wrela
-let blob = blob_store.write_blob(bytes = content, policy = BlobWritePolicy(cipher_mode = BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH))
-let group = file_commands.commit_content(file_id = file_id, blob = blob.ref)
-let result = writer.enqueue_atomic_group(group = group)
-```
-
-### Task 18: Blob Refs, Extents, Manifests, And Allocator
+**Prerequisite:** Task 4.
 
 **Files:**
 
-- Create: `wrela/storage/blob.wrela`
-- Create: `compiler/sem/blob_storage_test.go`
-- Create: `compiler/ir/blob_allocator_test.go`
+- Create: `wrela/machine/x86_64/core_link.wrela`
+- Create: `compiler/sem/core_link_source_test.go`
+- Modify: `compiler/sem/uefi_source_shape_test.go`
 
-**Description:** Define blob references and a first free-extent allocator. The allocator is repairable acceleration; events and blob manifests decide liveness.
+**Description:** Add typed paired-core SPSC endpoints with owner/peer slots and wake metadata.
 
 **Acceptance Criteria:**
 
-- `BlobRef` has `blob_id`, `byte_length`, `content_hash`, `key_id`, `extent_count`, and `inline_extents_or_manifest_ref`.
-- `Extent` has `start_lba`, `block_count`, and `logical_offset`.
-- Inline extents support four extents.
-- Manifest extents support 128 extents.
-- Free list supports 1024 extents, sorted by address.
-- Allocation uses first-fit by address, splits larger extents, and records remaining free extent.
-- Free coalesces adjacent extents.
+- `CoreSpscProducer<T>` has owner, peer, slots, capacity, head, tail, credits, and wake strategy.
+- `CoreSpscConsumer<T>` has owner, peer, slots, capacity, head, tail, wait-armed flag, and wake strategy.
+- Source compiles with existing generics.
+- `parseUEFIModuleSet` includes `wrela/machine/x86_64/core_link.wrela` before any source-shape test looks it up.
 
 **Code Examples:**
 
-Create blob source:
-
 ```wrela
-module storage.blob
-
-use { Result, Unit } from wrela.lang.core
-use { BackgroundStoragePath } from machine.x86_64.nvme
-
-const BLOB_INLINE_EXTENT_COUNT: U64 = 4
-const BLOB_MANIFEST_EXTENT_LIMIT: U64 = 128
-const BLOB_ALLOCATOR_FREE_EXTENT_LIMIT: U64 = 1024
-
-data BlobContentHash {
-    low: U64
-    high: U64
-}
-
-data BlobRef {
-    blob_id: U64
-    byte_length: U64
-    content_hash: BlobContentHash
-    key_id: U64
-    extent_count: U64
-    inline_extents_or_manifest_ref: U64
-}
-
-data Extent {
-    start_lba: U64
-    block_count: U64
-    logical_offset: U64
-}
-
-data BlobManifest {
-    blob_id: U64
-    extent_count: U64
-    extent0: Extent
-    extent1: Extent
-    extent2: Extent
-    extent3: Extent
-    manifest_ref: U64
-    cipher_mode: U64
-    nonce_low: U64
-    nonce_high: U64
-    auth_tag_low: U64
-    auth_tag_high: U64
-}
-
-data FreeExtentList {
-    count: U64
-    extent0: Extent
-    extent1: Extent
-    extent2: Extent
-    extent3: Extent
+class CoreSpscProducer<T> {
+    owner: ExecutorSlot
+    peer: ExecutorSlot
+    slots: Slots<T>
+    capacity: U64
+    head: U64
+    tail: U64
+    credits: U64
+    wake_strategy: WakeStrategy
+    asm fn try_send(self, value: T) -> Result<Unit, CoreLinkFull> { ret }
 }
 ```
 
-Allocator shape:
+- [ ] **Step 1: Add failing source compile test**
 
-```wrela
-class BlobExtentAllocator {
-    free: FreeExtentList
+Run: `go test ./compiler/sem -run TestCoreLinkSourceCompiles -v`
 
-    fn allocate(self, block_count: U64) -> Extent {
-        let index = 0
-        while index < self.free.count {
-            let extent = self.free.at(index = index)
-            if extent.block_count >= block_count {
-                let allocated = Extent(start_lba = extent.start_lba, block_count = block_count, logical_offset = 0)
-                let remaining = extent.block_count - block_count
-                if remaining == 0 {
-                    self.free.remove(index = index)
-                } else {
-                    self.free.set(index = index, extent = Extent(start_lba = extent.start_lba + block_count, block_count = remaining, logical_offset = 0))
-                }
-                return allocated
-            }
-            index = index + 1
-        }
-        return Extent(start_lba = 0, block_count = 0, logical_offset = 0)
-    }
+Expected: FAIL because module does not exist.
 
-    fn free_extent(self, extent: Extent) {
-        self.free.insert_sorted(extent = extent)
-        self.free.coalesce_adjacent()
-    }
-}
+- [ ] **Step 2: Add source and register module**
+
+Create `wrela/machine/x86_64/core_link.wrela` and add it to the hard-coded module list in `parseUEFIModuleSet`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add wrela/machine/x86_64/core_link.wrela compiler/sem/core_link_source_test.go compiler/sem/uefi_source_shape_test.go
+git commit -m "feat: add paired core link source -Codex Automated"
 ```
 
-Add source test:
+### Task 28: CoreLink Ownership Semantics
+
+**Prerequisites:** Tasks 12 and 27.
+
+**Files:**
+
+- Modify: `compiler/sem/storage_graph.go`
+- Create: `compiler/sem/core_link_ownership_test.go`
+- Add fixture: `tests/fixtures/negative/core_link_wrong_owner.wrela`
+
+**Description:** Enforce SPSC endpoint ownership.
+
+**Acceptance Criteria:**
+
+- Producer used by a non-owner executor emits `SEM0112`.
+- Consumer used by a non-owner executor emits `SEM0112`.
+- Graph records endpoint label, direction, role, owner, peer, and depth.
+
+**Code Examples:**
 
 ```go
-func TestBlobRefShape(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/blob.wrela")
-	for _, want := range []string{
-		"blob_id: U64",
-		"byte_length: U64",
-		"content_hash: BlobContentHash",
-		"key_id: U64",
-		"extent_count: U64",
-		"inline_extents_or_manifest_ref: U64",
-		"coalesce_adjacent",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("blob source missing %q", want)
-		}
+func TestCoreLinkWrongOwnerFails(t *testing.T) {
+	_, ds := typeDiagsForModules(t, coreLinkWrongOwnerSource)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
 	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing ownership test**
+
+Run: `go test ./compiler/sem -run TestCoreLinkWrongOwnerFails -v`
+
+Expected: FAIL because `SEM0112` is not emitted.
+
+- [ ] **Step 2: Implement ownership check**
+
+Add graph extraction for `CoreSpscProducer`/`CoreSpscConsumer` construction and compare `owner` to current executor slot.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add fixture and commit**
 
 ```bash
-go test ./compiler/sem -run TestBlobRefShape -v
-go test ./compiler/ir -run BlobAllocator -v
-go test ./compiler/sem ./compiler/ir -v
+go test ./compiler -run TestNegativeFixtures -v
 git diff --check
+git add compiler/sem/storage_graph.go compiler/sem/core_link_ownership_test.go tests/fixtures/negative/core_link_wrong_owner.wrela
+git commit -m "feat: enforce core link ownership -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 29: NVMe Source Surface
 
-Commit:
+**Prerequisite:** Task 3.
+
+**Files:**
+
+- Create: `wrela/machine/x86_64/nvme.wrela`
+- Create: `compiler/sem/nvme_source_test.go`
+- Modify: `compiler/sem/uefi_source_shape_test.go`
+
+**Description:** Add NVMe source types, controller registers, driver, driver path, namespace facts, and completion interrupt shape.
+
+**Acceptance Criteria:**
+
+- `NvmeDriver.initialize(device: PciDevice) -> NvmeDriver` exists.
+- `NvmeDriver.claim_controller(devices: PciDeviceSet, occurrence: U64) -> PciDevice` exists and selects by base class `0x01`, subclass `0x08`, and prog-if `0x02`.
+- `NvmeIoPath` is a `driver path`.
+- `NvmeIoPath` has `interrupt receiver -> NvmeCompletionInterrupt`.
+- `NvmeNamespace` carries LBA size, ZNS support, FUA support, AWUN, AWUPF, and volatile write cache.
+- `parseUEFIModuleSet` includes `wrela/machine/x86_64/nvme.wrela` before any source-shape test looks up `NvmeDriver`.
+
+**Code Examples:**
+
+```wrela
+const NVME_CLASS_MASS_STORAGE: U64 = 0x01
+const NVME_SUBCLASS_NVM: U64 = 0x08
+const NVME_PROGIF_EXPRESS: U64 = 0x02
+
+data NvmeNamespace {
+    namespace_id: U32
+    logical_block_size: U64
+    block_count: U64
+    zone_size_blocks: U64
+    supports_zns: Bool
+    supports_fua: Bool
+    atomic_write_unit_blocks: U32
+    power_fail_atomic_write_unit_blocks: U32
+    volatile_write_cache: Bool
+}
+```
+
+- [ ] **Step 1: Add failing source compile test**
+
+Run: `go test ./compiler/sem -run TestNvmeSourceCompiles -v`
+
+Expected: FAIL because module does not exist.
+
+- [ ] **Step 2: Add source types, method signatures, and module registration**
+
+Create `wrela/machine/x86_64/nvme.wrela` with concrete stub bodies that boot-panic for operations implemented by Tasks 30-33:
+
+```wrela
+fn submit_flush(self, namespace_id: U32) -> NvmeSubmission {
+    self.registers.panic.fail(code = 0xAC080030)
+}
+```
+
+Add `wrela/machine/x86_64/nvme.wrela` to the hard-coded module list in `parseUEFIModuleSet`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
 
 ```bash
-git add wrela/storage/blob.wrela compiler/sem/blob_storage_test.go compiler/ir/blob_allocator_test.go
-git commit -m "feat: add blob extent storage contracts -Codex Automated"
+git diff --check
+git add wrela/machine/x86_64/nvme.wrela compiler/sem/nvme_source_test.go compiler/sem/uefi_source_shape_test.go
+git commit -m "feat: add nvme source surface -Codex Automated"
 ```
 
-### Task 19: Blob Write, Read, Delete Shape And Development AEAD
+### Task 30: NVMe Identify And Durability Source
+
+**Prerequisites:** Tasks 3 and 29.
+
+**Files:**
+
+- Modify: `wrela/machine/x86_64/nvme.wrela`
+- Modify: `compiler/nvmefmt/nvme_test.go`
+
+**Description:** Mirror Identify parsing and durability selection contracts in Wrela source.
+
+**Acceptance Criteria:**
+
+- Wrela constants exist for 512, 4096, conventional, ZNS, FUA, PFAIL atomic FUA, and write-plus-flush.
+- `NvmeDurabilitySelector.choose` matches `compiler/nvmefmt.SelectDurability`.
+- Unsupported LBA calls boot panic code `0xAC080122`.
+- Mirror contract: the Wrela selector body is exactly the code block below except for local variable names.
+
+**Code Examples:**
+
+```wrela
+fn choose(self, namespace: NvmeNamespace, target_batch_blocks: U32) -> NvmeDurabilityMode {
+    if namespace.logical_block_size != 512 {
+        if namespace.logical_block_size != 4096 {
+            self.panic.fail(code = 0xAC080122)
+        }
+    }
+    if namespace.supports_fua {
+        return NvmeDurabilityMode(mode = NVME_DURABILITY_FUA, requires_flush = false, use_fua = true)
+    }
+    return NvmeDurabilityMode(mode = NVME_DURABILITY_WRITE_PLUS_FLUSH, requires_flush = true, use_fua = false)
+}
+```
+
+- [ ] **Step 1: Add failing behavior table in `compiler/nvmefmt`**
+
+Run: `go test ./compiler/nvmefmt -run TestSelectDurabilityModes -v`
+
+Expected: FAIL if selector is not implemented.
+
+- [ ] **Step 2: Implement or fix host selector**
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela selector**
+
+Modify `wrela/machine/x86_64/nvme.wrela`.
+
+Add `TestNvmeDurabilityMirrorContract`; it must assert constants `NVME_DURABILITY_FUA`, `NVME_DURABILITY_WRITE_PLUS_FLUSH`, method `NvmeDurabilitySelector.choose`, and fields `requires_flush` and `use_fua` exist.
+
+Run: `go test ./compiler/sem -run 'TestNvme(SourceCompiles|DurabilityMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add wrela/machine/x86_64/nvme.wrela compiler/nvmefmt/nvme_test.go
+git commit -m "feat: select nvme durability mode -Codex Automated"
+```
+
+### Task 31: NVMe Controller Initialization Sequence
+
+**Prerequisite:** Task 30.
+
+**Files:**
+
+- Modify: `wrela/machine/x86_64/nvme.wrela`
+- Create: `compiler/nvmefmt/controller_test.go`
+
+**Description:** Spell out and test the exact controller initialization order from Section 1.
+
+**Acceptance Criteria:**
+
+- Initialization disables CC.EN and waits for CSTS.RDY=0.
+- Programs AQA, ASQ, ACQ before enabling CC.EN.
+- Enables CC.EN and waits for CSTS.RDY=1.
+- Submits Identify Controller and Identify Namespace through admin queue.
+- Ready waits are bounded by timeout counters.
+- Mirror contract: Wrela `NvmeDriver.initialize` performs the exact operation order returned by host `PlannedControllerInitOps`.
+
+**Code Examples:**
+
+```go
+func TestControllerInitSequence(t *testing.T) {
+	got := PlannedControllerInitOps()
+	want := []string{"read CAP", "write CC.EN=0", "wait RDY=0", "write AQA", "write ASQ", "write ACQ", "write CC.EN=1", "wait RDY=1", "identify controller", "identify namespace"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("init sequence = %#v, want %#v", got, want)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing sequence test**
+
+Run: `go test ./compiler/nvmefmt -run TestControllerInitSequence -v`
+
+Expected: FAIL because `PlannedControllerInitOps` is undefined.
+
+- [ ] **Step 2: Implement host sequence**
+
+Add `PlannedControllerInitOps` in `compiler/nvmefmt`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela initialization code**
+
+Implement `NvmeDriver.initialize` in source using the same order.
+
+Add `TestNvmeInitMirrorContract`; it must assert `NvmeDriver.initialize` calls through operations named `disable_controller`, `program_admin_queues`, `enable_controller`, `identify_controller`, and `identify_namespace`.
+
+Run: `go test ./compiler/sem -run 'TestNvme(SourceCompiles|InitMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add wrela/machine/x86_64/nvme.wrela compiler/nvmefmt/controller_test.go compiler/nvmefmt/nvme.go
+git commit -m "feat: define nvme controller initialization -Codex Automated"
+```
+
+### Task 32: NVMe Queue Commands
+
+**Prerequisite:** Task 31.
+
+**Files:**
+
+- Modify: `compiler/nvmefmt/nvme.go`
+- Modify: `compiler/nvmefmt/nvme_test.go`
+- Modify: `wrela/machine/x86_64/nvme.wrela`
+
+**Description:** Add command builders for read, write, flush, and zone append.
+
+**Acceptance Criteria:**
+
+- Write opcode is `0x01`, read opcode is `0x02`, flush opcode is `0x00`, zone append opcode is `0x7D`.
+- Write FUA sets command dword 12 bit 30.
+- Commands include namespace ID, start LBA, block count minus one, and PRP1.
+- Transfer length greater than `131072` is rejected before command construction.
+- Mirror contract: Wrela `submit_read`, `submit_write`, `submit_flush`, and `submit_zone_append` use the same opcode and CDW field layout as host command builders.
+
+**Code Examples:**
+
+```go
+func TestWriteCommandSetsFUA(t *testing.T) {
+	cmd := BuildWriteCommand(1, 99, 8, 0x200000, true)
+	if cmd.Opcode != 0x01 || cmd.CDW12&(1<<30) == 0 {
+		t.Fatalf("write command = %#v", cmd)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing command builder tests**
+
+Run: `go test ./compiler/nvmefmt -run TestWriteCommandSetsFUA -v`
+
+Expected: FAIL because `BuildWriteCommand` is undefined or incomplete.
+
+- [ ] **Step 2: Implement command builders**
+
+Add command structs and builders in `compiler/nvmefmt`.
+
+Run: `go test ./compiler/nvmefmt -run 'Test.*Command' -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela submit methods**
+
+Implement `submit_read`, `submit_write`, `submit_flush`, and `submit_zone_append` in `NvmeIoPath`.
+
+Add `TestNvmeCommandMirrorContract`; it must assert the four submit methods exist and exported constants `NVME_OPCODE_WRITE`, `NVME_OPCODE_READ`, `NVME_OPCODE_FLUSH`, `NVME_OPCODE_ZONE_APPEND`, and `NVME_COMMAND_FUA_BIT` match host constants.
+
+Run: `go test ./compiler/sem -run 'TestNvme(SourceCompiles|CommandMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/nvmefmt/nvme.go compiler/nvmefmt/nvme_test.go wrela/machine/x86_64/nvme.wrela
+git commit -m "feat: build nvme queue commands -Codex Automated"
+```
+
+### Task 33: NVMe Completion Phase And Interrupt Receiver
+
+**Prerequisite:** Task 32.
+
+**Files:**
+
+- Modify: `compiler/nvmefmt/nvme.go`
+- Modify: `compiler/nvmefmt/nvme_test.go`
+- Modify: `wrela/machine/x86_64/nvme.wrela`
+
+**Description:** Implement completion queue draining by phase tag and publish one typed completion interrupt per drain.
+
+**Acceptance Criteria:**
+
+- Drain stops at phase mismatch.
+- Completion head wraps at queue depth and toggles expected phase.
+- Completion doorbell is rung after draining at least one entry.
+- Interrupt receiver returns `NvmeCompletionInterrupt(queue_id, completed_count)`.
+- Mirror contract: Wrela completion draining uses the same head/phase transition table as host `CompletionQueue.Advance`.
+
+**Code Examples:**
+
+```go
+func TestCompletionHeadWrapTogglesPhase(t *testing.T) {
+	q := CompletionQueue{Depth: 2, Head: 1, Phase: true}
+	q.Advance(1)
+	if q.Head != 0 || q.Phase != false {
+		t.Fatalf("queue = %#v, want head 0 phase false", q)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing completion tests**
+
+Run: `go test ./compiler/nvmefmt -run TestCompletion -v`
+
+Expected: FAIL because completion helpers are missing.
+
+- [ ] **Step 2: Implement completion helpers**
+
+Add `CompletionQueue`, `Advance`, and `DrainCompletions`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela interrupt receiver**
+
+Implement `drain_completion_queue` and `interrupt receiver -> NvmeCompletionInterrupt`.
+
+Add `TestNvmeCompletionMirrorContract`; it must assert `NvmeCompletionQueue.advance`, `NvmeCompletionQueue.drain`, `NvmeIoPath.drain_completion_queue`, and the interrupt receiver return type `NvmeCompletionInterrupt` exist.
+
+Run: `go test ./compiler/sem -run 'TestNvme(SourceCompiles|CompletionMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add compiler/nvmefmt/nvme.go compiler/nvmefmt/nvme_test.go wrela/machine/x86_64/nvme.wrela
+git commit -m "feat: drain nvme completions by interrupt -Codex Automated"
+```
+
+### Task 34: Foreground And Background Path Ownership
+
+**Prerequisites:** Tasks 12, 29, and 33.
+
+**Files:**
+
+- Modify: `wrela/machine/x86_64/nvme.wrela`
+- Modify: `compiler/sem/storage_graph.go`
+- Create: `compiler/sem/storage_path_test.go`
+- Add fixture: `tests/fixtures/negative/storage_wrong_nvme_path_owner.wrela`
+
+**Description:** Add foreground/background path wrappers and enforce executor ownership.
+
+**Acceptance Criteria:**
+
+- Foreground writer cannot be constructed with background path.
+- Maintenance worker cannot submit through foreground path.
+- Wrong owner emits `SEM0111`.
+- Graph records path label, role, owner, queue ID, vector.
+
+**Code Examples:**
+
+```wrela
+data ForegroundStoragePath { path: NvmeIoPath }
+data BackgroundStoragePath { path: NvmeIoPath }
+
+fn foreground_storage_path(self, path: NvmeIoPath) -> ForegroundStoragePath {
+    if path.role.role != NVME_PATH_FOREGROUND {
+        path.registers.panic.fail(code = 0xAC080111)
+    }
+    return ForegroundStoragePath(path = path)
+}
+```
+
+- [ ] **Step 1: Add failing path owner test**
+
+Run: `go test ./compiler/sem -run TestStoragePathWrongOwnerFails -v`
+
+Expected: FAIL because `SEM0111` is not emitted.
+
+- [ ] **Step 2: Add wrappers and semantic checks**
+
+Modify `nvme.wrela` and `storage_graph.go`.
+
+Run: `go test ./compiler/sem -run TestStoragePathWrongOwnerFails -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Add fixture and commit**
+
+```bash
+go test ./compiler -run TestNegativeFixtures -v
+git diff --check
+git add wrela/machine/x86_64/nvme.wrela compiler/sem/storage_graph.go compiler/sem/storage_path_test.go tests/fixtures/negative/storage_wrong_nvme_path_owner.wrela
+git commit -m "feat: enforce storage nvme path ownership -Codex Automated"
+```
+
+---
+
+## 9. Phase 4: Blob Storage And Maintenance
+
+**Description:** This phase adds blob data-plane structures, allocator behavior, write-order guarantees, orphan collection, and copy-on-write relocation proposals.
+
+**Acceptance Criteria:**
+
+- Blob allocator tests exercise 1024-entry behavior.
+- Events can reference only published blob refs.
+- Maintenance proposals never mutate truth directly.
+
+### Task 35: Blob Ref And 1024-Entry Allocator
+
+**Prerequisites:** Tasks 2 and 19.
+
+**Files:**
+
+- Create: `wrela/storage/blob.wrela`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Create: `compiler/sem/blob_source_test.go`
+
+**Description:** Add blob refs, extents, manifests, and first-fit free extent allocator.
+
+**Acceptance Criteria:**
+
+- `BlobRef` fields match the design.
+- Free list supports 1024 entries in host behavior.
+- Allocation splits larger extents.
+- Free coalesces adjacent extents.
+- Mirror contract: Wrela `BlobExtentAllocator` exposes the same allocator operations as host `FreeExtentList`, including the 1024-entry capacity.
+
+**Code Examples:**
+
+```go
+func TestBlobAllocatorSplitsAndCoalesces(t *testing.T) {
+	a := NewFreeExtentList(1024)
+	a.Free(Extent{StartLBA: 100, BlockCount: 10})
+	got := a.Allocate(4)
+	if got.StartLBA != 100 || got.BlockCount != 4 {
+		t.Fatalf("allocated = %#v", got)
+	}
+	a.Free(Extent{StartLBA: 104, BlockCount: 6})
+	if len(a.Extents()) != 1 || a.Extents()[0].BlockCount != 10 {
+		t.Fatalf("free list did not coalesce: %#v", a.Extents())
+	}
+}
+```
+
+- [ ] **Step 1: Add failing allocator test**
+
+Run: `go test ./compiler/storagefmt -run TestBlobAllocatorSplitsAndCoalesces -v`
+
+Expected: FAIL because allocator is undefined.
+
+- [ ] **Step 2: Implement host allocator**
+
+Add `Extent`, `FreeExtentList`, `Allocate`, `Free`, and `Extents`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela blob source and mirror test**
+
+Create `wrela/storage/blob.wrela` with `BlobRef`, `Extent`, `BlobManifest`, and `BlobExtentAllocator` source shape.
+
+Add `TestBlobSourceMirrorContract`; it must assert `BlobExtentAllocator.allocate`, `BlobExtentAllocator.free`, `BlobExtentAllocator.extents`, and constant `BLOB_ALLOCATOR_FREE_EXTENT_LIMIT = 1024` exist.
+
+Run: `go test ./compiler/sem -run 'TestBlobSource(Compiles|MirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git diff --check
+git add wrela/storage/blob.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go compiler/sem/blob_source_test.go
+git commit -m "feat: add blob refs and extent allocator -Codex Automated"
+```
+
+### Task 36: Blob Write Order And Development AEAD
+
+**Prerequisites:** Tasks 12, 25, and 35.
 
 **Files:**
 
 - Modify: `wrela/storage/blob.wrela`
+- Modify: `compiler/sem/storage.go`
 - Create: `compiler/sem/blob_cipher_test.go`
-- Modify: `compiler/sem/check.go`
-- Create: `tests/fixtures/negative/development_blob_cipher_without_opt_in.wrela`
+- Add fixture: `tests/fixtures/negative/development_blob_cipher_without_opt_in.wrela`
 
-**Description:** Add the final blob manifest cipher fields and a named development passthrough AEAD for QEMU tests. Production images must explicitly opt in before constructing that mode.
+**Description:** Add unpublished/published blob refs, final manifest fields, and named development passthrough cipher guarded by explicit opt-in.
 
 **Acceptance Criteria:**
 
-- `BlobCipherPolicy` has mode, key ID, nonce, and development opt-in fields.
-- `BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH = 1`.
-- `BlobStore.write_blob` writes bytes first, writes manifest/key metadata second, and returns `UnpublishedBlobRef`.
-- `StorageWriter` accepts events referencing only published blob refs.
-- Using development passthrough without opt-in emits `SEM0123`.
-- Logical delete appends delete event; space reclaim frees extents; privacy delete marks key destruction requested but does not claim secure erase.
+- `write_blob` returns `UnpublishedBlobRef`.
+- `StorageWriter.publish_blob_ref` converts only durable blobs to `PublishedBlobRef`.
+- Event payload encode expressions cannot reference `UnpublishedBlobRef`; violation emits `SEM0117`.
+- Development passthrough without opt-in emits `SEM0123`.
 
 **Code Examples:**
 
-Add cipher policy:
-
 ```wrela
-const BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
-
 data BlobCipherPolicy {
     mode: U64
     key_id: U64
@@ -3166,820 +3330,739 @@ data BlobCipherPolicy {
     development_opt_in: Bool
 }
 
-data UnpublishedBlobRef {
-    ref: BlobRef
-    manifest_lba: U64
-}
-
-data PublishedBlobRef {
-    ref: BlobRef
-}
-
-class DevelopmentPassthroughAead {
-    fn seal(self, extent: Extent, policy: BlobCipherPolicy) -> BlobManifest {
-        return BlobManifest(
-            blob_id = 0,
-            extent_count = 1,
-            extent0 = extent,
-            extent1 = extent,
-            extent2 = extent,
-            extent3 = extent,
-            manifest_ref = 0,
-            cipher_mode = policy.mode,
-            nonce_low = policy.nonce_low,
-            nonce_high = policy.nonce_high,
-            auth_tag_low = extent.start_lba,
-            auth_tag_high = extent.block_count
-        )
-    }
-}
+data UnpublishedBlobRef { ref: BlobRef; manifest_lba: U64 }
+data PublishedBlobRef { ref: BlobRef }
 ```
 
-Add write order shape:
+- [ ] **Step 1: Add failing cipher opt-in test**
 
-```wrela
-class BlobStore {
-    path: BackgroundStoragePath
-    allocator: BlobExtentAllocator
+Run: `go test ./compiler/sem -run TestDevelopmentBlobCipherRequiresOptIn -v`
 
-    fn panic_development_cipher(self) {
-        self.path.path.registers.panic.fail(code = 0xAC090123)
-    }
+Expected: FAIL because `SEM0123` is not emitted.
 
-    fn write_blob(self, byte_length: U64, policy: BlobCipherPolicy) -> UnpublishedBlobRef {
-        if policy.mode == BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH {
-            if policy.development_opt_in == false {
-                self.panic_development_cipher()
-            }
-        }
-        let blocks = self.blocks_for_bytes(byte_length = byte_length)
-        let extent = self.allocator.allocate(block_count = blocks)
-        self.write_extent_bytes(extent = extent)
-        self.write_manifest(extent = extent, policy = policy)
-        return UnpublishedBlobRef(ref = BlobRef(blob_id = self.next_blob_id(), byte_length = byte_length, content_hash = BlobContentHash(low = 0, high = 0), key_id = policy.key_id, extent_count = 1, inline_extents_or_manifest_ref = extent.start_lba), manifest_lba = extent.start_lba)
-    }
-}
-```
+- [ ] **Step 2: Implement semantic opt-in check**
 
-Negative fixture:
+Add `checkBlobCipherPolicy`.
 
-```wrela
-// expect: SEM0123: development blob cipher requires explicit development opt in
-module negative.development_blob_cipher_without_opt_in
-use { BlobCipherPolicy, BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH } from storage.blob
-data UsesCipher {
-    policy: BlobCipherPolicy
-}
-const BAD_MODE: U64 = BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH
-```
+Run: same command.
 
-Verification:
+Expected: PASS.
+
+- [ ] **Step 3: Add unpublished ref test**
+
+Run: `go test ./compiler/sem -run TestEventCannotReferenceUnpublishedBlob -v`
+
+Expected: FAIL because `SEM0117` is not emitted.
+
+- [ ] **Step 4: Implement unpublished ref check and source**
+
+Modify `blob.wrela` and semantic validation.
+
+Run: `go test ./compiler/sem -run 'Test(DevelopmentBlobCipher|EventCannotReferenceUnpublishedBlob)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-go test ./compiler/sem -run 'TestBlobCipher|TestNegativeFixtures' -v
-go test ./compiler/sem -v
 git diff --check
+git add wrela/storage/blob.wrela compiler/sem/storage.go compiler/sem/blob_cipher_test.go tests/fixtures/negative/development_blob_cipher_without_opt_in.wrela
+git commit -m "feat: guard blob publication and cipher mode -Codex Automated"
 ```
 
-Expected: all listed tests pass after implementation.
+### Task 37: Orphan Collection
 
-Commit:
+**Prerequisites:** Tasks 25 and 35.
+
+**Files:**
+
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Modify: `wrela/storage/blob.wrela`
+
+**Description:** Implement orphan collection from acknowledged events and manifests.
+
+**Acceptance Criteria:**
+
+- Allocated but unreferenced extent is reclaimable.
+- Referenced extent remains live.
+- Collector ignores unacknowledged event refs.
+- Mirror contract: Wrela `BlobOrphanCollector` uses the same acknowledged-ref rule as host `OrphanCollector`.
+
+**Code Examples:**
+
+```go
+func TestOrphanCollectorUsesAcknowledgedBlobRefs(t *testing.T) {
+	collector := NewOrphanCollector([]Extent{{StartLBA: 10, BlockCount: 2}, {StartLBA: 20, BlockCount: 2}})
+	collector.MarkAcknowledged(BlobRefForExtent(10, 2))
+	got := collector.Reclaimable()
+	if len(got) != 1 || got[0].StartLBA != 20 {
+		t.Fatalf("reclaimable = %#v", got)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing orphan collector test**
+
+Run: `go test ./compiler/storagefmt -run TestOrphanCollectorUsesAcknowledgedBlobRefs -v`
+
+Expected: FAIL because collector is undefined.
+
+- [ ] **Step 2: Implement host collector**
+
+Add `OrphanCollector`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela source**
+
+Add `BlobOrphanCollector` methods.
+
+Add `TestBlobOrphanMirrorContract`; it must assert `BlobOrphanCollector.mark_acknowledged`, `BlobOrphanCollector.reclaimable`, and field `acknowledged_refs` exist.
+
+Run: `go test ./compiler/sem -run 'TestBlob(SourceCompiles|OrphanMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add wrela/storage/blob.wrela compiler/sem/blob_cipher_test.go compiler/sem/check.go tests/fixtures/negative/development_blob_cipher_without_opt_in.wrela
-git commit -m "feat: add blob write manifest cipher shape -Codex Automated"
+git diff --check
+git add compiler/storagefmt/format.go compiler/storagefmt/format_test.go wrela/storage/blob.wrela
+git commit -m "feat: collect orphaned blob extents -Codex Automated"
 ```
 
-### Task 20: Orphan Collection And Blob Relocation Proposals
+### Task 38: Blob Relocation Proposals
+
+**Prerequisites:** Tasks 12, 35, and 37.
 
 **Files:**
 
 - Modify: `wrela/storage/blob.wrela`
 - Modify: `wrela/storage/writer.wrela`
-- Create: `compiler/sem/blob_maintenance_test.go`
-- Create: `tests/fixtures/negative/maintenance_mutates_blob_truth.wrela`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Modify: `compiler/sem/blob_source_test.go`
+- Add fixture: `tests/fixtures/negative/maintenance_mutates_blob_truth.wrela`
 
-**Description:** Add background orphan collection and copy-on-write blob relocation. Maintenance workers propose changes; only `StorageWriter` publishes truth.
+**Description:** Add copy-on-write relocation proposals validated by `StorageWriter`.
 
 **Acceptance Criteria:**
 
-- Orphan collector builds live extent set from acknowledged events and blob manifests.
-- Allocated but unreachable extents become reclaimable.
-- Relocation copies blob bytes to new extents before proposing `RelocateBlob`.
-- `StorageWriter` validates `old_ref`, `new_ref`, and `observed_version`.
-- Maintenance code directly mutating writer-published roots emits `SEM0118`.
-- Failure before proposal acceptance leaves new copy orphaned.
-- Failure after proposal acceptance but before old extent free leaves old copy orphaned.
+- Proposal includes blob ID, old ref, new ref, and observed version.
+- Writer rejects proposal if current ref or version changed.
+- Maintenance direct mutation of truth emits `SEM0118`.
+- Mirror contract: Wrela relocation proposal fields match host `RelocateBlobProposal` exactly.
 
 **Code Examples:**
 
-Add proposal types:
-
-```wrela
-data RelocateBlobProposal {
-    blob_id: U64
-    old_ref: BlobRef
-    new_ref: BlobRef
-    observed_version: U64
-}
-
-data ReclaimExtentsProposal {
-    extent_count: U64
-    reason: U64
-    first_extent: Extent
-}
-
-enum MaintenanceProposal {
-    RelocateBlob(value: RelocateBlobProposal)
-    ReclaimExtents(value: ReclaimExtentsProposal)
+```go
+func TestRelocateBlobRejectsStaleVersion(t *testing.T) {
+	writer := BlobTruth{Version: 4, Ref: BlobRef{BlobID: 9}}
+	ok := writer.AcceptRelocate(RelocateBlobProposal{BlobID: 9, OldRef: writer.Ref, NewRef: BlobRef{BlobID: 9}, ObservedVersion: 3})
+	if ok {
+		t.Fatal("stale relocation must be rejected")
+	}
 }
 ```
 
-Writer validation:
+- [ ] **Step 1: Add failing relocation behavior test**
 
-```wrela
-fn accept_relocate_blob(self, proposal: RelocateBlobProposal) -> Bool {
-    let current = self.current_blob_ref(blob_id = proposal.blob_id)
-    if current.blob_id != proposal.old_ref.blob_id {
-        return false
-    }
-    if proposal.observed_version != self.blob_version(blob_id = proposal.blob_id) {
-        return false
-    }
-    self.append_blob_relocated_event(old_ref = proposal.old_ref, new_ref = proposal.new_ref)
-    return true
-}
-```
+Run: `go test ./compiler/storagefmt -run TestRelocateBlobRejectsStaleVersion -v`
 
-Orphan collector shape:
+Expected: FAIL because relocation helpers are undefined.
 
-```wrela
-class BlobOrphanCollector {
-    path: BackgroundStoragePath
+- [ ] **Step 2: Implement host relocation validation**
 
-    fn mark_live_from_event(self, blob: BlobRef) {
-        self.mark_blob_extents_live(blob = blob)
-    }
+Add `BlobTruth` and `AcceptRelocate`.
 
-    fn reclaim_unmarked_allocations(self) -> ReclaimExtentsProposal {
-        let extent = self.first_unmarked_allocated_extent()
-        return ReclaimExtentsProposal(extent_count = 1, reason = 1, first_extent = extent)
-    }
-}
-```
+Run: same command.
 
-Negative fixture:
+Expected: PASS.
 
-```wrela
-// expect: SEM0118: maintenance proposal must not mutate blob truth directly
-module negative.maintenance_mutates_blob_truth
-use { BlobRef } from storage.blob
-class BadMaintenance {
-    current: BlobRef
-    fn run(self, next: BlobRef) {
-        self.current = next
-    }
-}
-```
+- [ ] **Step 3: Add Wrela proposal source and semantic fixture**
 
-Verification:
+Modify `blob.wrela`, `writer.wrela`, and add fixture.
+
+Add `TestBlobRelocationMirrorContract`; it must assert Wrela fields `RelocateBlobProposal.blob_id`, `old_ref`, `new_ref`, and `observed_version` exist.
+
+Run: `go test ./compiler/sem -run TestBlobRelocationMirrorContract -v && go test ./compiler -run TestNegativeFixtures -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run 'TestBlobMaintenance|TestNegativeFixtures' -v
-go test ./compiler/sem -v
 git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/blob.wrela wrela/storage/writer.wrela compiler/sem/blob_maintenance_test.go tests/fixtures/negative/maintenance_mutates_blob_truth.wrela
-git commit -m "feat: add blob orphan relocation proposals -Codex Automated"
+git add wrela/storage/blob.wrela wrela/storage/writer.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go compiler/sem/blob_source_test.go tests/fixtures/negative/maintenance_mutates_blob_truth.wrela
+git commit -m "feat: validate blob relocation proposals -Codex Automated"
 ```
 
 ---
 
-## 9. Phase 6: Projections, Checkpoints, And File Model
+## 10. Phase 5: Projections And File Model
 
-**Description:** This phase adds durable projection root shapes, explicit maintenance-core workers, read-plane watermarks, checkpoints, and the first file-like entity stream whose content is a blob ref.
+**Description:** This phase adds durable projection roots, explicit feed wiring, read watermarks, and a file-like entity model.
 
 **Acceptance Criteria:**
 
-- Projection declarations are durable ABI only.
-- Projection workers consume committed atomic groups from explicit core-link SPSC feeds.
-- Projection roots are copy-on-write and writer-published.
-- Queries return records plus watermark.
-- File-like events prove events plus blobs can model file content without POSIX.
+- Projection declarations remain ABI only.
+- Projection workers use explicit core-link feeds.
+- File content is a blob ref.
 
-**Phase Code Example:**
+### Task 39: Projection Source And Watermark Behavior
 
-```wrela
-projection DirectoryChildren id 12 {
-    layout 1 current {
-        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
-    }
-}
-```
-
-### Task 21: Projection Containers, Roots, And Read Plane
+**Prerequisites:** Tasks 11, 12, and 25.
 
 **Files:**
 
 - Create: `wrela/storage/projection.wrela`
-- Create: `compiler/sem/projection_storage_test.go`
-- Modify: `wrela/storage/writer.wrela`
-- Modify: `compiler/sem/check.go`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+- Create: `compiler/sem/projection_source_test.go`
 
-**Description:** Add the small projection container set and writer-published projection roots. Query code reads immutable roots and checks watermarks; it does not call projection workers.
+**Description:** Add projection containers, checkpoints, root refs, query results, and watermark validation behavior.
 
 **Acceptance Criteria:**
 
 - `StateCell<T>`, `DenseEntityMap<Id, T>`, and `OrderedPages<Partition, SortKey, Row>` exist.
-- `ProjectionCheckpoint` includes projection ID, layout ID, layout hash, worker code hash, last event ID applied, and root refs.
-- `ProjectionWriter.publish(last_event_id)` creates an `AdvanceProjection` proposal.
-- `StorageWriter` accepts `AdvanceProjection` only when `through_event_id <= atomic_group_frontier`.
-- Invalid projection watermark emits `SEM0119`.
-- Projection worker without boot-wired feed emits `SEM0120`.
+- `ProjectionCheckpoint` contains projection ID, layout ID, layout hash, worker code hash, last append-log `event_id`, and root refs.
+- Writer accepts `AdvanceProjection` only through current frontier.
+- Invalid watermark emits `SEM0119`.
+- Mirror contract: Wrela `AdvanceProjection` fields and frontier rule match host `ProjectionTruth.AcceptAdvance`.
 
 **Code Examples:**
 
-Create projection source:
-
-```wrela
-module storage.projection
-
-use { CoreSpscConsumer, CoreSpscProducer } from machine.x86_64.core_link
-use { CommittedAtomicGroup, MaintenanceProposal } from storage.writer
-
-data RootRef {
-    lba: U64
-    byte_length: U64
-    checksum32: U32
-}
-
-data ProjectionCheckpoint {
-    projection_id: U64
-    projection_layout_id: U64
-    projection_layout_hash: U64
-    worker_code_hash: U64
-    last_event_id_applied: U64
-    root_ref0: RootRef
-    root_ref1: RootRef
-    root_ref2: RootRef
-    root_ref3: RootRef
-}
-
-data StateCell<T> {
-    root: RootRef
-}
-
-data DenseEntityMap<Id, T> {
-    root: RootRef
-    chunk_count: U64
-}
-
-data OrderedPages<Partition, SortKey, Row> {
-    root: RootRef
-    first_page_ref: RootRef
-}
-
-data AdvanceProjectionProposal {
-    projection_id: U64
-    through_event_id: U64
-    checkpoint: ProjectionCheckpoint
-}
-
-class ProjectionWriter<P> {
-    projection_id: U64
-    proposal_out: CoreSpscProducer<MaintenanceProposal>
-
-    fn publish(self, through_event_id: U64, checkpoint: ProjectionCheckpoint) {
-        let proposal = AdvanceProjectionProposal(projection_id = self.projection_id, through_event_id = through_event_id, checkpoint = checkpoint)
-        self.submit_advance(proposal = proposal)
-    }
-}
-
-data ProjectionQueryResult<T> {
-    watermark_event_id: U64
-    value: T
-}
-```
-
-Read-plane shape:
-
-```wrela
-class ProjectionReader<P> {
-    projection_id: U64
-    latest: ProjectionCheckpoint
-
-    fn watermark(self) -> U64 {
-        return self.latest.last_event_id_applied
-    }
-}
-```
-
-Add semantic test:
-
 ```go
-func TestProjectionContainersAreLimitedAndRooted(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/projection.wrela")
-	for _, want := range []string{
-		"data StateCell<T>",
-		"data DenseEntityMap<Id, T>",
-		"data OrderedPages<Partition, SortKey, Row>",
-		"last_event_id_applied",
-		"AdvanceProjectionProposal",
-		"through_event_id",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("projection source missing %q", want)
-		}
+func TestProjectionCannotAdvancePastFrontier(t *testing.T) {
+	state := ProjectionTruth{AtomicGroupFrontier: 10}
+	ok := state.AcceptAdvance(AdvanceProjection{ProjectionID: 12, ThroughEventID: 11})
+	if ok {
+		t.Fatal("projection advanced past frontier")
 	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing projection behavior test**
+
+Run: `go test ./compiler/storagefmt -run TestProjectionCannotAdvancePastFrontier -v`
+
+Expected: FAIL because projection helpers are undefined.
+
+- [ ] **Step 2: Implement host projection truth**
+
+Add `ProjectionTruth` and `AcceptAdvance`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add Wrela projection source and mirror test**
+
+Create `wrela/storage/projection.wrela`.
+
+Add `TestProjectionSourceMirrorContract`; it must assert `AdvanceProjection.projection_id`, `AdvanceProjection.through_event_id`, `ProjectionTruth.accept_advance`, and containers `StateCell`, `DenseEntityMap`, and `OrderedPages` exist.
+
+Run: `go test ./compiler/sem -run 'TestProjectionSource(Compiles|MirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run TestProjectionContainersAreLimitedAndRooted -v
-go test ./compiler/sem -v
 git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/projection.wrela wrela/storage/writer.wrela compiler/sem/projection_storage_test.go compiler/sem/check.go
+git add wrela/storage/projection.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go compiler/sem/projection_source_test.go
 git commit -m "feat: add projection storage roots -Codex Automated"
 ```
 
-### Task 22: File-Like Entity Stream And Directory Projection Worker
+### Task 40: Projection Feed Wiring
+
+**Prerequisites:** Tasks 28 and 39.
+
+**Files:**
+
+- Modify: `compiler/sem/storage_graph.go`
+- Create: `compiler/sem/projection_feed_test.go`
+- Add fixture: `tests/fixtures/negative/projection_worker_without_feed.wrela`
+
+**Description:** Enforce that projection workers receive committed groups only from explicit boot-wired core-link feeds.
+
+**Acceptance Criteria:**
+
+- Worker without feed emits `SEM0120`.
+- Worker feed owner must be maintenance slot.
+- Foreground writer publishes descriptors to configured producer.
+
+**Code Examples:**
+
+```go
+func TestProjectionWorkerRequiresFeed(t *testing.T) {
+	_, ds := typeDiagsForModules(t, projectionWorkerWithoutFeedSource)
+	if !hasCode(ds, diag.SEM0120) {
+		t.Fatalf("diagnostics = %#v, want SEM0120", ds)
+	}
+}
+```
+
+- [ ] **Step 1: Add failing feed test**
+
+Run: `go test ./compiler/sem -run TestProjectionWorkerRequiresFeed -v`
+
+Expected: FAIL because `SEM0120` is not emitted.
+
+- [ ] **Step 2: Implement feed graph check**
+
+Record `ProjectionFeedNode` from boot wiring and check projection worker fields.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add fixture and commit**
+
+```bash
+go test ./compiler -run TestNegativeFixtures -v
+git diff --check
+git add compiler/sem/storage_graph.go compiler/sem/projection_feed_test.go tests/fixtures/negative/projection_worker_without_feed.wrela
+git commit -m "feat: enforce projection feed wiring -Codex Automated"
+```
+
+### Task 41: File-Like Entity Stream
+
+**Prerequisites:** Tasks 10, 35, and 39.
 
 **Files:**
 
 - Create: `wrela/storage/file_model.wrela`
-- Modify: `wrela/storage/projection.wrela`
-- Create: `compiler/sem/file_model_test.go`
-- Create: `tests/e2e/fixtures/nvme_event_storage/program.wrela`
+- Create: `compiler/sem/file_model_source_test.go`
 
-**Description:** Add one file-like model on top of events and blobs. This proves file content, names, directory membership, and deletion without implementing POSIX.
+**Description:** Add file-like events and state on top of streams and blobs. This is not POSIX.
 
 **Acceptance Criteria:**
 
-- File events have stable IDs starting at `1001`.
-- File content event stores `BlobRef`, not inline bytes.
-- Rename and move can be encoded as one atomic group by writer code.
+- File events have IDs 1001-1004.
+- `FileContentCommitted` stores `PublishedBlobRef`.
 - `FileState` stores current blob ref, name ref, parent ID, deleted flag, and stream sequence.
-- `DirectoryProjectionWorker` consumes `CommittedAtomicGroup` from core link and publishes `DirectoryChildren`.
-- Worker ignores events it does not understand.
-- Query result includes watermark.
+- `DirectoryChildren` projection uses `OrderedPages<FileId, FileNameKey, DirectoryChild>`.
 
 **Code Examples:**
 
-Create file model:
-
 ```wrela
-module storage.file_model
-
-use { BlobRef } from storage.blob
-use { OrderedPages, ProjectionWriter, ProjectionQueryResult } from storage.projection
-use { CommittedAtomicGroup } from storage.writer
-use { CoreSpscConsumer } from machine.x86_64.core_link
-use { Option } from wrela.lang.core
-
-data FileId {
-    value: U64
-}
-
-data FileNameKey {
-    hash: U64
-}
-
-data DirectoryChild {
-    file_id: FileId
-    name_ref: BlobRef
-    deleted: Bool
-}
-
-data FileState {
-    file_id: FileId
-    current_blob_ref: BlobRef
-    name_ref: BlobRef
-    parent_id: FileId
-    deleted: Bool
-    stream_sequence: U64
-}
-
-event FileCreated id 1001 {
-    file_id: FileId
-    parent_id: FileId
-    name_ref: BlobRef
-    layout 1 current {
-        file_id: U64 = self.file_id.value
-        parent_id: U64 = self.parent_id.value
-        name_ref: BlobRef = self.name_ref
-    }
-}
-
-event FileRenamed id 1002 {
-    file_id: FileId
-    parent_id: FileId
-    name_ref: BlobRef
-    layout 1 current {
-        file_id: U64 = self.file_id.value
-        parent_id: U64 = self.parent_id.value
-        name_ref: BlobRef = self.name_ref
-    }
-}
-
 event FileContentCommitted id 1003 {
     file_id: FileId
-    blob_ref: BlobRef
+    blob_ref: PublishedBlobRef
     layout 1 current {
         file_id: U64 = self.file_id.value
-        blob_ref: BlobRef = self.blob_ref
-    }
-}
-
-event FileDeleted id 1004 {
-    file_id: FileId
-    layout 1 current {
-        file_id: U64 = self.file_id.value
-    }
-}
-
-projection DirectoryChildren id 12 {
-    layout 1 current {
-        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
+        blob_ref: PublishedBlobRef = self.blob_ref
     }
 }
 ```
 
-Projection worker:
+- [ ] **Step 1: Add failing file model compile test**
 
-```wrela
-class DirectoryProjectionWorker {
-    source: CoreSpscConsumer<CommittedAtomicGroup>
-    projection: ProjectionWriter<DirectoryChildren>
+Run: `go test ./compiler/sem -run TestFileModelSourceCompiles -v`
 
-    fn run_once(self) {
-        let next = self.source.try_recv()
-        match next {
-            Option.Some(value = group) -> self.apply_group(group = group)
-            Option.None -> self.source.arm_wait()
-        }
-    }
+Expected: FAIL because module does not exist.
 
-    fn apply_group(self, group: CommittedAtomicGroup) {
-        self.apply_events(first_event_id = group.first_event_id, last_event_id = group.last_event_id)
-        self.projection.publish(through_event_id = group.last_event_id, checkpoint = self.current_checkpoint())
-    }
-}
+- [ ] **Step 2: Add file model source**
+
+Create events, projection declaration, `FileState`, and `DirectoryProjectionWorker`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add wrela/storage/file_model.wrela compiler/sem/file_model_source_test.go
+git commit -m "feat: add file model on event storage -Codex Automated"
 ```
 
-Add source test:
+### Task 42: Directory Projection Worker Behavior
+
+**Prerequisites:** Tasks 25, 39, 40, and 41.
+
+**Files:**
+
+- Modify: `wrela/storage/file_model.wrela`
+- Modify: `compiler/storagefmt/format.go`
+- Modify: `compiler/storagefmt/format_test.go`
+
+**Description:** Add behavior-testable directory projection updates.
+
+**Acceptance Criteria:**
+
+- Worker ignores unknown event type IDs.
+- `FileCreated`, `FileRenamed`, `FileContentCommitted`, and `FileDeleted` update file state.
+- Worker publishes watermark equal to group `last_event_id`.
+- Mirror contract: Wrela `DirectoryProjectionWorker.apply_group` applies the same event-type table as host `DirectoryProjection.ApplyGroup`.
+
+**Code Examples:**
 
 ```go
-func TestFileModelUsesEventsAndBlobRefs(t *testing.T) {
-	source := readRepoFile(t, "wrela/storage/file_model.wrela")
-	for _, want := range []string{
-		"event FileCreated id 1001",
-		"event FileRenamed id 1002",
-		"event FileContentCommitted id 1003",
-		"event FileDeleted id 1004",
-		"blob_ref: BlobRef",
-		"projection DirectoryChildren id 12",
-		"DirectoryProjectionWorker",
-	} {
-		if !strings.Contains(source, want) {
-			t.Fatalf("file model source missing %q", want)
-		}
+func TestDirectoryProjectionPublishesGroupWatermark(t *testing.T) {
+	p := DirectoryProjection{}
+	p.ApplyGroup(CommittedGroup{LastEventID: 9}, []Event{{TypeID: 1001}})
+	if p.Watermark != 9 {
+		t.Fatalf("watermark = %d, want 9", p.Watermark)
 	}
 }
 ```
 
-Verification:
+- [ ] **Step 1: Add failing directory projection behavior test**
+
+Run: `go test ./compiler/storagefmt -run TestDirectoryProjectionPublishesGroupWatermark -v`
+
+Expected: FAIL because behavior helper is undefined.
+
+- [ ] **Step 2: Implement host projection behavior**
+
+Add `DirectoryProjection` with fields `Files map[uint64]FileState`, `Watermark uint64`, and method `ApplyGroup(group CommittedGroup, events []Event)`. The method must ignore unknown `Event.TypeID`, update file state for type IDs `1001..1004`, and set `Watermark = group.LastEventID` after processing the group.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Mirror Wrela worker code**
+
+Update `DirectoryProjectionWorker.apply_group`.
+
+Add `TestDirectoryProjectionWorkerMirrorContract`; it must assert `DirectoryProjectionWorker.apply_group` handles `FILE_EVENT_CREATED = 1001`, `FILE_EVENT_RENAMED = 1002`, `FILE_EVENT_CONTENT_COMMITTED = 1003`, and `FILE_EVENT_DELETED = 1004`.
+
+Run: `go test ./compiler/sem -run 'Test(FileModelSourceCompiles|DirectoryProjectionWorkerMirrorContract)' -v`
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-go test ./compiler/sem -run TestFileModelUsesEventsAndBlobRefs -v
-go test ./compiler/sem -v
 git diff --check
-```
-
-Expected: all listed tests pass after implementation.
-
-Commit:
-
-```bash
-git add wrela/storage/file_model.wrela wrela/storage/projection.wrela compiler/sem/file_model_test.go tests/e2e/fixtures/nvme_event_storage/program.wrela
-git commit -m "feat: add file model on event storage -Codex Automated"
+git add wrela/storage/file_model.wrela compiler/storagefmt/format.go compiler/storagefmt/format_test.go
+git commit -m "feat: apply directory projection groups -Codex Automated"
 ```
 
 ---
 
-## 10. Phase 7: End-To-End Storage Image, Replay, And Metrics
+## 11. Phase 6: E2E And Metrics
 
-**Description:** This phase wires the pieces into a bootable QEMU image and proves append, replay, blob refs, projection advancement, orphan collection, and metrics.
-
-**Acceptance Criteria:**
-
-- QEMU launches with an NVMe device and persistent raw disk image.
-- First boot writes file-like events and blob bytes.
-- Second boot recovers acknowledged events and rebuilds stale derived state.
-- Projection root watermark reaches the committed event ID.
-- Metrics report validates durability mode, LBA size, underfilled slots, foreground/background queue depth, blob orphan bytes, and projection lag.
-
-**Phase Code Example:**
-
-```bash
-go test ./tests/e2e -run NvmeEventStorage -v
-go test ./tests/e2e -run NvmeEventStorageReplay -v
-```
-
-### Task 23: Storage Image Boot Wiring
-
-**Files:**
-
-- Create: `tests/e2e/fixtures/nvme_event_storage/main.wrela`
-- Modify: `tests/e2e/fixtures/nvme_event_storage/program.wrela`
-- Create: `tests/e2e/nvme_event_storage_qemu_test.go`
-- Modify: `compiler/integration_test.go`
-
-**Description:** Add the boot image that discovers NVMe, creates foreground/background paths, creates a foreground `StorageWriter`, creates a maintenance projection worker, writes a file-like entity, and prints a deterministic serial marker.
+**Description:** This phase wires the boot image, replay test, orphan collection test, and reports. It starts only after all compiler/runtime storage pieces land.
 
 **Acceptance Criteria:**
 
-- Image requires at least two executor slots: `foreground` and `maintenance`.
-- NVMe PCI device is discovered by class shape, not vendor/device ID.
-- Foreground path owner is foreground slot.
-- Background path owner is maintenance slot.
-- Foreground writes one file create event and one content commit event in one atomic group.
-- Maintenance worker receives a committed group descriptor and advances `DirectoryChildren`.
-- Serial output includes `NVME_STORAGE_APPEND_OK`.
+- QEMU disk is a sparse 4 GiB raw disk.
+- First boot appends two events in one atomic group and prints `last_event_id=1`.
+- Replay boot recovers `last_event_id=1`.
+- Metrics command uses the corrected placeholder scan.
 
-**Code Examples:**
+### Task 43: Storage Report Metrics
 
-Boot wiring shape:
-
-```wrela
-image NvmeEventStorageImage {
-    transitions { delegated_hardware -> owned_hardware }
-
-    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
-        let panic = BootPanic()
-        let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
-        let nvme_device = discovery.pci.require_class(base = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
-        let foreground_slot = ExecutorSlot(id = 0)
-        let maintenance_slot = ExecutorSlot(id = 1)
-        let nvme = NvmeDriver(registers = NvmeControllerRegisters(mmio = nvme_device.claim_mmio_bar(index = 0), panic = panic), memory = DriverMemory(), namespace = NvmeNamespace(namespace_id = 1, logical_block_size = 512, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = true, atomic_write_unit_blocks = 1, power_fail_atomic_write_unit_blocks = 1, volatile_write_cache = false)).initialize(device = nvme_device)
-        let foreground_path = nvme.create_io_path(identity = PathIdentity(label = "storage.foreground"), owner = foreground_slot, role = NvmePathRole(role = NVME_PATH_FOREGROUND), route = foreground_route, irq = foreground_irq.publisher())
-        let background_path = nvme.create_io_path(identity = PathIdentity(label = "storage.background"), owner = maintenance_slot, role = NvmePathRole(role = NVME_PATH_BACKGROUND), route = background_route, irq = background_irq.publisher())
-        return hardware.exit_to_owned_hardware(memory_plan = memory_plan, cpu_plan = cpu_plan, hardware_plan = hardware_plan)
-    }
-}
-```
-
-QEMU test skeleton:
-
-```go
-func TestNvmeEventStorageQEMU(t *testing.T) {
-	disk := t.TempDir() + "/storage.raw"
-	createRawDisk(t, disk, 64*1024*1024)
-	result := runWrelaQEMU(t, qemuRunConfig{
-		Fixture: "nvme_event_storage",
-		ExtraArgs: []string{
-			"-drive", "file=" + disk + ",if=none,id=nvme0,format=raw",
-			"-device", "nvme,drive=nvme0,serial=wrela-storage-0",
-		},
-	})
-	if !strings.Contains(result.Serial, "NVME_STORAGE_APPEND_OK") {
-		t.Fatalf("serial output missing append marker:\n%s", result.Serial)
-	}
-}
-```
-
-Verification:
-
-```bash
-go test ./compiler -run TestIntegration -v
-go test ./tests/e2e -run TestNvmeEventStorageQEMU -v
-git diff --check
-```
-
-Expected: integration and QEMU tests pass on a machine with QEMU/OVMF.
-
-Commit:
-
-```bash
-git add tests/e2e/fixtures/nvme_event_storage/main.wrela tests/e2e/fixtures/nvme_event_storage/program.wrela tests/e2e/nvme_event_storage_qemu_test.go compiler/integration_test.go
-git commit -m "test: boot nvme event storage image -Codex Automated"
-```
-
-### Task 24: Replay After Reboot And Orphan Collection E2E
-
-**Files:**
-
-- Modify: `tests/e2e/nvme_event_storage_qemu_test.go`
-- Modify: `tests/e2e/fixtures/nvme_event_storage/program.wrela`
-- Modify: `wrela/storage/event_log.wrela`
-- Modify: `wrela/storage/blob.wrela`
-
-**Description:** Prove acknowledged events survive reboot, unaccepted blob relocation leaves recoverable orphans, and projection roots never claim a false watermark.
-
-**Acceptance Criteria:**
-
-- First QEMU boot appends acknowledged file events and prints last event ID.
-- Second QEMU boot uses the same disk image, scans event slots, and prints the same last event ID.
-- Recovery rebuilds stream directory when directory metadata is marked stale.
-- Injected relocation crash before writer acceptance leaves new extents counted as orphan bytes.
-- Projection watermark after replay is less than or equal to atomic group frontier and reaches the committed group after maintenance runs.
-- Serial output includes `NVME_STORAGE_REPLAY_OK` and `NVME_ORPHAN_COLLECTION_OK`.
-
-**Code Examples:**
-
-Replay test:
-
-```go
-func TestNvmeEventStorageReplayQEMU(t *testing.T) {
-	disk := t.TempDir() + "/storage.raw"
-	createRawDisk(t, disk, 64*1024*1024)
-	first := runStorageQEMU(t, disk, "first")
-	if !strings.Contains(first.Serial, "NVME_STORAGE_APPEND_OK last_event_id=1") {
-		t.Fatalf("first boot missing append marker:\n%s", first.Serial)
-	}
-	second := runStorageQEMU(t, disk, "replay")
-	for _, want := range []string{
-		"NVME_STORAGE_REPLAY_OK last_event_id=1",
-		"NVME_ORPHAN_COLLECTION_OK",
-		"projection_watermark=1",
-	} {
-		if !strings.Contains(second.Serial, want) {
-			t.Fatalf("second boot missing %q:\n%s", want, second.Serial)
-		}
-	}
-}
-```
-
-Runtime replay marker:
-
-```wrela
-fn print_replay_result(self, recovered: RecoveryResult, projection_watermark: U64) {
-    if recovered.atomic_group_frontier == 1 {
-        self.serial.write(bytes = "NVME_STORAGE_REPLAY_OK last_event_id=1\n")
-    }
-    if projection_watermark == recovered.atomic_group_frontier {
-        self.serial.write(bytes = "projection_watermark=1\n")
-    }
-}
-```
-
-Verification:
-
-```bash
-go test ./tests/e2e -run TestNvmeEventStorageReplayQEMU -v
-git diff --check
-```
-
-Expected: QEMU replay test passes on a machine with QEMU/OVMF.
-
-Commit:
-
-```bash
-git add tests/e2e/nvme_event_storage_qemu_test.go tests/e2e/fixtures/nvme_event_storage/program.wrela wrela/storage/event_log.wrela wrela/storage/blob.wrela
-git commit -m "test: verify nvme event storage replay -Codex Automated"
-```
-
-### Task 25: Storage Metrics And Final Acceptance Sweep
+**Prerequisites:** Tasks 12, 25, 34, 38, 39, and 40.
 
 **Files:**
 
 - Modify: `compiler/report/report.go`
 - Modify: `compiler/report/report_test.go`
 - Modify: `compiler/sem/report.go`
-- Modify: `wrela/storage/format.wrela`
-- Modify: `tests/e2e/nvme_event_storage_qemu_test.go`
-- Modify: `docs/production-deferred-work.md`
+- Create: `compiler/sem/storage_report_test.go`
 
-**Description:** Publish the metrics needed to judge the design and run the full acceptance sweep.
+**Description:** Publish storage audit and metrics data from the semantic graph.
 
 **Acceptance Criteria:**
 
-- Report includes active LBA size, namespace mode, durability mode, event slot size, atomic groups per second, events per group, overflow slots, rejected oversized groups, events per committed LBA, sealed event block count, underfilled LBA count, reserved empty slots, bytes per durable event, estimated drive writes per day, device media writes, latency percentiles, payload utilization, payload overflow count, hot/packed/compressed bytes per event, compression ratio, compression time, compressed segment lookup latency, compression backlog, foreground/background queue depth, completion latency, core-link queue depth, core-link wake count, blob orphan bytes, projection lag, projection rebuild time, projection SPSC depth, projection backpressure, projection layout upcast/rebuild counts, and stream directory cache hit rate.
-- E2E serial output includes `NVME_STORAGE_METRICS_OK`.
-- Deferred-work docs retain all out-of-scope storage items from Task 1.
-- Final commands pass.
+- Report includes active LBA size, namespace mode, durability mode, event slot size, batch metrics, latency metrics, media-write metrics, queue depths, core-link metrics, blob orphan bytes, projection lag, projection upcast/rebuild counts, and stream directory cache hit rate.
+- Missing required storage metrics in a storage image emits `SEM0124`.
 
 **Code Examples:**
 
-Report structs:
-
 ```go
 type StorageReport struct {
-	ActiveLBASize      uint64
-	NamespaceMode      string
-	DurabilityMode     string
-	EventSlotSize      uint64
-	AtomicGroupsPerSec uint64
-	EventsPerGroup     uint64
-	BatchOverflowSlots uint64
-	RejectedOversizedGroups uint64
-	EventsPerCommittedLBA uint64
-	SealedEventBlocks uint64
-	UnderfilledLBAs    uint64
+	ActiveLBASize uint64
+	NamespaceMode string
+	DurabilityMode string
+	EventSlotSize uint64
 	ReservedEmptySlots uint64
-	BytesPerEvent      uint64
-	EstimatedDriveWritesPerDay uint64
 	DeviceReportedMediaWrites uint64
-	GroupCommitLatencyP99US uint64
-	AppendAckLatencyP99US uint64
-	PayloadUtilizationX1000 uint64
-	PayloadOverflowCount uint64
-	HotBytesPerEvent uint64
-	PackedBytesPerEvent uint64
-	CompressedBytesPerEvent uint64
-	CompressionRatioX1000 uint64
-	CompressionCPUTimeUS uint64
-	CompressedSegmentLookupLatencyUS uint64
-	ColdCompressionBacklog uint64
-	ForegroundQueueDepth uint64
-	BackgroundQueueDepth uint64
-	ForegroundCompletionLatencyUS uint64
-	BackgroundCompletionLatencyUS uint64
-	CoreLinkQueueDepth uint64
-	CoreLinkWakeCount  uint64
-	BlobOrphanBytes    uint64
 	ProjectionLagEvents uint64
-	ProjectionRebuildTimeUS uint64
-	ProjectionSPSCDepth uint64
-	ProjectionBackpressureCount uint64
-	ProjectionLayoutUpcastCount uint64
-	ProjectionLayoutRebuildCount uint64
 	StreamDirectoryCacheHitRateX1000 uint64
-	NvmePaths          []NvmePathReport
-}
-
-type NvmePathReport struct {
-	Label   string
-	Role    string
-	Owner   string
-	QueueID uint16
-	Vector  uint8
+	NvmePaths []NvmePathReport
 }
 ```
 
-Report test:
+- [ ] **Step 1: Add failing report test**
+
+Run: `go test ./compiler/report -run TestStorageMetricsReportShape -v`
+
+Expected: FAIL because `StorageReport` fields are undefined.
+
+- [ ] **Step 2: Add report structs**
+
+Modify `compiler/report/report.go`.
+
+Run: same command.
+
+Expected: PASS.
+
+- [ ] **Step 3: Add semantic report population test**
+
+Run: `go test ./compiler/sem -run TestStorageMetricsReportPopulation -v`
+
+Expected: FAIL because sem report does not populate storage fields.
+
+- [ ] **Step 4: Populate report**
+
+Modify `compiler/sem/report.go`.
+
+Run:
+
+```bash
+go test ./compiler/report -run TestStorageMetricsReportShape -v
+go test ./compiler/sem -run TestStorageMetricsReportPopulation -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git diff --check
+git add compiler/report/report.go compiler/report/report_test.go compiler/sem/report.go compiler/sem/storage_report_test.go
+git commit -m "feat: report nvme event storage metrics -Codex Automated"
+```
+
+### Task 44: NVMe Storage Boot Fixture
+
+**Prerequisites:** Tasks 4, 26, 34, 41, and 43.
+
+**Files:**
+
+- Create: `tests/e2e/fixtures/nvme_event_storage/main.wrela`
+- Create: `tests/e2e/fixtures/nvme_event_storage/program.wrela`
+- Create: `tests/e2e/nvme_event_storage_qemu_test.go`
+
+**Description:** Boot a storage image, discover NVMe by class code, create foreground/background paths, append a two-event atomic group, and print deterministic serial markers.
+
+**Acceptance Criteria:**
+
+- NVMe PCI function is selected by base class `0x01`, subclass `0x08`, prog-if `0x02`.
+- Foreground path owner is foreground slot.
+- Background path owner is maintenance slot.
+- `main.wrela` defines both `phase delegated_hardware(...) -> OwnedHardware` and `phase owned_hardware(hardware: OwnedHardware) -> never`.
+- `StorageWriter` is constructed only in the owned-hardware phase using the legal constructor shape from Task 12.
+- First command appends `FileCreated` and `FileContentCommitted` as one atomic group.
+- Serial output includes `NVME_STORAGE_APPEND_OK last_event_id=1` and `NVME_STORAGE_DONE`.
+
+**Code Examples:**
 
 ```go
-func TestStorageMetricsReport(t *testing.T) {
-	checked := &sem.CheckedProgram{ImageGraph: sem.ImageGraph{}}
-	r := sem.BuildImageReport(checked)
-	r.Storage.ActiveLBASize = 512
-	r.Storage.DurabilityMode = "fua"
-	r.Storage.EventSlotSize = 512
-	r.Storage.NvmePaths = []report.NvmePathReport{{Label: "storage.foreground", Role: "foreground", Owner: "foreground", QueueID: 1, Vector: 0x50}}
-	if r.Storage.ActiveLBASize != 512 || r.Storage.EventSlotSize != 512 {
-		t.Fatalf("storage metrics missing fixed sizes: %#v", r.Storage)
-	}
-	if len(r.Storage.NvmePaths) != 1 || r.Storage.NvmePaths[0].Role != "foreground" {
-		t.Fatalf("storage paths missing: %#v", r.Storage.NvmePaths)
+func TestNvmeEventStorageQEMU(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "storage.raw")
+	createSparseRawDisk(t, disk, nvmeStorageDiskBytes)
+	out := runStorageQEMU(t, disk, "first")
+	for _, want := range []string{"NVME_STORAGE_APPEND_OK last_event_id=1", "NVME_STORAGE_DONE"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("serial output missing %q:\n%s", want, out)
+		}
 	}
 }
 ```
 
-Final verification:
+`tests/e2e/fixtures/nvme_event_storage/main.wrela` must contain this owned phase shape:
+
+```wrela
+image NvmeEventStorageImage {
+    transitions {
+        delegated_hardware -> owned_hardware
+    }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let nvme_device = NvmeDriver.claim_controller(devices = hardware.hardware_plan.pci.devices, occurrence = 0)
+        let driver = NvmeDriver.initialize(device = nvme_device)
+        let foreground_path = foreground_storage_path(path = driver.create_io_path(role = NVME_PATH_FOREGROUND, queue_id = 1, owner = ExecutorSlot(id = 0), vector = 0x50))
+        let background_path = background_storage_path(path = driver.create_io_path(role = NVME_PATH_BACKGROUND, queue_id = 2, owner = ExecutorSlot(id = 1), vector = 0x51))
+        let writer = StorageWriter(
+            foreground = foreground_path,
+            background = background_path,
+            stream_directory = StreamDirectory(next_stream_id = 0),
+            metrics = StorageMetrics()
+        )
+        let created = FileCreated(file_id = FileId(value = 1), parent_id = FileId(value = 0), name_ref = PublishedBlobRef(ref = BlobRef(blob_id = 1)))
+        let committed = FileContentCommitted(file_id = FileId(value = 1), blob_ref = PublishedBlobRef(ref = BlobRef(blob_id = 2)))
+        let group = PendingAtomicGroup.empty().push_file_created(value = created).push_file_content_committed(value = committed)
+        match writer.enqueue_atomic_group(group = group) {
+            StorageAppendResult.Committed(last_event_id = last_event_id) => {
+                hardware.serial.write_line(value = "NVME_STORAGE_APPEND_OK last_event_id=1")
+            }
+            StorageAppendResult.Failed(code = code) => {
+                hardware.panic.fail(code = code)
+            }
+        }
+        hardware.serial.write_line(value = "NVME_STORAGE_DONE")
+        while true {
+            hardware.cpu.halt_forever()
+        }
+    }
+}
+```
+
+- [ ] **Step 1: Add failing E2E test**
+
+Run: `go test ./tests/e2e -run TestNvmeEventStorageQEMU -v`
+
+Expected: FAIL because fixture files do not exist.
+
+- [ ] **Step 2: Add fixture source**
+
+Create `main.wrela` with the full two-phase image shape above. Create `program.wrela` with the `FileCreated`, `FileContentCommitted`, and `DirectoryProjectionWorker` definitions used by the owned phase. The fixture must use `match` arms with fat arrows and braced blocks exactly as shown.
+
+Run: same command.
+
+Expected: PASS on QEMU/OVMF machine, SKIP if QEMU is unavailable.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add tests/e2e/fixtures/nvme_event_storage/main.wrela tests/e2e/fixtures/nvme_event_storage/program.wrela tests/e2e/nvme_event_storage_qemu_test.go
+git commit -m "test: boot nvme event storage image -Codex Automated"
+```
+
+### Task 45: Replay And Orphan E2E
+
+**Prerequisites:** Tasks 37, 38, and 44.
+
+**Files:**
+
+- Modify: `tests/e2e/nvme_event_storage_qemu_test.go`
+- Modify: `tests/e2e/fixtures/nvme_event_storage/program.wrela`
+
+**Description:** Reuse the same sparse disk across two boots to prove recovery, projection watermark, and orphan collection.
+
+**Acceptance Criteria:**
+
+- First boot prints `NVME_STORAGE_APPEND_OK last_event_id=1`.
+- Second boot prints `NVME_STORAGE_REPLAY_OK last_event_id=1`.
+- Second boot prints `projection_watermark=1`.
+- Interrupted relocation before writer acceptance prints `NVME_ORPHAN_COLLECTION_OK`.
+
+**Code Examples:**
+
+```go
+func TestNvmeEventStorageReplayQEMU(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "storage.raw")
+	createSparseRawDisk(t, disk, nvmeStorageDiskBytes)
+	first := runStorageQEMU(t, disk, "first")
+	if !strings.Contains(first, "last_event_id=1") {
+		t.Fatalf("first boot missing last_event_id:\n%s", first)
+	}
+	second := runStorageQEMU(t, disk, "replay")
+	for _, want := range []string{"NVME_STORAGE_REPLAY_OK last_event_id=1", "projection_watermark=1", "NVME_ORPHAN_COLLECTION_OK"} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second boot missing %q:\n%s", want, second)
+		}
+	}
+}
+```
+
+- [ ] **Step 1: Add failing replay test**
+
+Run: `go test ./tests/e2e -run TestNvmeEventStorageReplayQEMU -v`
+
+Expected: FAIL until replay marker code exists.
+
+- [ ] **Step 2: Implement replay/orphan markers**
+
+Modify fixture program to branch on fw_cfg mode string and print replay/orphan markers.
+
+Run: same command.
+
+Expected: PASS on QEMU/OVMF machine, SKIP if QEMU is unavailable.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git diff --check
+git add tests/e2e/nvme_event_storage_qemu_test.go tests/e2e/fixtures/nvme_event_storage/program.wrela
+git commit -m "test: verify nvme storage replay and orphan collection -Codex Automated"
+```
+
+### Task 46: Final Acceptance Sweep
+
+**Prerequisites:** Tasks 1-45.
+
+**Files:**
+
+- None.
+
+**Description:** Run full verification and ensure deferred-work docs still match non-goals. This task is a no-commit verification gate.
+
+**Acceptance Criteria:**
+
+- Full compiler and unit suite passes.
+- QEMU storage tests pass or skip only for missing QEMU/OVMF.
+- Placeholder scan command exits 0.
+- Deferred-work docs retain all storage non-goals.
+- `git status --short` shows no uncommitted plan-task changes after verification.
+
+**Code Examples:**
 
 ```bash
 go test ./...
 go test ./tests/e2e -run NvmeEventStorage -v
-go test ./tests/e2e -run NvmeEventStorageReplay -v
-bad_terms='TO''DO|TB''D|fill'' in|implement'' later|Add'' appropriate|similar'' to'' Task'
-rg -n "$bad_terms" wrela compiler tests docs/implementation/2026-05-18-nvme-event-storage-executable-plan.md
+bad_terms='TO''DO|TB''D|fill'' in|implement'' later|Add'' appropriate|similar'' to'' Task|if'' needed|or'' equivalent'
+if rg -n "$bad_terms" wrela compiler tests docs/implementation/2026-05-18-nvme-event-storage-executable-plan.md; then
+  exit 1
+fi
+bad_match=$(printf '%s%s' 'match .*-' '>')
+if rg -n "$bad_match" docs/implementation/2026-05-18-nvme-event-storage-executable-plan.md tests/fixtures tests/e2e wrela; then
+  exit 1
+fi
 git diff --check
 ```
 
-Expected: `go test ./...` passes; QEMU tests pass where QEMU/OVMF are available; the placeholder phrase scan prints no matches; `git diff --check` prints nothing.
+- [ ] **Step 1: Run full suite**
 
-Commit:
+Run: `go test ./...`
+
+Expected: PASS.
+
+- [ ] **Step 2: Run QEMU storage suite**
+
+Run: `go test ./tests/e2e -run NvmeEventStorage -v`
+
+Expected: PASS on QEMU/OVMF machine; SKIP is acceptable only when QEMU/OVMF is unavailable.
+
+- [ ] **Step 3: Run placeholder and diff checks**
+
+Run the command in the code example above.
+
+Expected: no output from `rg`; `git diff --check` prints nothing.
+
+- [ ] **Step 4: Confirm no commit is needed**
 
 ```bash
-git add compiler/report/report.go compiler/report/report_test.go compiler/sem/report.go wrela/storage/format.wrela tests/e2e/nvme_event_storage_qemu_test.go docs/production-deferred-work.md
-git commit -m "test: complete nvme event storage acceptance -Codex Automated"
+git status --short
 ```
+
+Expected: no output. Do not create an empty commit for this verification-only task.
 
 ---
 
-## 11. Appendix A: Exact Append And Recovery Algorithms
+## 12. Appendix A: Exact Append And Recovery Algorithms
 
-**Description:** These algorithms are normative for Tasks 14-17. Use these names and state transitions.
+**Description:** These algorithms are normative for Tasks 20, 22, 25, and 26.
 
 **Acceptance Criteria:**
 
-- Implementations match these branches exactly.
-- Tests cover every branch listed here.
+- Host behavior tests and Wrela source follow these branches exactly.
+- Append-log `event_id` values begin at `0`.
 
 **Code Example:**
 
@@ -3988,20 +4071,23 @@ enqueue_atomic_group(group):
   if group.semantic_event_count > 32:
     reject TransactionTooLarge
 
+  first_event_id = next_event_id
+  last_event_id = next_event_id + group.semantic_event_count - 1
+
   if open_batch_slots + group.semantic_event_count <= 64:
     add group
-    return pending
+    return pending(first_event_id, last_event_id)
 
   if open_batch_slots + group.semantic_event_count <= 72:
     add group
     flush batch
-    return pending
+    return pending(first_event_id, last_event_id)
 
   flush current batch
   add group to new batch
   if group.semantic_event_count >= 64:
     flush batch
-  return pending
+  return pending(first_event_id, last_event_id)
 ```
 
 ```text
@@ -4037,38 +4123,41 @@ recover_hot_slots:
 
 ```text
 durability_ack:
-  write command completion alone is enough only when selected durability mode says FUA/non-volatile completion is durable
-  write-plus-flush mode acknowledges after the flush command completion
-  acknowledged group advances atomic_group_frontier
-  only then publish CommittedAtomicGroup to maintenance link
+  FUA or PFAIL_ATOMIC_FUA:
+    acknowledge after all write completions succeed
+  WRITE_PLUS_FLUSH:
+    acknowledge after all write completions and following flush completion succeed
+  after acknowledgement:
+    advance atomic_group_frontier
+    publish CommittedAtomicGroup to maintenance core link
 ```
 
 ---
 
-## 12. Appendix B: Exact Storage Event And Projection Syntax
+## 13. Appendix B: Exact Syntax Forms
 
-**Description:** These syntax forms are final for this plan. Do not add alternate spellings.
+**Description:** These syntax forms are final for this plan.
 
 **Acceptance Criteria:**
 
-- Parser and docs accept these forms.
-- Parser and docs do not introduce a `worker` keyword.
+- Parser accepts these forms.
+- Parser does not introduce a `worker` keyword.
 
 **Code Example:**
 
 ```wrela
 event NoteRenamed id 21 {
     note_id: FileId
-    title_ref: BlobRef
+    title_ref: PublishedBlobRef
 
     layout 1 {
         note_id: U64
-        old_title_ref: BlobRef
+        old_title_ref: PublishedBlobRef
     }
 
     layout 2 current {
         note_id: U64 = self.note_id.value
-        title_ref: BlobRef = self.title_ref
+        title_ref: PublishedBlobRef = self.title_ref
     }
 
     upcast 1 -> 2 {
@@ -4091,41 +4180,11 @@ class DirectoryProjectionWorker {
 Rules:
 
 - `event_type_id = 0` is reserved for committed empty slots.
-- Event IDs must be positive `U64` literals.
+- Durable event type IDs must be positive `U64` literals.
 - Projection IDs must be positive `U64` literals.
 - Layout IDs must be positive `U64` literals scoped to one event or projection.
+- Layout ID `0` is reserved.
 - A declaration with one layout may omit `current`; semantic checking marks it current.
 - A declaration with more than one layout must mark exactly one layout `current`.
-- Upcast mappings are same-type field renames. Complex computed upcasts are not in this plan.
+- Upcast mappings are same-type field renames.
 - Projection containers are only `StateCell<T>`, `DenseEntityMap<Id, T>`, and `OrderedPages<Partition, SortKey, Row>`.
-
----
-
-## 13. Appendix C: Full Plan Acceptance Criteria
-
-**Description:** The full plan is complete only when these checks pass. Do not claim completion from a subset.
-
-**Acceptance Criteria:**
-
-- Compiler storage syntax, semantic, IR, and codegen tests pass.
-- NVMe source contract tests pass.
-- Event slot, batch policy, stream directory, blob, projection, and report tests pass.
-- QEMU append and replay tests pass where QEMU/OVMF are available.
-- Storage audit report shows the selected durability mode and both NVMe paths.
-- The final implementation preserves the non-goals from the design.
-
-**Code Example:**
-
-```bash
-go test ./compiler/lex ./compiler/ast ./compiler/parse
-go test ./compiler/sem -run 'Storage|Nvme|Blob|Projection|CoreLink|NegativeFixtures' -v
-go test ./compiler/ir -run 'Storage|Nvme|Blob|Segment|Event' -v
-go test ./compiler/codegen -run 'Storage|Nvme|EventSlot' -v
-go test ./compiler/report -run Storage -v
-go test ./...
-go test ./tests/e2e -run NvmeEventStorage -v
-go test ./tests/e2e -run NvmeEventStorageReplay -v
-git diff --check
-```
-
-Expected: every command succeeds. If QEMU/OVMF are not installed, record the local skip output and run the compiler/unit suite before handing off to hardware-capable CI.
