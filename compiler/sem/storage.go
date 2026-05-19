@@ -33,10 +33,26 @@ type EventLayoutInfo struct {
 }
 
 type ProjectionInfo struct {
-	Module       string
-	Name         string
-	ProjectionID uint64
-	Span         source.Span
+	Module          string
+	Name            string
+	ProjectionID    uint64
+	Layouts         []ProjectionLayoutInfo
+	CurrentLayoutID uint64
+	Span            source.Span
+}
+
+type ProjectionLayoutInfo struct {
+	ID      uint64
+	Current bool
+	Fields  []ProjectionFieldInfo
+	Span    source.Span
+}
+
+type ProjectionFieldInfo struct {
+	Name          string
+	ContainerKind string
+	Type          *Type
+	Span          source.Span
 }
 
 func (c *checker) checkStorageDecls() StorageIndex {
@@ -188,11 +204,14 @@ func (c *checker) recordStorageProjection(storage StorageIndex, moduleName strin
 		c.error(decl.SpanV, diag.SEM0106, "invalid projection id 0")
 		return
 	}
+	layouts, currentLayoutID := c.checkProjectionLayouts(moduleName, decl)
 	info := ProjectionInfo{
-		Module:       moduleName,
-		Name:         decl.Name,
-		ProjectionID: id,
-		Span:         decl.SpanV,
+		Module:          moduleName,
+		Name:            decl.Name,
+		ProjectionID:    id,
+		Layouts:         layouts,
+		CurrentLayoutID: currentLayoutID,
+		Span:            decl.SpanV,
 	}
 	if _, ok := storage.ProjectionsByID[id]; ok {
 		c.error(decl.SpanV, diag.SEM0106, "duplicate projection id")
@@ -200,4 +219,116 @@ func (c *checker) recordStorageProjection(storage StorageIndex, moduleName strin
 	}
 	storage.ProjectionsByID[id] = info
 	storage.ProjectionsByKey[moduleName+"."+decl.Name] = info
+}
+
+func (c *checker) checkProjectionLayouts(moduleName string, decl *ast.ProjectionDecl) ([]ProjectionLayoutInfo, uint64) {
+	layouts := make([]ProjectionLayoutInfo, 0, len(decl.Layouts))
+	layoutFields := map[uint64]map[string]bool{}
+	seen := map[uint64]source.Span{}
+	currentCount := 0
+	var currentLayoutID uint64
+
+	for _, layout := range decl.Layouts {
+		id, err := strconv.ParseUint(layout.ID, 10, 64)
+		if err != nil || id == 0 {
+			c.error(layout.Span, diag.SEM0107, "projection layout id 0 is reserved")
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			c.error(layout.Span, diag.SEM0107, "duplicate projection layout id")
+			continue
+		}
+		seen[id] = layout.Span
+		if layout.Current {
+			currentCount++
+			currentLayoutID = id
+		}
+
+		fields, fieldNames := c.checkProjectionLayoutFields(moduleName, layout)
+		layoutFields[id] = fieldNames
+		layouts = append(layouts, ProjectionLayoutInfo{
+			ID:      id,
+			Current: layout.Current,
+			Fields:  fields,
+			Span:    layout.Span,
+		})
+	}
+
+	if len(layouts) == 1 && currentCount == 0 {
+		layouts[0].Current = true
+		currentLayoutID = layouts[0].ID
+		currentCount = 1
+	}
+	if len(layouts) > 1 && currentCount != 1 {
+		c.error(decl.SpanV, diag.SEM0107, "projection with multiple layouts must mark exactly one current layout")
+	}
+
+	c.checkProjectionUpcasts(decl, seen, layoutFields)
+	return layouts, currentLayoutID
+}
+
+func (c *checker) checkProjectionLayoutFields(moduleName string, layout ast.ProjectionLayoutDecl) ([]ProjectionFieldInfo, map[string]bool) {
+	fields := make([]ProjectionFieldInfo, 0, len(layout.Fields))
+	fieldNames := map[string]bool{}
+	for _, field := range layout.Fields {
+		fieldNames[field.Name] = true
+		typ, ds := c.index.LookupTypeRef(moduleName, field.Type, nil)
+		if len(ds) != 0 || typ == nil {
+			c.error(field.Span, diag.SEM0108, "unsupported projection container")
+			continue
+		}
+		containerKind, ok := projectionContainerKind(typ)
+		if !ok {
+			c.error(field.Span, diag.SEM0108, "unsupported projection container")
+			continue
+		}
+		fields = append(fields, ProjectionFieldInfo{
+			Name:          field.Name,
+			ContainerKind: containerKind,
+			Type:          typ,
+			Span:          field.Span,
+		})
+	}
+	return fields, fieldNames
+}
+
+func projectionContainerKind(typ *Type) (string, bool) {
+	if typ == nil {
+		return "", false
+	}
+	switch typ.Name {
+	case "StateCell":
+		return "StateCell", len(typ.TypeArgs) == 1
+	case "DenseEntityMap":
+		return "DenseEntityMap", len(typ.TypeArgs) == 2
+	case "OrderedPages":
+		return "OrderedPages", len(typ.TypeArgs) == 3
+	default:
+		return "", false
+	}
+}
+
+func (c *checker) checkProjectionUpcasts(decl *ast.ProjectionDecl, layouts map[uint64]source.Span, layoutFields map[uint64]map[string]bool) {
+	for _, upcast := range decl.Upcasts {
+		fromID, fromErr := strconv.ParseUint(upcast.FromID, 10, 64)
+		toID, toErr := strconv.ParseUint(upcast.ToID, 10, 64)
+		if fromErr != nil || toErr != nil {
+			c.error(upcast.Span, diag.SEM0109, "invalid projection upcast endpoint")
+			continue
+		}
+		if _, ok := layouts[fromID]; !ok {
+			c.error(upcast.Span, diag.SEM0109, "invalid projection upcast endpoint")
+			continue
+		}
+		targetFields, ok := layoutFields[toID]
+		if !ok {
+			c.error(upcast.Span, diag.SEM0109, "invalid projection upcast endpoint")
+			continue
+		}
+		for _, mapping := range upcast.Mappings {
+			if !targetFields[mapping.To] {
+				c.error(mapping.Span, diag.SEM0109, "invalid projection upcast endpoint")
+			}
+		}
+	}
 }

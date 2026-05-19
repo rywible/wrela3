@@ -9,6 +9,10 @@ import (
 func TestStorageIndexRecordsEventsAndProjections(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module storage.good
+data FileId { value: U64 }
+data FileNameKey { value: U64 }
+data DirectoryChild { value: U64 }
+data OrderedPages<Partition, SortKey, Row> { root: U64 }
 event FileCreated id 1001 {
     file_id: U64
     layout 1 current {

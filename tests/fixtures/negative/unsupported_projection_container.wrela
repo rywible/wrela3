@@ -1,0 +1,12 @@
+// expect: SEM0108: unsupported projection container
+module negative.unsupported_projection_container
+
+data HashMap<K, V> { root: U64 }
+data FileId { value: U64 }
+data Row { value: U64 }
+
+projection Bad id 3 {
+    layout 1 current {
+        bad: HashMap<FileId, Row>
+    }
+}
