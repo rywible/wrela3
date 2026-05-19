@@ -137,6 +137,32 @@ event FileRenamed id 17 {
 	}
 }
 
+func TestParseProjectionDeclaration(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module storage.test
+projection DirectoryChildren id 12 {
+    layout 1 current {
+        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
+    }
+}`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if len(mod.Decls) != 1 {
+		t.Fatalf("decls = %d, want 1", len(mod.Decls))
+	}
+	proj, ok := mod.Decls[0].(*ast.ProjectionDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want *ast.ProjectionDecl", mod.Decls[0])
+	}
+	if proj.ID != "12" || len(proj.Layouts) != 1 || !proj.Layouts[0].Current {
+		t.Fatalf("projection parsed incorrectly: %#v", proj)
+	}
+	if got := proj.Layouts[0].Fields[0].Type.String(); got != "OrderedPages<FileId, FileNameKey, DirectoryChild>" {
+		t.Fatalf("projection field type = %q", got)
+	}
+}
+
 func TestParseStatements(t *testing.T) {
 	mod, ds := parseModuleForTest(t, `
 module m

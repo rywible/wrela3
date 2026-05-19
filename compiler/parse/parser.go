@@ -188,6 +188,11 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "event may not be unique")
 		}
 		return p.parseEventDecl()
+	case lex.KeywordProjection:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "projection may not be unique")
+		}
+		return p.parseProjectionDecl()
 	case lex.KeywordConst:
 		if unique {
 			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix const in v0")
@@ -464,6 +469,87 @@ func (p *Parser) parseLayoutUpcastDecl() (ast.LayoutUpcastDecl, []diag.Diagnosti
 		ToID:     to.Text,
 		Mappings: mappings,
 		Span:     p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseProjectionDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected projection name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consumeContextualIdentifier("id", "expected id in projection declaration"); len(ds) != 0 {
+		return nil, ds
+	}
+	id, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected projection id")
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	var layouts []ast.ProjectionLayoutDecl
+	var upcasts []ast.LayoutUpcastDecl
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		if p.peek().Kind == lex.Identifier && p.peek().Text == "layout" {
+			layout, ds := p.parseProjectionLayoutDecl()
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			layouts = append(layouts, layout)
+		} else if p.peek().Kind == lex.Identifier && p.peek().Text == "upcast" {
+			upcast, ds := p.parseLayoutUpcastDecl()
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			upcasts = append(upcasts, upcast)
+		} else {
+			return nil, p.err(p.peek(), diag.PAR0001, "unexpected token in projection declaration")
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	return &ast.ProjectionDecl{
+		Name:    name.Text,
+		ID:      id.Text,
+		Layouts: layouts,
+		Upcasts: upcasts,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseProjectionLayoutDecl() (ast.ProjectionLayoutDecl, []diag.Diagnostic) {
+	start, ds := p.consumeContextualIdentifier("layout", "expected layout declaration")
+	if len(ds) != 0 {
+		return ast.ProjectionLayoutDecl{}, ds
+	}
+	id, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return ast.ProjectionLayoutDecl{}, p.err(p.peek(), diag.PAR0001, "expected layout id")
+	}
+	current := false
+	if p.peek().Kind == lex.Identifier && p.peek().Text == "current" {
+		p.next()
+		current = true
+	}
+	fields, ds := p.parseFieldContainer()
+	if len(ds) != 0 {
+		return ast.ProjectionLayoutDecl{}, ds
+	}
+
+	return ast.ProjectionLayoutDecl{
+		ID:      id.Text,
+		Current: current,
+		Fields:  fields,
+		Span:    p.span(start.Start, p.previous().End),
 	}, nil
 }
 
