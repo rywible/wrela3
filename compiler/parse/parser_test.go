@@ -146,12 +146,12 @@ data Event { kind: U64 }
 class Worker {
     rx: Subscription<Event>
     fn run(self) {
-        if let Option.Some(value = event) = self.rx.try_next() {
-            let next = Option.Some(value = event)
+        if let Option.Some(value = rx_event) = self.rx.try_next() {
+            let next = Option.Some(value = rx_event)
             self.rx.arm_wait()
         }
         match self.rx.try_next() {
-            Option.Some(value = event) => {
+            Option.Some(value = rx_event) => {
                 self.rx.arm_wait()
             }
             Option.None => {
@@ -212,7 +212,7 @@ class Worker {
 	if !ok {
 		t.Fatalf("if-let pattern = %#v", ifStmt.Pattern)
 	}
-	if varPat.Enum != "Option" || varPat.Variant != "Some" || len(varPat.Bindings) != 1 || varPat.Bindings[0].Name != "value" || varPat.Bindings[0].Bind != "event" {
+	if varPat.Enum != "Option" || varPat.Variant != "Some" || len(varPat.Bindings) != 1 || varPat.Bindings[0].Name != "value" || varPat.Bindings[0].Bind != "rx_event" {
 		t.Fatalf("if-let pattern = %#v", varPat)
 	}
 	assign, ok := ifStmt.Body[0].(*ast.LetStmt)
@@ -396,8 +396,8 @@ func TestParseExecutorOnHandler(t *testing.T) {
 module test.on_handler
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.interrupt(event: Option<U8>) {
-        self.serial_path.ack_receive(event = event)
+    on serial_path.interrupt(serial_event: Option<U8>) {
+        self.serial_path.ack_receive(received = serial_event)
     }
 }`)
 	if len(ds) != 0 {
@@ -408,7 +408,7 @@ executor HelloWorld {
 		t.Fatalf("on handlers = %d, want 1", len(exec.OnHandlers))
 	}
 	got := exec.OnHandlers[0]
-	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType.String() != "Option<U8>" {
+	if got.PathField != "serial_path" || got.ParamName != "serial_event" || got.ParamType.String() != "Option<U8>" {
 		t.Fatalf("on handler = %#v", got)
 	}
 }
@@ -418,7 +418,7 @@ func TestOnHandlerRejectsMissingParamType(t *testing.T) {
 module test.bad_on
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.interrupt(event) {
+    on serial_path.interrupt(serial_event) {
     }
 }`)
 	if len(ds) == 0 {
@@ -431,7 +431,7 @@ func TestOnHandlerRejectsNonInterruptSelector(t *testing.T) {
 module test.bad_on_selector
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.receive(event: Option<U8>) {
+    on serial_path.receive(serial_event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {
@@ -443,7 +443,7 @@ func TestOnHandlerRejectedOutsideExecutor(t *testing.T) {
 	_, ds := parseModuleForTest(t, `
 module test.bad_on_placement
 class C {
-    on serial_path.interrupt(event: Option<U8>) {
+    on serial_path.interrupt(serial_event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {

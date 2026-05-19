@@ -23,7 +23,7 @@ driver path EduMsiPath {
         self.mmio.write32(offset = 0x60, value = 0x01)
     }
 
-    fn ack_completed(self, event: EduInterrupt) {
+    fn ack_completed(self, completion: EduInterrupt) {
         // MSI completion is acknowledged in the interrupt receiver before topic publication.
     }
 }

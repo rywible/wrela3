@@ -73,6 +73,8 @@ const (
 	KeywordWhere
 	KeywordConst
 	KeywordStaticAssert
+	KeywordEvent
+	KeywordProjection
 	KeywordMatch
 	KeywordSizeof
 	KeywordAlignof
@@ -125,6 +127,8 @@ var keywordKinds = map[string]Kind{
 	"where":         KeywordWhere,
 	"const":         KeywordConst,
 	"static_assert": KeywordStaticAssert,
+	"event":         KeywordEvent,
+	"projection":    KeywordProjection,
 	"match":         KeywordMatch,
 	"sizeof":        KeywordSizeof,
 	"alignof":       KeywordAlignof,

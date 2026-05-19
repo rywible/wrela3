@@ -12,5 +12,5 @@ driver path P {
 executor E {
     p: P
 
-    on p.interrupt(event: Event) {}
+    on p.interrupt(interrupt_payload: Event) {}
 }

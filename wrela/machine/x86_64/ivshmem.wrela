@@ -21,7 +21,7 @@ driver path IvshmemDoorbellPath {
         return self.registers.read32(offset = 8)
     }
 
-    fn ack_doorbell(self, event: IvshmemDoorbellInterrupt) {
+    fn ack_doorbell(self, doorbell: IvshmemDoorbellInterrupt) {
     }
 }
 
