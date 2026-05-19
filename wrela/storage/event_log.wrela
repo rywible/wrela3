@@ -1,0 +1,57 @@
+module storage.event_log
+
+use {
+    STORAGE_EVENT_SLOT_SIZE,
+    STORAGE_SLOT_RESERVED_EMPTY,
+    EventSlotHeader
+} from storage.format
+
+data EventSlotWriter {
+    active_lba_size: U64
+
+    fn slots_per_lba(self) -> U64 {
+        return self.active_lba_size / STORAGE_EVENT_SLOT_SIZE
+    }
+}
+
+data ReservedEmptySlot {
+    event_id: U64
+
+    fn header(self) -> EventSlotHeader {
+        return EventSlotHeader(
+            event_id = self.event_id,
+            stream_id = 0,
+            stream_sequence = 0,
+            event_type_id = 0,
+            payload_layout_id = 0,
+            atomic_group_len = 0,
+            atomic_group_index = 0,
+            payload_length = 0,
+            flags = STORAGE_SLOT_RESERVED_EMPTY,
+            checksum32 = 0,
+            header_version = 1,
+            reserved16 = 0,
+            reserved64 = 0
+        )
+    }
+}
+
+data BatchPackingResult {
+    semantic_slots: U64
+    reserved_empty_slots: U64
+    total_slot_positions: U64
+}
+
+data BatchPacker {
+    active_lba_size: U64
+
+    fn finish_batch(self, semantic_slots: U64) -> BatchPackingResult {
+        let slots_per_lba = self.active_lba_size / STORAGE_EVENT_SLOT_SIZE
+        let remainder = semantic_slots % slots_per_lba
+        if remainder == 0 {
+            return BatchPackingResult(semantic_slots = semantic_slots, reserved_empty_slots = 0, total_slot_positions = semantic_slots)
+        }
+        let empty = slots_per_lba - remainder
+        return BatchPackingResult(semantic_slots = semantic_slots, reserved_empty_slots = empty, total_slot_positions = semantic_slots + empty)
+    }
+}

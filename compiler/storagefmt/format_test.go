@@ -1,6 +1,9 @@
 package storagefmt
 
-import "testing"
+import (
+	"encoding/binary"
+	"testing"
+)
 
 func TestCRC32CVector(t *testing.T) {
 	got := CRC32C([]byte("123456789"))
@@ -35,6 +38,41 @@ func TestFiveHundredTwelveByteLBAPacksOneSlotPerBlock(t *testing.T) {
 	}
 	if got.TotalSlotPositions != 3 {
 		t.Fatalf("TotalSlotPositions = %d, want 3", got.TotalSlotPositions)
+	}
+}
+
+func TestReservedEmptySlotHeader(t *testing.T) {
+	const (
+		eventID             uint64 = 42
+		reservedFlag        uint32 = 1
+		eventIDOffset              = 0
+		flagsOffset                = 44
+		headerVersionOffset        = 52
+	)
+
+	header := make([]byte, EventHeaderSize)
+	binary.LittleEndian.PutUint64(header[eventIDOffset:], eventID)
+	binary.LittleEndian.PutUint32(header[EventTypeIDOffset:], 0)
+	binary.LittleEndian.PutUint32(header[PayloadLayoutIDOffset:], 0)
+	binary.LittleEndian.PutUint32(header[flagsOffset:], reservedFlag)
+	binary.LittleEndian.PutUint16(header[headerVersionOffset:], 1)
+	checksum := CRC32C(header[:Checksum32Offset])
+	binary.LittleEndian.PutUint32(header[Checksum32Offset:], checksum)
+
+	if got := binary.LittleEndian.Uint64(header[eventIDOffset:]); got != eventID {
+		t.Fatalf("event_id = %d, want %d", got, eventID)
+	}
+	if got := binary.LittleEndian.Uint32(header[EventTypeIDOffset:]); got != 0 {
+		t.Fatalf("event_type_id = %d, want 0", got)
+	}
+	if got := binary.LittleEndian.Uint32(header[PayloadLayoutIDOffset:]); got != 0 {
+		t.Fatalf("payload_layout_id = %d, want 0", got)
+	}
+	if got := binary.LittleEndian.Uint32(header[flagsOffset:]); got != reservedFlag {
+		t.Fatalf("flags = %d, want reserved empty flag %d", got, reservedFlag)
+	}
+	if got := binary.LittleEndian.Uint32(header[Checksum32Offset:]); got != CRC32C(header[:Checksum32Offset]) {
+		t.Fatalf("checksum32 = %#x, want CRC32C(header prefix)", got)
 	}
 }
 
