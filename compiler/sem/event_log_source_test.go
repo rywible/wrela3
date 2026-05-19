@@ -66,6 +66,32 @@ const MIRRORED_SLOT_SIZE: U64 = STORAGE_EVENT_SLOT_SIZE
 	}
 }
 
+func TestEventLogSuperblockMirrorContract(t *testing.T) {
+	modules := parseEventLogModules(t, `
+module sem.event_log_superblock_mirror
+
+use { SuperblockChoice, SuperblockPair, StorageRegionValidator } from storage.event_log
+
+data SuperblockConsumer {
+    choice: SuperblockChoice
+    pair: SuperblockPair
+    validator: StorageRegionValidator
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "SuperblockPair"), "choose")
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "StorageRegionValidator"), "validate_pair")
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.event_log", "SuperblockChoice"), map[string]string{
+		"selected_generation": "U64",
+		"valid":               "Bool",
+	})
+}
+
 func parseEventLogModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{

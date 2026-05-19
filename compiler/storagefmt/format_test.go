@@ -141,3 +141,48 @@ func TestRegionLayoutFitsSparse4GiBDisk(t *testing.T) {
 		t.Fatalf("hot event region = %+v, want offset 1056768 size 536870912", hot)
 	}
 }
+
+func TestChooseSuperblockHighestValidGeneration(t *testing.T) {
+	a := validSuperblockForTest(1)
+	b := validSuperblockForTest(2)
+
+	got, err := ChooseSuperblock(a, b)
+	if err != nil {
+		t.Fatalf("ChooseSuperblock() error = %v", err)
+	}
+	if got.Generation != 2 {
+		t.Fatalf("selected generation = %d, want 2", got.Generation)
+	}
+}
+
+func TestChooseSuperblockIgnoresInvalidChecksum(t *testing.T) {
+	a := validSuperblockForTest(1)
+	b := validSuperblockForTest(3)
+	b.Checksum32++
+
+	got, err := ChooseSuperblock(a, b)
+	if err != nil {
+		t.Fatalf("ChooseSuperblock() error = %v", err)
+	}
+	if got.Generation != 1 {
+		t.Fatalf("selected generation = %d, want 1", got.Generation)
+	}
+}
+
+func TestRegionOverlap(t *testing.T) {
+	err := ValidateRegions([]Region{
+		{Name: "a", Offset: 0, Size: 10},
+		{Name: "b", Offset: 9, Size: 1},
+	})
+	if err != ErrRegionOverlap {
+		t.Fatalf("ValidateRegions() error = %v, want %v", err, ErrRegionOverlap)
+	}
+
+	if err := ValidateRegions(DefaultRegions()); err != nil {
+		t.Fatalf("ValidateRegions(DefaultRegions()) error = %v", err)
+	}
+}
+
+func validSuperblockForTest(generation uint64) Superblock {
+	return Superblock{Generation: generation, Checksum32: SuperblockChecksum(generation)}
+}

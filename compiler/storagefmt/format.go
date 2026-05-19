@@ -1,6 +1,11 @@
 package storagefmt
 
-import "hash/crc32"
+import (
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
+	"sort"
+)
 
 const (
 	EventSlotSize         uint64 = 512
@@ -50,6 +55,61 @@ func FinishBatch(activeLBASize, semanticSlots uint64) BatchPacking {
 type Region struct {
 	Name         string
 	Offset, Size uint64
+}
+
+type Superblock struct {
+	Generation uint64
+	Checksum32 uint32
+}
+
+var (
+	ErrNoValidSuperblock = errors.New("no valid storage superblock")
+	ErrRegionOverlap     = errors.New("storage region overlap or invalid size")
+)
+
+func (s Superblock) Valid() bool {
+	return s.Checksum32 == SuperblockChecksum(s.Generation)
+}
+
+func SuperblockChecksum(generation uint64) uint32 {
+	var data [8]byte
+	binary.LittleEndian.PutUint64(data[:], generation)
+	return CRC32C(data[:])
+}
+
+func ChooseSuperblock(a, b Superblock) (Superblock, error) {
+	av := a.Valid()
+	bv := b.Valid()
+	if av && bv && b.Generation > a.Generation {
+		return b, nil
+	}
+	if av {
+		return a, nil
+	}
+	if bv {
+		return b, nil
+	}
+	return Superblock{}, ErrNoValidSuperblock
+}
+
+func ValidateRegions(regions []Region) error {
+	ordered := append([]Region(nil), regions...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Offset < ordered[j].Offset
+	})
+
+	var prevEnd uint64
+	for _, region := range ordered {
+		if region.Size == 0 || region.Offset < prevEnd {
+			return ErrRegionOverlap
+		}
+		end := region.Offset + region.Size
+		if end < region.Offset || end > StorageDiskBytes {
+			return ErrRegionOverlap
+		}
+		prevEnd = end
+	}
+	return nil
 }
 
 func DefaultRegions() []Region {

@@ -3,7 +3,9 @@ module storage.event_log
 use {
     STORAGE_EVENT_SLOT_SIZE,
     STORAGE_SLOT_RESERVED_EMPTY,
-    EventSlotHeader
+    EventSlotHeader,
+    StorageRegion,
+    StorageSuperblock
 } from storage.format
 
 data EventSlotWriter {
@@ -53,5 +55,42 @@ data BatchPacker {
         }
         let empty = slots_per_lba - remainder
         return BatchPackingResult(semantic_slots = semantic_slots, reserved_empty_slots = empty, total_slot_positions = semantic_slots + empty)
+    }
+}
+
+data SuperblockChoice {
+    selected_generation: U64
+    valid: Bool
+}
+
+data SuperblockPair {
+    first: StorageSuperblock
+    second: StorageSuperblock
+
+    fn choose(self) -> SuperblockChoice {
+        if self.second.generation > self.first.generation {
+            return SuperblockChoice(selected_generation = self.second.generation, valid = true)
+        }
+        return SuperblockChoice(selected_generation = self.first.generation, valid = true)
+    }
+}
+
+data RegionValidationResult {
+    valid: Bool
+}
+
+data StorageRegionValidator {
+    fn validate_pair(self, first: StorageRegion, second: StorageRegion) -> RegionValidationResult {
+        let first_end = first.offset + first.length
+        if first.length == 0 {
+            return RegionValidationResult(valid = false)
+        }
+        if second.length == 0 {
+            return RegionValidationResult(valid = false)
+        }
+        if second.offset < first_end {
+            return RegionValidationResult(valid = false)
+        }
+        return RegionValidationResult(valid = true)
     }
 }
