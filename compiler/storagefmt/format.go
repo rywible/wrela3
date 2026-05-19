@@ -112,6 +112,22 @@ type StreamDirectoryCache struct {
 	Misses uint64
 }
 
+type WriterPolicy struct {
+	NextEventID     uint64
+	NextStreamID    uint64
+	OpenBatchSlots  uint64
+	DurableFrontier uint64
+}
+
+type EnqueueResult struct {
+	Accepted       bool
+	FirstEventID   uint64
+	LastEventID    uint64
+	OpenBatchSlots uint64
+	FlushRequested bool
+	RejectCode     string
+}
+
 type PackedSegment struct {
 	BaseEventID uint64
 	Bytes       []byte
@@ -299,6 +315,25 @@ func (c StreamDirectoryCache) HitRateX1000() uint64 {
 		return 0
 	}
 	return c.Hits * 1000 / total
+}
+
+func (w WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+	if semanticSlots > StorageMaxAtomicGroupSlots {
+		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
+	}
+	first, last := AssignEventIDs(w.NextEventID, semanticSlots)
+	open := w.OpenBatchSlots + semanticSlots
+	return EnqueueResult{
+		Accepted:       true,
+		FirstEventID:   first,
+		LastEventID:    last,
+		OpenBatchSlots: open,
+		FlushRequested: open >= StorageTargetBatchSlots,
+	}
+}
+
+func AssignEventIDs(first uint64, count uint64) (firstEventID uint64, lastEventID uint64) {
+	return first, first + count - 1
 }
 
 func ReservedEmptySlotForTest(eventID uint64) Slot {

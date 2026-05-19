@@ -1,0 +1,80 @@
+module storage.writer
+
+use { StorageMetrics } from storage.format
+use { ForegroundStoragePath, BackgroundStoragePath } from machine.x86_64.nvme
+use { StreamDirectory } from storage.stream
+
+data PendingAtomicGroup {
+    semantic_event_count: U64
+
+    fn empty() -> PendingAtomicGroup {
+        return PendingAtomicGroup(semantic_event_count = 0)
+    }
+}
+
+data CommittedAtomicGroup {
+    first_event_id: U64
+    last_event_id: U64
+}
+
+data CommitToken {
+    first_event_id: U64
+    last_event_id: U64
+    pending_write_count: U64
+    flush_required: Bool
+    durability_failed: Bool
+}
+
+data StorageAppendResult {
+    accepted: Bool
+    first_event_id: U64
+    last_event_id: U64
+    open_batch_slots: U64
+    flush_requested: Bool
+    reject_code: U64
+}
+
+data BlobRef {
+    blob_id: U64
+}
+
+data PublishedBlobRef {
+    ref: BlobRef
+}
+
+data StorageWriter {
+    foreground: ForegroundStoragePath
+    background: BackgroundStoragePath
+    stream_directory: StreamDirectory
+    metrics: StorageMetrics
+    next_event_id: U64
+    next_stream_id: U64
+    durable_frontier: U64
+    open_batch_slots: U64
+
+    fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult {
+        if group.semantic_event_count > 32 {
+            return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
+        }
+        let first = self.next_event_id
+        let last = self.next_event_id + group.semantic_event_count - 1
+        let open = self.open_batch_slots + group.semantic_event_count
+        let flush = open >= 64
+        return StorageAppendResult(accepted = true, first_event_id = first, last_event_id = last, open_batch_slots = open, flush_requested = flush, reject_code = 0)
+    }
+
+    fn on_durability_completed(self, token: CommitToken) -> StorageAppendResult {
+        if token.durability_failed {
+            return StorageAppendResult(accepted = false, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1116)
+        }
+        return StorageAppendResult(accepted = true, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = token.flush_required, reject_code = 0)
+    }
+
+    fn publish_committed_group(self, token: CommitToken) -> CommittedAtomicGroup {
+        return CommittedAtomicGroup(first_event_id = token.first_event_id, last_event_id = token.last_event_id)
+    }
+
+    fn publish_blob_ref(self, ref: BlobRef) -> PublishedBlobRef {
+        return PublishedBlobRef(ref = ref)
+    }
+}

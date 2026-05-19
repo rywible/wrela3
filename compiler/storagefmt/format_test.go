@@ -259,6 +259,33 @@ func TestPackedSegmentCodecStripsPadding(t *testing.T) {
 	}
 }
 
+func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
+	writer := WriterPolicy{}
+	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)
+	if got.Accepted || got.RejectCode != "SEM0114" {
+		t.Fatalf("enqueue = %#v, want SEM0114 rejection", got)
+	}
+}
+
+func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: 63}
+	got := writer.EnqueueAtomicGroup(2)
+	if !got.Accepted || got.OpenBatchSlots != 65 || !got.FlushRequested {
+		t.Fatalf("enqueue = %#v", got)
+	}
+}
+
+func TestStorageWriterFirstAtomicGroupStartsAtZero(t *testing.T) {
+	got := WriterPolicy{}.EnqueueAtomicGroup(2)
+	if !got.Accepted || got.FirstEventID != 0 || got.LastEventID != 1 {
+		t.Fatalf("enqueue = %#v, want event ids 0..1", got)
+	}
+	first, last := AssignEventIDs(9, 3)
+	if first != 9 || last != 11 {
+		t.Fatalf("AssignEventIDs = %d, %d; want 9, 11", first, last)
+	}
+}
+
 func TestStreamDirectoryMath(t *testing.T) {
 	dir := StreamDirectory{NextStreamID: 8}
 	if !dir.Exists(7) || dir.Exists(8) {
