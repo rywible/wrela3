@@ -1,0 +1,44 @@
+module machine.x86_64.core_link
+
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { Slots } from machine.x86_64.executor_memory
+use { WakeStrategy } from machine.x86_64.executor_loop
+use { Option, Result, Unit } from wrela.lang.core
+
+data CoreLinkFull {}
+
+data CoreLinkEmpty {}
+
+class CoreSpscProducer<T> {
+    owner: ExecutorSlot
+    peer: ExecutorSlot
+    slots: Slots<T>
+    capacity: U64
+    head: U64
+    tail: U64
+    credits: U64
+    wake_strategy: WakeStrategy
+
+    asm fn try_send(self, value: T) -> Result<Unit, CoreLinkFull> {
+        ret
+    }
+}
+
+class CoreSpscConsumer<T> {
+    owner: ExecutorSlot
+    peer: ExecutorSlot
+    slots: Slots<T>
+    capacity: U64
+    head: U64
+    tail: U64
+    wait_armed: Bool
+    wake_strategy: WakeStrategy
+
+    asm fn try_next(self) -> Option<T> {
+        ret
+    }
+
+    fn arm_wait(self) {
+        self.wait_armed = true
+    }
+}
