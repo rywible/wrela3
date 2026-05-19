@@ -82,7 +82,7 @@ data StorageWriter {
         let combined = self.open_batch_slots + group.semantic_event_count
         let open = combined
         let flush = false
-        if combined <= STORAGE_TARGET_BATCH_SLOTS {
+        if combined < STORAGE_TARGET_BATCH_SLOTS {
             flush = false
         } else {
             if combined <= STORAGE_MAX_BATCH_SLOTS {

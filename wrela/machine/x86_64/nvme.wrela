@@ -390,15 +390,27 @@ class NvmeDirectStorage {
         if self.validate_first_append_reserved_empty_padding() == false {
             self.panic.fail(code = 0xAC08014F)
         }
-        return NvmeReplayState(recovered = true, last_event_id = 1, projection_watermark = 1, orphan_collected = true)
+        let recovered_last_event_id = self.queues.data_buffer.read_u64(offset = WRELA_STORAGE_EVENT_SLOT_SIZE)
+        return NvmeReplayState(recovered = true, last_event_id = recovered_last_event_id, projection_watermark = recovered_last_event_id, orphan_collected = true)
+    }
+
+    fn first_append_durability_mode(self) -> NvmeDurabilityMode {
+        return NvmeDurabilitySelector(panic = self.panic).choose(namespace = self.namespace, target_batch_blocks = self.first_append_block_count())
+    }
+
+    fn first_append_durability_mode_value(self) -> U64 {
+        return self.first_append_durability_mode().mode
     }
 
     fn write_first_append(self) {
         self.prepare_first_append_events()
-        let write = self.submit_io_write_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address, fua = false)
+        let durability = self.first_append_durability_mode()
+        let write = self.submit_io_write_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address, fua = durability.use_fua)
         self.poll_io_completion(command_id = write.command_id)
-        let flush = self.submit_io_flush(namespace_id = self.namespace.namespace_id)
-        self.poll_io_completion(command_id = flush.command_id)
+        if durability.requires_flush {
+            let flush = self.submit_io_flush(namespace_id = self.namespace.namespace_id)
+            self.poll_io_completion(command_id = flush.command_id)
+        }
         self.queues.data_buffer.zero()
         let verify = self.submit_io_read_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address)
         self.poll_io_completion(command_id = verify.command_id)

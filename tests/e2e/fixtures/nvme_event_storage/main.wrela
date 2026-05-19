@@ -131,10 +131,7 @@ image NvmeEventStorageImage {
             serial_irq_queue = serial_irq_queue,
             console_memory = foreground_memory_seed,
             worker_memory = maintenance_memory_seed,
-            wake_strategy = wake_strategy,
-            storage_replay_last_event_id = 0,
-            storage_replay_projection_watermark = 0,
-            storage_replay_orphan_collected = 0
+            wake_strategy = wake_strategy
         )
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = memory_region),
@@ -224,7 +221,7 @@ image NvmeEventStorageImage {
             background_path_owner = maintenance_slot.id,
             background_path_queue_id = 2,
             background_path_vector = 0x51,
-            selected_durability_mode = 0,
+            selected_durability_mode = storage.first_append_durability_mode_value(),
             event_slot_size = STORAGE_EVENT_SLOT_SIZE,
             event_header_size = STORAGE_EVENT_HEADER_SIZE,
             event_payload_bytes = STORAGE_EVENT_PAYLOAD_BYTES,

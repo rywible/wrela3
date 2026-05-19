@@ -94,6 +94,9 @@ func TestNvmeDurabilityMirrorContract(t *testing.T) {
 	assertMethodSignature(t, choose, []string{"namespace:NvmeNamespace", "target_batch_blocks:U32"}, "NvmeDurabilityMode")
 
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	directStorage := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeDirectStorage")
+	assertMethodSignature(t, methodByName(t, directStorage, "first_append_durability_mode"), nil, "NvmeDurabilityMode")
+	assertMethodSignature(t, methodByName(t, directStorage, "first_append_durability_mode_value"), nil, "U64")
 	for _, want := range []string{
 		"self.panic.fail(code = 0xAC080122)",
 		"return NvmeDurabilityMode(mode = NVME_DURABILITY_FUA, requires_flush = false, use_fua = true)",
@@ -102,6 +105,16 @@ func TestNvmeDurabilityMirrorContract(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("nvme source missing %q", want)
 		}
+	}
+	writeFirstAppend := sourceBetween(t, source, "fn write_first_append(self) {", "\n    fn prepare_first_append_events")
+	assertOrderedSubstrings(t, writeFirstAppend, []string{
+		"let durability = self.first_append_durability_mode()",
+		"fua = durability.use_fua",
+		"if durability.requires_flush",
+		"self.submit_io_flush(namespace_id = self.namespace.namespace_id)",
+	})
+	if strings.Contains(writeFirstAppend, "fua = false") {
+		t.Fatalf("write_first_append must use selected durability, not hard-code fua=false")
 	}
 }
 
@@ -354,6 +367,36 @@ func TestNvmeDoorbellsAndReservedPaddingSourceContract(t *testing.T) {
 	}
 }
 
+func TestNvmeReplaySourceReadsRecoveredFrontier(t *testing.T) {
+	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	replay := sourceBetween(t, source, "fn read_replay_state(self) -> NvmeReplayState {", "\n    fn first_append_durability_mode")
+	assertOrderedSubstrings(t, replay, []string{
+		"self.submit_io_read_blocks(",
+		"self.validate_first_append_slot(slot_offset = 0",
+		"self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE",
+		"let recovered_last_event_id = self.queues.data_buffer.read_u64(offset = WRELA_STORAGE_EVENT_SLOT_SIZE)",
+		"last_event_id = recovered_last_event_id",
+		"projection_watermark = recovered_last_event_id",
+	})
+	if strings.Contains(replay, "last_event_id = 1") || strings.Contains(replay, "projection_watermark = 1") {
+		t.Fatalf("read_replay_state must return the recovered frontier read from storage, not hard-coded replay counters")
+	}
+}
+
+func TestNvmeEventStorageProgramReclaimsRejectedRelocationExtent(t *testing.T) {
+	source := readRepoFile(t, "tests/e2e/fixtures/nvme_event_storage/program.wrela")
+	replay := sourceBetween(t, source, "fn replay_outcome(", "        return ReplayOutcome")
+	assertOrderedSubstrings(t, replay, []string{
+		"let old_ref = BlobRef(blob_id = 10, start_lba = 20, block_count = 2)",
+		"let new_ref = BlobRef(blob_id = 20, start_lba = 40, block_count = 2)",
+		"let relocation_accepted = truth.can_accept_relocate(proposal = relocation)",
+		"allocated = Extent(start_lba = 40, block_count = 2)",
+		"acknowledged_refs = old_ref",
+		"if relocation_accepted == false",
+		"if reclaimed.start_lba == 40",
+	})
+}
+
 func TestNvmeEventStorageFixtureUsesDirectNvmeStorage(t *testing.T) {
 	source := readRepoFile(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
 	for _, forbidden := range []string{
@@ -374,6 +417,7 @@ func TestNvmeEventStorageFixtureUsesDirectNvmeStorage(t *testing.T) {
 		"claim_mmio_bar_at32(index = 0, base = 0xC0000000)",
 		"NvmeDirectStorage(",
 		"event_slots_reserved_empty = storage.first_append_reserved_empty_slots()",
+		"selected_durability_mode = storage.first_append_durability_mode_value()",
 		"storage.write_first_append()",
 		"storage.read_replay_state()",
 	} {

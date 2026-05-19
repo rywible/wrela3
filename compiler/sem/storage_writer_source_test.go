@@ -64,6 +64,7 @@ func TestStorageWriterSourceMirrorContract(t *testing.T) {
 		"STORAGE_MAX_ATOMIC_GROUP_SLOTS",
 		"STORAGE_TARGET_BATCH_SLOTS",
 		"STORAGE_MAX_BATCH_SLOTS",
+		"if combined < STORAGE_TARGET_BATCH_SLOTS",
 	} {
 		if !strings.Contains(enqueue, want) {
 			t.Fatalf("StorageWriter.enqueue_atomic_group missing %q", want)

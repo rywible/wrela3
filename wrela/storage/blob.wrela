@@ -52,7 +52,12 @@ data BlobTruth {
     }
 
     fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
-        return self.can_accept_relocate(proposal = proposal)
+        if self.can_accept_relocate(proposal = proposal) == false {
+            return false
+        }
+        self.ref = proposal.new_ref
+        self.version = self.version + 1
+        return true
     }
 }
 

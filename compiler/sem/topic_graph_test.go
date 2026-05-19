@@ -435,7 +435,7 @@ unique class DelegatedHardware {
         return OwnedHardware(
             vcpu0 = Vcpu(),
             executors = ExecutorRegistry(next_id = 0),
-            hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0, console_memory = ExecutorMemory(), worker_memory = ExecutorMemory())
+            hardware_plan = HardwarePlan(console_memory = ExecutorMemory(), worker_memory = ExecutorMemory())
         )
     }
 }
@@ -878,8 +878,7 @@ image ExplicitInterruptConfigurator {
 	        let shared = discovery.interrupts.route_shared_irq(irq = 6, vector = InterruptVector(value = 0x46))
 	        let queue_slots = console_memory.reserve_array(U8, count = 64)
 	        let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-	        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
-	            cpus = discovery.cpus.require_min_count(count = 2),
+	        let hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2),
 	            interrupts = InterruptRoutingPlan(
 	                local_apic = discovery.interrupts.local_apic,
 	                serial_irq4 = shared.route,

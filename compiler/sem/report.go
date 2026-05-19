@@ -4,7 +4,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
+	"github.com/ryanwible/wrela3/compiler/nvmefmt"
 	"github.com/ryanwible/wrela3/compiler/report"
 	"github.com/ryanwible/wrela3/compiler/storagefmt"
 )
@@ -303,9 +305,10 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 		return
 	}
 	g := checked.ImageGraph
-	r.Storage.ActiveLBASize = 512
+	activeLBASize := uint64(512)
+	r.Storage.ActiveLBASize = activeLBASize
 	r.Storage.NamespaceMode = "conventional"
-	r.Storage.DurabilityMode = "fua"
+	r.Storage.DurabilityMode = storageDurabilityModeForReport(checked, activeLBASize)
 	r.Storage.EventSlotSize = storagefmt.EventSlotSize
 	r.Storage.ReservedEmptySlots = storagefmt.FinishBatch(r.Storage.ActiveLBASize, storagefmt.StorageTargetBatchSlots).ReservedEmptySlots
 	r.Storage.TargetBatchSlots = storagefmt.StorageTargetBatchSlots
@@ -347,6 +350,241 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 			Depth:     endpoint.Depth,
 		})
 	}
+}
+
+func storageDurabilityModeForReport(checked *CheckedProgram, activeLBASize uint64) string {
+	if mode, ok := storageMetricsSelectedDurabilityMode(checked, activeLBASize); ok {
+		return mode
+	}
+	mode, err := nvmefmt.SelectDurability(nvmefmt.NamespaceFacts{LogicalBlockSize: activeLBASize, SupportsFUA: true})
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(mode.Mode)
+}
+
+func storageMetricsSelectedDurabilityMode(checked *CheckedProgram, activeLBASize uint64) (string, bool) {
+	if checked == nil {
+		return "", false
+	}
+	var selected string
+	var found bool
+	record := func(expr ast.Expr) {
+		if found {
+			return
+		}
+		switch e := expr.(type) {
+		case *ast.IntLiteral:
+			if mode, ok := storageDurabilityModeNameForValue(e.Value); ok {
+				selected, found = mode, true
+			}
+		case *ast.CallExpr:
+			if e.Method == "first_append_durability_mode_value" {
+				mode, err := nvmefmt.SelectDurability(nvmefmt.NamespaceFacts{
+					LogicalBlockSize: activeLBASize,
+					SupportsFUA:      nvmeIdentifyControllerSupportsFUA(checked),
+				})
+				if err == nil {
+					selected, found = strings.ToLower(mode.Mode), true
+				}
+			}
+		}
+	}
+
+	var visitExpr func(ast.Expr)
+	var visitStmts func([]ast.Stmt)
+	visitExpr = func(expr ast.Expr) {
+		if expr == nil || found {
+			return
+		}
+		switch e := expr.(type) {
+		case *ast.ConstructorExpr:
+			if e.Type.Name == "StorageMetrics" {
+				for _, arg := range e.Args {
+					if arg.Name == "selected_durability_mode" {
+						record(arg.Value)
+						return
+					}
+				}
+			}
+			for _, arg := range e.Args {
+				visitExpr(arg.Value)
+			}
+		case *ast.VariantConstructorExpr:
+			for _, arg := range e.Args {
+				visitExpr(arg.Value)
+			}
+		case *ast.CallExpr:
+			visitExpr(e.Receiver)
+			for _, arg := range e.Args {
+				visitExpr(arg.Value)
+			}
+		case *ast.FieldExpr:
+			visitExpr(e.Base)
+		case *ast.BinaryExpr:
+			visitExpr(e.Left)
+			visitExpr(e.Right)
+		}
+	}
+	visitStmts = func(stmts []ast.Stmt) {
+		for _, stmt := range stmts {
+			if found {
+				return
+			}
+			switch s := stmt.(type) {
+			case *ast.LetStmt:
+				visitExpr(s.Expr)
+			case *ast.ReturnStmt:
+				visitExpr(s.Value)
+			case *ast.IfStmt:
+				visitExpr(s.Cond)
+				visitStmts(s.Then)
+				visitStmts(s.Else)
+			case *ast.IfLetStmt:
+				visitExpr(s.Value)
+				visitStmts(s.Body)
+			case *ast.MatchStmt:
+				visitExpr(s.Value)
+				for _, arm := range s.Arms {
+					visitStmts(arm.Body)
+				}
+			case *ast.WhileStmt:
+				visitExpr(s.Cond)
+				visitStmts(s.Body)
+			case *ast.WithStmt:
+				visitExpr(s.Expr)
+				visitStmts(s.Body)
+			case *ast.ForStmt:
+				visitExpr(s.InExpr)
+				visitStmts(s.Body)
+			case *ast.AssignStmt:
+				visitExpr(s.Value)
+			case *ast.ExprStmt:
+				visitExpr(s.Expr)
+			}
+		}
+	}
+	for _, mod := range checked.Modules {
+		for _, decl := range mod.Decls {
+			switch d := decl.(type) {
+			case *ast.DataDecl:
+				for _, method := range d.Methods {
+					visitStmts(method.Body)
+				}
+			case *ast.ClassDecl:
+				for _, method := range d.Methods {
+					visitStmts(method.Body)
+				}
+			case *ast.DriverDecl:
+				for _, method := range d.Methods {
+					visitStmts(method.Body)
+				}
+			case *ast.ExecutorDecl:
+				for _, method := range d.Methods {
+					visitStmts(method.Body)
+				}
+				for _, handler := range d.OnHandlers {
+					visitStmts(handler.Body)
+				}
+			case *ast.ImageDecl:
+				for _, phase := range d.Phases {
+					visitStmts(phase.Body)
+				}
+			}
+			if found {
+				return selected, true
+			}
+		}
+	}
+	return "", false
+}
+
+func storageDurabilityModeNameForValue(value string) (string, bool) {
+	mode, err := strconv.ParseUint(value, 0, 64)
+	if err != nil {
+		return "", false
+	}
+	switch mode {
+	case 1:
+		return strings.ToLower(nvmefmt.DurabilityFUA), true
+	case 2:
+		return "pfail_atomic_fua", true
+	case 3:
+		return strings.ToLower(nvmefmt.DurabilityWritePlusFlush), true
+	default:
+		return "", false
+	}
+}
+
+func nvmeIdentifyControllerSupportsFUA(checked *CheckedProgram) bool {
+	if checked == nil || len(checked.Modules) == 0 {
+		return true
+	}
+	for _, mod := range checked.Modules {
+		if mod.Name != "machine.x86_64.nvme" {
+			continue
+		}
+		for _, decl := range mod.Decls {
+			if d, ok := decl.(*ast.ClassDecl); ok && d.Name == "NvmeDirectStorage" {
+				for _, method := range d.Methods {
+					if method.Name == "identify_controller" {
+						if value, ok := constructorBoolReturn(method.Body, "NvmeControllerFacts", "supports_fua"); ok {
+							return value
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func constructorBoolReturn(stmts []ast.Stmt, constructorName string, fieldName string) (bool, bool) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.ReturnStmt:
+			if ctor, ok := s.Value.(*ast.ConstructorExpr); ok && ctor.Type.Name == constructorName {
+				for _, arg := range ctor.Args {
+					if arg.Name == fieldName {
+						if literal, ok := arg.Value.(*ast.BoolLiteral); ok {
+							return literal.Value, true
+						}
+					}
+				}
+			}
+		case *ast.IfStmt:
+			if value, ok := constructorBoolReturn(s.Then, constructorName, fieldName); ok {
+				return value, true
+			}
+			if value, ok := constructorBoolReturn(s.Else, constructorName, fieldName); ok {
+				return value, true
+			}
+		case *ast.IfLetStmt:
+			if value, ok := constructorBoolReturn(s.Body, constructorName, fieldName); ok {
+				return value, true
+			}
+		case *ast.MatchStmt:
+			for _, arm := range s.Arms {
+				if value, ok := constructorBoolReturn(arm.Body, constructorName, fieldName); ok {
+					return value, true
+				}
+			}
+		case *ast.WhileStmt:
+			if value, ok := constructorBoolReturn(s.Body, constructorName, fieldName); ok {
+				return value, true
+			}
+		case *ast.WithStmt:
+			if value, ok := constructorBoolReturn(s.Body, constructorName, fieldName); ok {
+				return value, true
+			}
+		case *ast.ForStmt:
+			if value, ok := constructorBoolReturn(s.Body, constructorName, fieldName); ok {
+				return value, true
+			}
+		}
+	}
+	return false, false
 }
 
 func imageUsesStorage(checked *CheckedProgram) bool {

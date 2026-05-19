@@ -16,6 +16,7 @@ type NamespaceFacts struct {
 var ErrUnsupportedLBA = errors.New("unsupported nvme lba size")
 var ErrTransferTooLarge = errors.New("nvme transfer exceeds max prp bytes")
 var ErrInvalidBlockCount = errors.New("nvme transfer block count must be nonzero")
+var ErrInvalidIdentifyNamespace = errors.New("invalid nvme identify namespace data")
 
 const (
 	NVME_OPCODE_FLUSH       uint64 = 0x00
@@ -47,7 +48,13 @@ func PlannedControllerInitOps() []string {
 }
 
 func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
+	if len(data) <= 26 {
+		return NamespaceFacts{}, ErrInvalidIdentifyNamespace
+	}
 	format := int(data[26] & 0x0f)
+	if len(data) <= 128+format*4+2 {
+		return NamespaceFacts{}, ErrInvalidIdentifyNamespace
+	}
 	lbads := data[128+format*4+2]
 	logicalBlockSize := uint64(1) << lbads
 	if logicalBlockSize != 512 && logicalBlockSize != 4096 {
@@ -85,11 +92,12 @@ type DurabilityMode struct {
 }
 
 type DurabilityState struct {
-	Mode            string
-	PendingWrites   uint32
-	CompletedWrites uint32
-	FlushCompleted  bool
-	failed          bool
+	Mode                string
+	PendingWrites       uint32
+	CompletedWrites     uint32
+	FlushCompleted      bool
+	completedCommandIDs map[uint16]struct{}
+	failed              bool
 }
 
 func SelectDurability(ns NamespaceFacts) (DurabilityMode, error) {
@@ -104,12 +112,18 @@ func SelectDurability(ns NamespaceFacts) (DurabilityMode, error) {
 }
 
 func (s *DurabilityState) CompleteWrite(commandID uint16, ok bool) {
-	_ = commandID
 	if !ok {
 		s.failed = true
 		return
 	}
+	if _, ok := s.completedCommandIDs[commandID]; ok {
+		return
+	}
 	if s.CompletedWrites < s.PendingWrites {
+		if s.completedCommandIDs == nil {
+			s.completedCommandIDs = map[uint16]struct{}{}
+		}
+		s.completedCommandIDs[commandID] = struct{}{}
 		s.CompletedWrites++
 	}
 }
@@ -222,6 +236,9 @@ type CompletionInterrupt struct {
 }
 
 func DrainCompletions(q *CompletionQueue, entries []CompletionEntry, ringDoorbell func(queueID uint16, head uint16)) CompletionInterrupt {
+	if q.Depth == 0 || q.Head >= q.Depth || len(entries) < int(q.Depth) {
+		return CompletionInterrupt{QueueID: q.QueueID}
+	}
 	var completed uint16
 	for completed < q.Depth {
 		entry := entries[q.Head]

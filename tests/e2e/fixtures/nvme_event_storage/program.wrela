@@ -121,15 +121,15 @@ data FirstAppendBuilder {
         let relocation = RelocateBlobProposal(blob_id = 1, old_ref = old_ref, new_ref = new_ref, observed_version = 0)
         let relocation_accepted = truth.can_accept_relocate(proposal = relocation)
         let collector = BlobOrphanCollector(
-            allocated = Extent(start_lba = 20, block_count = 2),
-            acknowledged_refs = new_ref
+            allocated = Extent(start_lba = 40, block_count = 2),
+            acknowledged_refs = old_ref
         )
         let reclaimed = collector.reclaimable()
         let orphan_collected = false
         if relocation_accepted == false {
             if first_recovery.visible_events == 1 {
                 if second_header.event_id == 1 {
-                    if reclaimed.start_lba == 20 {
+                    if reclaimed.start_lba == 40 {
                         if reclaimed.block_count == 2 {
                             orphan_collected = true
                         }

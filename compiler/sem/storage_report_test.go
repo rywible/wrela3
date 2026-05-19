@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/ast"
 	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/storagefmt"
 )
@@ -90,6 +91,64 @@ func TestStorageMetricsReportPopulation(t *testing.T) {
 	}
 	if ds := ValidateStorageReportContent(r); len(ds) != 0 {
 		t.Fatalf("storage report diagnostics = %#v, want none", ds)
+	}
+}
+
+func TestStorageReportDurabilityModeUsesSelectedMetricsLiteral(t *testing.T) {
+	checked := storageReportCheckedProgramWithMetricsExpr(&ast.IntLiteral{Value: "3"})
+
+	r := BuildImageReport(checked)
+	if r.Storage.DurabilityMode != "write_plus_flush" {
+		t.Fatalf("durability mode = %q, want write_plus_flush", r.Storage.DurabilityMode)
+	}
+}
+
+func TestStorageReportDurabilityModeUsesRuntimeNvmeFacts(t *testing.T) {
+	checked := storageReportCheckedProgramWithMetricsExpr(&ast.CallExpr{Method: "first_append_durability_mode_value"})
+	checked.Modules = append(checked.Modules, &ast.Module{
+		Name: "machine.x86_64.nvme",
+		Decls: []ast.Decl{&ast.ClassDecl{
+			Name: "NvmeDirectStorage",
+			Methods: []ast.MethodDecl{{
+				Name: "identify_controller",
+				Body: []ast.Stmt{&ast.ReturnStmt{Value: &ast.ConstructorExpr{
+					Type: ast.TypeRef{Name: "NvmeControllerFacts"},
+					Args: []ast.NamedArg{{Name: "supports_fua", Value: &ast.BoolLiteral{Value: false}}},
+				}}},
+			}},
+		}},
+	})
+
+	r := BuildImageReport(checked)
+	if r.Storage.DurabilityMode != "write_plus_flush" {
+		t.Fatalf("durability mode = %q, want write_plus_flush", r.Storage.DurabilityMode)
+	}
+}
+
+func storageReportCheckedProgramWithMetricsExpr(expr ast.Expr) *CheckedProgram {
+	return &CheckedProgram{
+		Modules: []*ast.Module{{
+			Name: "storage.report.test",
+			Decls: []ast.Decl{&ast.ImageDecl{
+				Name: "StorageReportImage",
+				Phases: []ast.PhaseDecl{{
+					Body: []ast.Stmt{&ast.LetStmt{
+						Name: "metrics",
+						Expr: &ast.ConstructorExpr{
+							Type: ast.TypeRef{Name: "StorageMetrics"},
+							Args: []ast.NamedArg{{Name: "selected_durability_mode", Value: expr}},
+						},
+					}},
+				}},
+			}},
+		}},
+		ImageGraph: ImageGraph{
+			StoragePaths: []StoragePathNode{
+				{Label: "nvme.foreground", Role: "foreground", Owner: "foreground", QueueID: 1, Vector: 80},
+				{Label: "nvme.background", Role: "background", Owner: "maintenance", QueueID: 2, Vector: 81},
+			},
+			StorageAppendCalls: []StorageAppendCallNode{{ResultObserved: true}},
+		},
 	}
 }
 

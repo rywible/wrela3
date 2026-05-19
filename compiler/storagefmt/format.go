@@ -281,6 +281,7 @@ func (c *OrphanCollector) MarkAcknowledged(ref BlobRef) {
 }
 
 func (c *OrphanCollector) MarkUnacknowledged(ref BlobRef) {
+	delete(c.acknowledgedRefs, ref)
 }
 
 func (c *OrphanCollector) Reclaimable() []Extent {
@@ -546,7 +547,7 @@ func (w *WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
 	open := combined
 	flush := false
 	switch {
-	case combined <= StorageTargetBatchSlots:
+	case combined < StorageTargetBatchSlots:
 	case combined <= StorageMaxBatchSlots:
 		flush = true
 	default:

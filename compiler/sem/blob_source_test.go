@@ -138,6 +138,20 @@ data BlobRelocationMirror {
 		"ref":     "BlobRef",
 		"version": "U64",
 	})
+
+	source := readRepoFile(t, "wrela/storage/blob.wrela")
+	accept := sourceBetween(t, source, "fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {", "\n}\n\ndata Extent")
+	for _, want := range []string{
+		"if self.can_accept_relocate(proposal = proposal) == false",
+		"return false",
+		"self.ref = proposal.new_ref",
+		"self.version = self.version + 1",
+		"return true",
+	} {
+		if !strings.Contains(accept, want) {
+			t.Fatalf("BlobTruth.accept_relocate source missing mutation shape %q", want)
+		}
+	}
 }
 
 func TestBlobWriterRelocationMirrorContract(t *testing.T) {

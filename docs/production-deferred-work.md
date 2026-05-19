@@ -66,4 +66,7 @@
 - POSIX filesystem compatibility remains out of scope. The first storage surface is events, blobs, checkpoints, projections, and file-like entity streams.
 - SQL, relational query planning, general secondary indexes, multi-writer event-log sharding, and network replication remain out of scope.
 - Production command inboxes, idempotency records, full-disk encryption, IOMMU-backed DMA isolation, SGL-heavy NVMe transfers, tuned compression codec selection, and destructive retention policies remain deferred.
+- Production interrupt-driven NVMe completion routing across MSI-X/MSI vectors remains deferred beyond milestone 1; the current direct NVMe append/replay proof uses bounded completion polling while keeping the interrupt receiver/path mirror source-visible.
+- Real hot-slot replay across the whole hot window remains deferred beyond the current first-group proof.
+- Full Wrela blob allocator behavior and orphan collection for multi-entry manifests remain deferred until behaviorally mirrored end to end.
 - The first blob cipher used by QEMU tests is a named development passthrough mode behind the final blob manifest API. Production images must not construct it without explicit development-storage opt in.

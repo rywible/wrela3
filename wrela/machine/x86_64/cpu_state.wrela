@@ -285,9 +285,6 @@ class ClaimedPciPlanBuilder {
 }
 
 data HardwarePlan {
-    storage_replay_last_event_id: U64
-    storage_replay_projection_watermark: U64
-    storage_replay_orphan_collected: U64
     cpus: CpuTopology
     interrupts: InterruptRoutingPlan
     pci: ClaimedPciPlan

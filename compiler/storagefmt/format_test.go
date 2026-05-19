@@ -327,6 +327,7 @@ func TestOrphanCollectorUsesAcknowledgedBlobRefs(t *testing.T) {
 		{StartLBA: 30, BlockCount: 2},
 	})
 	collector.MarkAcknowledged(BlobRefForExtent(10, 2))
+	collector.MarkAcknowledged(BlobRefForExtent(30, 2))
 	collector.MarkUnacknowledged(BlobRefForExtent(30, 2))
 
 	got := collector.Reclaimable()
@@ -453,6 +454,14 @@ func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
 	got := writer.EnqueueAtomicGroup(2)
 	if !got.Accepted || got.OpenBatchSlots != 65 || !got.FlushRequested {
 		t.Fatalf("enqueue = %#v", got)
+	}
+}
+
+func TestStorageWriterRequestsFlushAtTargetBoundary(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: 62}
+	got := writer.EnqueueAtomicGroup(2)
+	if !got.Accepted || got.OpenBatchSlots != StorageTargetBatchSlots || !got.FlushRequested {
+		t.Fatalf("enqueue = %#v, want flush at target boundary", got)
 	}
 }
 

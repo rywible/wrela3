@@ -222,10 +222,12 @@ Identify Namespace byte offsets used by v1 tests:
 
 ```text
 0..7      NSZE
-24       FLBAS active LBA format low nibble
+26       FLBAS active LBA format low nibble
 128..191 LBAF table entries, each 4 bytes
 LBAF[i] byte 2 contains LBADS, so logical_block_size = 1 << LBADS
 ```
+
+FLBAS byte 26 follows the NVMe Identify Namespace layout and is the implementation contract now.
 
 Identify Controller byte offsets used by v1 tests:
 
@@ -730,7 +732,7 @@ type NamespaceFacts struct {
 }
 
 func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
-	flbas := data[24] & 0x0f
+	flbas := data[26] & 0x0f
 	lbads := data[128+int(flbas)*4+2]
 	size := uint64(1) << lbads
 	if size != 512 && size != 4096 {
@@ -4074,7 +4076,7 @@ enqueue_atomic_group(group):
   first_event_id = next_event_id
   last_event_id = next_event_id + group.semantic_event_count - 1
 
-  if open_batch_slots + group.semantic_event_count <= 64:
+  if open_batch_slots + group.semantic_event_count < 64:
     add group
     return pending(first_event_id, last_event_id)
 

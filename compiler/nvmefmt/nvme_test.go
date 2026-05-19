@@ -50,6 +50,21 @@ func TestParseIdentifyNamespaceRejectsUnsupportedLBA(t *testing.T) {
 	}
 }
 
+func TestParseIdentifyNamespaceRejectsShortBuffer(t *testing.T) {
+	for _, data := range [][]byte{
+		make([]byte, 26),
+		func() []byte {
+			data := make([]byte, 131)
+			data[26] = 1
+			return data
+		}(),
+	} {
+		if _, err := ParseIdentifyNamespace(data); !errors.Is(err, ErrInvalidIdentifyNamespace) {
+			t.Fatalf("ParseIdentifyNamespace() error = %v, want %v", err, ErrInvalidIdentifyNamespace)
+		}
+	}
+}
+
 func TestParseIdentifyControllerDurabilityFacts(t *testing.T) {
 	data := make([]byte, 4096)
 	data[256] = 1
@@ -132,6 +147,19 @@ func TestDurabilityFailureRejectsBatch(t *testing.T) {
 	sm.CompleteFlush(false)
 	if !sm.Failed() || sm.Acknowledged() {
 		t.Fatalf("state = %+v, want failed without ack", sm)
+	}
+}
+
+func TestDurabilityCompleteWriteDedupesCommandID(t *testing.T) {
+	sm := DurabilityState{Mode: DurabilityFUA, PendingWrites: 2}
+	sm.CompleteWrite(7, true)
+	sm.CompleteWrite(7, true)
+	if sm.CompletedWrites != 1 || sm.Acknowledged() {
+		t.Fatalf("state = %+v, want one completed write without ack", sm)
+	}
+	sm.CompleteWrite(8, true)
+	if sm.CompletedWrites != 2 || !sm.Acknowledged() {
+		t.Fatalf("state = %+v, want ack after distinct command IDs", sm)
 	}
 }
 
@@ -305,5 +333,32 @@ func TestCompletionDrainRingsDoorbellAndReturnsInterrupt(t *testing.T) {
 	}
 	if len(doorbells) != 1 || doorbells[0].queueID != 3 || doorbells[0].head != 1 {
 		t.Fatalf("doorbells = %+v, want one ring for queue 3 head 1", doorbells)
+	}
+}
+
+func TestCompletionDrainRejectsInvalidDepth(t *testing.T) {
+	q := CompletionQueue{QueueID: 9, Depth: 3, Phase: true}
+	interrupt := DrainCompletions(&q, []CompletionEntry{{Phase: true}}, func(queueID uint16, head uint16) {
+		t.Fatalf("doorbell rung for invalid completion queue depth: queue=%d head=%d", queueID, head)
+	})
+	if interrupt.QueueID != 9 || interrupt.CompletedCount != 0 {
+		t.Fatalf("interrupt = %+v, want queue 9 completed count 0", interrupt)
+	}
+	if q.Head != 0 || !q.Phase {
+		t.Fatalf("queue mutated for invalid depth: %+v", q)
+	}
+}
+
+func TestCompletionDrainRejectsInvalidHead(t *testing.T) {
+	q := CompletionQueue{QueueID: 9, Depth: 3, Head: 3, Phase: true}
+	entries := []CompletionEntry{{Phase: true}, {Phase: true}, {Phase: true}}
+	interrupt := DrainCompletions(&q, entries, func(queueID uint16, head uint16) {
+		t.Fatalf("doorbell rung for invalid completion queue head: queue=%d head=%d", queueID, head)
+	})
+	if interrupt.QueueID != 9 || interrupt.CompletedCount != 0 {
+		t.Fatalf("interrupt = %+v, want queue 9 completed count 0", interrupt)
+	}
+	if q.Head != 3 || !q.Phase {
+		t.Fatalf("queue mutated for invalid head: %+v", q)
 	}
 }
