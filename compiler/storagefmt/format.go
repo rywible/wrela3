@@ -22,6 +22,11 @@ const (
 	StorageMaxBatchSlots       uint64 = 72
 	StorageMaxAtomicGroupSlots uint64 = 32
 	StorageSlotReservedEmpty   uint32 = 1
+
+	SegmentStateOpenHot      uint8 = 1
+	SegmentStateSealedHot    uint8 = 2
+	SegmentStateCompressible uint8 = 3
+	SegmentStateCompressed   uint8 = 4
 )
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
@@ -71,6 +76,25 @@ type RecoveryResult struct {
 	NextEventID           uint64
 	LastCommittedGroupEnd uint64
 	StopReason            RecoveryStopReason
+}
+
+type EventSegment struct {
+	FirstEventID   uint64
+	LastEventID    uint64
+	State          uint8
+	ZoneStartLBA   uint64
+	ZoneBlockCount uint64
+}
+
+type SegmentIndexEntry struct {
+	EventIDDelta uint64
+	ByteOffset   uint64
+}
+
+type PackedSegment struct {
+	BaseEventID uint64
+	Bytes       []byte
+	Index       []SegmentIndexEntry
 }
 
 func FinishBatch(activeLBASize, semanticSlots uint64) BatchPacking {
@@ -175,6 +199,10 @@ func slotChecksumValid(slot Slot) bool {
 }
 
 func SlotChecksum(slot Slot) uint32 {
+	return CRC32C(slotBytes(slot, 0))
+}
+
+func slotBytes(slot Slot, checksum uint32) []byte {
 	bytes := make([]byte, EventSlotSize)
 	binary.LittleEndian.PutUint64(bytes[0:], slot.Header.EventID)
 	binary.LittleEndian.PutUint64(bytes[8:], slot.Header.StreamID)
@@ -185,11 +213,12 @@ func SlotChecksum(slot Slot) uint32 {
 	binary.LittleEndian.PutUint32(bytes[36:], slot.Header.AtomicGroupIndex)
 	binary.LittleEndian.PutUint32(bytes[40:], slot.Header.PayloadLength)
 	binary.LittleEndian.PutUint32(bytes[44:], slot.Header.Flags)
+	binary.LittleEndian.PutUint32(bytes[48:], checksum)
 	binary.LittleEndian.PutUint16(bytes[52:], slot.Header.HeaderVersion)
 	binary.LittleEndian.PutUint16(bytes[54:], slot.Header.Reserved16)
 	binary.LittleEndian.PutUint64(bytes[56:], slot.Header.Reserved64)
 	copy(bytes[EventHeaderSize:], slot.Payload[:])
-	return CRC32C(bytes)
+	return bytes
 }
 
 func RefreshSlotChecksum(slot *Slot) {
@@ -221,6 +250,43 @@ func ReservedEmptySlotForTest(eventID uint64) Slot {
 	}}
 	RefreshSlotChecksum(&slot)
 	return slot
+}
+
+func PackSlots(slots []Slot, stride uint64) PackedSegment {
+	if len(slots) == 0 {
+		return PackedSegment{}
+	}
+	if stride == 0 {
+		stride = 1
+	}
+
+	baseEventID := slots[0].Header.EventID
+	packed := PackedSegment{BaseEventID: baseEventID}
+	for _, slot := range slots {
+		payloadLength := uint64(slot.Header.PayloadLength)
+		if payloadLength > EventPayloadBytes {
+			payloadLength = EventPayloadBytes
+		}
+		delta := slot.Header.EventID - baseEventID
+		if delta%stride == 0 {
+			packed.Index = append(packed.Index, SegmentIndexEntry{
+				EventIDDelta: delta,
+				ByteOffset:   uint64(len(packed.Bytes)),
+			})
+		}
+		raw := slotBytes(slot, slot.Header.Checksum32)
+		packed.Bytes = append(packed.Bytes, raw[:EventHeaderSize+payloadLength]...)
+	}
+	return packed
+}
+
+func FindSegmentForEventID(segments []EventSegment, eventID uint64) (EventSegment, bool) {
+	for _, segment := range segments {
+		if eventID >= segment.FirstEventID && eventID <= segment.LastEventID {
+			return segment, true
+		}
+	}
+	return EventSegment{}, false
 }
 
 type Region struct {

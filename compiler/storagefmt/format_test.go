@@ -241,3 +241,20 @@ func TestRecoverySkipsReservedEmptySlots(t *testing.T) {
 		t.Fatalf("recovery = %#v, want reserved empty skipped", got)
 	}
 }
+
+func TestPackedSegmentCodecStripsPadding(t *testing.T) {
+	slot := ValidSlotForTest(0)
+	slot.Header.PayloadLength = 12
+	for i := uint32(0); i < slot.Header.PayloadLength; i++ {
+		slot.Payload[i] = byte(i + 1)
+	}
+	RefreshSlotChecksum(&slot)
+
+	packed := PackSlots([]Slot{slot}, 16)
+	if got, want := len(packed.Bytes), int(EventHeaderSize+12); got != want {
+		t.Fatalf("packed bytes = %d, want %d", got, want)
+	}
+	if len(packed.Index) != 1 || packed.Index[0].EventIDDelta != 0 {
+		t.Fatalf("packed index = %#v", packed.Index)
+	}
+}

@@ -140,6 +140,37 @@ data RecoveryConsumer {
 	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "EventRecoveryScanner"), "validate_group_member")
 }
 
+func TestEventLogSegmentMirrorContract(t *testing.T) {
+	modules := parseEventLogModules(t, `
+module sem.event_log_segment_mirror
+
+use { EventSegment, EventSegmentMap, PackedSegmentCodec, SegmentIndexEntry } from storage.event_log
+
+data SegmentConsumer {
+    segment: EventSegment
+    index: SegmentIndexEntry
+    segment_map: EventSegmentMap
+    codec: PackedSegmentCodec
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.event_log", "EventSegment"), map[string]string{
+		"state":            "U64",
+		"zone_start_lba":   "U64",
+		"zone_block_count": "U64",
+	})
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.event_log", "SegmentIndexEntry"), map[string]string{
+		"event_id_delta": "U64",
+	})
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "PackedSegmentCodec"), "pack_slots")
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "EventSegmentMap"), "contains_event")
+}
+
 func parseEventLogModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{
