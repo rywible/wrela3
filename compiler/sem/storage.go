@@ -76,6 +76,7 @@ func (c *checker) checkStorageDecls() StorageIndex {
 }
 
 func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
+	c.checkBlobCipherPolicy(moduleName, expr, typ)
 	if !isStorageWriterType(typ) {
 		return
 	}
@@ -106,6 +107,21 @@ func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.Co
 		PathRoles:    pathRoles,
 		Span:         expr.SpanV,
 	})
+}
+
+func (c *checker) checkBlobCipherPolicy(moduleName string, expr *ast.ConstructorExpr, typ *Type) {
+	if qualifiedTypeName(typ) != "storage.blob.BlobCipherPolicy" {
+		return
+	}
+	mode, ok := c.constValueOfExpr(moduleName, constructorArg(expr, "mode"))
+	if !ok || mode != 1 {
+		return
+	}
+	optIn, ok := constructorArg(expr, "development_opt_in").(*ast.BoolLiteral)
+	if ok && optIn.Value {
+		return
+	}
+	c.error(expr.SpanV, diag.SEM0123, "development blob cipher requires explicit opt in")
 }
 
 func storageWriterArgMatches(field string, typ *Type) bool {
@@ -196,6 +212,7 @@ func (c *checker) recordStorageEvent(storage StorageIndex, moduleName string, de
 func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]EventLayoutInfo, uint64) {
 	layouts := make([]EventLayoutInfo, 0, len(decl.Layouts))
 	layoutFields := map[uint64]map[string]bool{}
+	eventFieldTypes := c.eventFieldTypes(moduleName, decl.Fields)
 	seen := map[uint64]source.Span{}
 	currentCount := 0
 	var currentLayoutID uint64
@@ -215,7 +232,7 @@ func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]E
 			currentCount++
 			currentLayoutID = id
 		}
-		payloadSize, payloadAlign, fieldNames := c.eventLayoutPayload(moduleName, layout)
+		payloadSize, payloadAlign, fieldNames := c.eventLayoutPayload(moduleName, layout, eventFieldTypes)
 		layoutFields[id] = fieldNames
 		layouts = append(layouts, EventLayoutInfo{
 			ID:           id,
@@ -239,7 +256,18 @@ func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]E
 	return layouts, currentLayoutID
 }
 
-func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl) (uint64, uint64, map[string]bool) {
+func (c *checker) eventFieldTypes(moduleName string, fields []ast.Field) map[string]*Type {
+	types := map[string]*Type{}
+	for _, field := range fields {
+		typ, ds := c.index.LookupTypeRef(moduleName, field.Type, nil)
+		if len(ds) == 0 && typ != nil {
+			types[field.Name] = typ
+		}
+	}
+	return types
+}
+
+func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl, eventFieldTypes map[string]*Type) (uint64, uint64, map[string]bool) {
 	fieldNames := map[string]bool{}
 	var payloadSize uint64
 	var payloadAlign uint64 = 1
@@ -248,6 +276,10 @@ func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDe
 		typ, ds := c.index.LookupTypeRef(moduleName, field.Type, nil)
 		if len(ds) != 0 || typ == nil {
 			c.error(field.Span, diag.SEM0103, "invalid event layout field "+field.Name)
+			continue
+		}
+		if isUnpublishedBlobRefType(typ) || eventEncodeReferencesUnpublishedBlob(field.Encode, eventFieldTypes) {
+			c.error(field.Span, diag.SEM0117, "event payload cannot reference unpublished blob bytes")
 			continue
 		}
 		fieldLayout, ok := semanticFieldSizeAndStorage(typ, map[string]bool{})
@@ -266,6 +298,22 @@ func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDe
 		c.error(layout.Span, diag.SEM0121, "event payload exceeds inline slot budget")
 	}
 	return payloadSize, payloadAlign, fieldNames
+}
+
+func isUnpublishedBlobRefType(typ *Type) bool {
+	return qualifiedTypeName(typ) == "storage.blob.UnpublishedBlobRef"
+}
+
+func eventEncodeReferencesUnpublishedBlob(expr ast.Expr, eventFieldTypes map[string]*Type) bool {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok {
+		return false
+	}
+	base, ok := field.Base.(*ast.NameExpr)
+	if !ok || base.Name != "self" {
+		return false
+	}
+	return isUnpublishedBlobRefType(eventFieldTypes[field.Field])
 }
 
 func (c *checker) checkEventUpcasts(decl *ast.EventDecl, layouts map[uint64]source.Span, layoutFields map[uint64]map[string]bool) {

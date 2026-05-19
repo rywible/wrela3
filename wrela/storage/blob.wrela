@@ -1,9 +1,27 @@
 module storage.blob
 
 const BLOB_ALLOCATOR_FREE_EXTENT_LIMIT: U64 = 1024
+const BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
 
 data BlobRef {
     blob_id: U64
+}
+
+data BlobCipherPolicy {
+    mode: U64
+    key_id: U64
+    nonce_low: U64
+    nonce_high: U64
+    development_opt_in: Bool
+}
+
+data UnpublishedBlobRef {
+    ref: BlobRef
+    manifest_lba: U64
+}
+
+data PublishedBlobRef {
+    ref: BlobRef
 }
 
 data Extent {
@@ -41,5 +59,10 @@ data BlobExtentAllocator {
 
     fn extents(self) -> Extent {
         return self.first
+    }
+
+    fn write_blob(self, blob_id: U64, logical_bytes: U64, policy: BlobCipherPolicy) -> UnpublishedBlobRef {
+        let extent = self.allocate(block_count = logical_bytes)
+        return UnpublishedBlobRef(ref = BlobRef(blob_id = blob_id), manifest_lba = extent.start_lba)
     }
 }

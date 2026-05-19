@@ -1,0 +1,29 @@
+// expect: SEM0123: development blob cipher requires explicit opt in
+module storage.blob
+
+const BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
+
+data BlobCipherPolicy {
+    mode: U64
+    key_id: U64
+    nonce_low: U64
+    nonce_high: U64
+    development_opt_in: Bool
+}
+
+module negative.development_blob_cipher_without_opt_in
+
+use { BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH, BlobCipherPolicy } from storage.blob
+
+executor BlobCipherExecutor {
+    start fn main(self) -> never {
+        let policy = BlobCipherPolicy(
+            mode = BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH,
+            key_id = 0,
+            nonce_low = 0,
+            nonce_high = 0,
+            development_opt_in = false
+        )
+        while true {}
+    }
+}
