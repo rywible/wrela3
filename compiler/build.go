@@ -113,7 +113,9 @@ func Build(opts BuildOptions) (BuildResult, error) {
 			reportPath = filepath.Join(repoRoot, reportPath)
 		}
 		imgReport := sem.BuildImageReport(checked)
-		if ds := append(sem.ValidateAuthorityAudit(imgReport), sem.ValidateAuthorityAuditContent(imgReport)...); len(ds) != 0 {
+		ds := append(sem.ValidateAuthorityAudit(imgReport), sem.ValidateAuthorityAuditContent(imgReport)...)
+		ds = append(ds, sem.ValidateStorageReportContent(imgReport)...)
+		if len(ds) != 0 {
 			return BuildResult{}, DiagnosticError{Diagnostics: ds}
 		}
 		var buf stdbytes.Buffer
