@@ -102,6 +102,61 @@ type StaticAssertDecl struct {
 
 func (d *StaticAssertDecl) Span() source.Span { return d.SpanV }
 
+type EventDecl struct {
+	Name    string
+	ID      string
+	Fields  []Field
+	Layouts []EventLayoutDecl
+	Upcasts []LayoutUpcastDecl
+	SpanV   source.Span
+}
+
+func (d *EventDecl) Span() source.Span { return d.SpanV }
+
+type EventLayoutDecl struct {
+	ID      string
+	Current bool
+	Fields  []EventLayoutField
+	Span    source.Span
+}
+
+type EventLayoutField struct {
+	Name   string
+	Type   TypeRef
+	Encode Expr
+	Span   source.Span
+}
+
+type ProjectionDecl struct {
+	Name    string
+	ID      string
+	Layouts []ProjectionLayoutDecl
+	Upcasts []LayoutUpcastDecl
+	SpanV   source.Span
+}
+
+func (d *ProjectionDecl) Span() source.Span { return d.SpanV }
+
+type ProjectionLayoutDecl struct {
+	ID      string
+	Current bool
+	Fields  []Field
+	Span    source.Span
+}
+
+type LayoutUpcastDecl struct {
+	FromID   string
+	ToID     string
+	Mappings []LayoutUpcastMapping
+	Span     source.Span
+}
+
+type LayoutUpcastMapping struct {
+	From string
+	To   string
+	Span source.Span
+}
+
 type DataDecl struct {
 	Name       string
 	TypeParams []TypeParam
@@ -447,6 +502,17 @@ type NamedArg struct {
 	Name  string
 	Value Expr
 	SpanV source.Span
+}
+
+func DebugDecl(decl Decl) string {
+	switch d := decl.(type) {
+	case *EventDecl:
+		return "event " + d.Name + " id " + d.ID
+	case *ProjectionDecl:
+		return "projection " + d.Name + " id " + d.ID
+	default:
+		return "<decl>"
+	}
 }
 
 func DebugExpr(expr Expr) string {

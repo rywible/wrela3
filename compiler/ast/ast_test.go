@@ -14,6 +14,75 @@ func TestASTContractAssertions(t *testing.T) {
 	var _ Expr = (*CallExpr)(nil)
 }
 
+func TestStorageASTContracts(t *testing.T) {
+	var _ Decl = (*EventDecl)(nil)
+	var _ Decl = (*ProjectionDecl)(nil)
+
+	encode := &FieldExpr{
+		Base:  &NameExpr{Name: "self"},
+		Field: "file_id",
+	}
+	event := &EventDecl{
+		Name: "FileRenamed",
+		ID:   "17",
+		Fields: []Field{{
+			Name: "file_id",
+			Type: TypeRef{Name: "FileId"},
+		}},
+		Layouts: []EventLayoutDecl{{
+			ID:      "2",
+			Current: true,
+			Fields: []EventLayoutField{{
+				Name:   "file_id",
+				Type:   TypeRef{Name: "U64"},
+				Encode: encode,
+			}},
+		}},
+		Upcasts: []LayoutUpcastDecl{{
+			FromID: "1",
+			ToID:   "2",
+			Mappings: []LayoutUpcastMapping{{
+				From: "old_name_ref",
+				To:   "name_ref",
+			}},
+		}},
+	}
+	projection := &ProjectionDecl{
+		Name: "DirectoryChildren",
+		ID:   "12",
+		Layouts: []ProjectionLayoutDecl{{
+			ID:      "1",
+			Current: true,
+			Fields: []Field{{
+				Name: "children",
+				Type: TypeRef{
+					Name: "OrderedPages",
+					Args: []TypeRef{{Name: "FileId"}, {Name: "FileNameKey"}, {Name: "DirectoryChild"}},
+				},
+			}},
+		}},
+	}
+
+	if got, want := DebugDecl(event), "event FileRenamed id 17"; got != want {
+		t.Fatalf("DebugDecl(event) = %q, want %q", got, want)
+	}
+	if got, want := DebugDecl(projection), "projection DirectoryChildren id 12"; got != want {
+		t.Fatalf("DebugDecl(projection) = %q, want %q", got, want)
+	}
+	if got := event.Layouts[0].Fields[0].Type.String(); got != "U64" {
+		t.Fatalf("event layout field type = %q", got)
+	}
+	if event.Layouts[0].Fields[0].Encode != encode {
+		t.Fatalf("event layout encode expression was not preserved")
+	}
+	if got := event.Upcasts[0].Mappings[0]; got.From != "old_name_ref" || got.To != "name_ref" {
+		t.Fatalf("upcast mapping = %#v", got)
+	}
+	if got := projection.Layouts[0].Fields[0].Type.String(); got != "OrderedPages<FileId, FileNameKey, DirectoryChild>" {
+		t.Fatalf("projection field type = %q", got)
+	}
+}
+
 func TestDebugExprBinary(t *testing.T) {
 	e := &BinaryExpr{
 		Op: "+",
