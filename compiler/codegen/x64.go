@@ -1531,6 +1531,9 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 	case "and":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x21, scratchRegs[0], scratchRegs[1])
+	case "xor", "^":
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegOp(e, 0x31, scratchRegs[0], scratchRegs[1])
 	case "mul", "*":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegIMul(e, scratchRegs[0], scratchRegs[1])
@@ -2630,8 +2633,16 @@ func emitCopy(e *Emitter, op *ir.Copy, frame Frame) {
 }
 
 func emitStorageSlotStore(e *Emitter, frame Frame, op *ir.StorageSlotStore) {
-	emitLoadValue(e, frame, op.Value, asm.MustLookup("rax"))
 	emitLoadValue(e, frame, op.Slot, asm.MustLookup("r11"))
+	size := e.ctx.storageSizeForType(op.Type)
+	if e.ctx.isHandleTypeKind(op.Type.Kind) && size > 0 {
+		srcBase, srcDisp, ok := emitValueAddress(e, frame, op.Value)
+		if ok {
+			emitCopyMemoryToMemoryRange(e, srcBase, srcDisp, asm.MustLookup("r11"), int64(op.Offset), size)
+		}
+		return
+	}
+	emitLoadValue(e, frame, op.Value, asm.MustLookup("rax"))
 	emitStoreRegAtOffset(e, asm.MustLookup("r11"), int64(op.Offset), asm.MustLookup("rax"), op.Type)
 }
 

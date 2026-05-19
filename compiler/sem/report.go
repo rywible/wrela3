@@ -307,6 +307,7 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 	r.Storage.NamespaceMode = "conventional"
 	r.Storage.DurabilityMode = "fua"
 	r.Storage.EventSlotSize = storagefmt.EventSlotSize
+	r.Storage.ReservedEmptySlots = storagefmt.FinishBatch(r.Storage.ActiveLBASize, storagefmt.StorageTargetBatchSlots).ReservedEmptySlots
 	r.Storage.TargetBatchSlots = storagefmt.StorageTargetBatchSlots
 	r.Storage.MaxOverflowSlots = storagefmt.StorageMaxOverflowSlots
 	r.Storage.MaxBatchSlots = storagefmt.StorageMaxBatchSlots
@@ -318,6 +319,7 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 		r.Storage.DeviceReportedMediaWrites = uint64(len(g.StorageWriters))
 	}
 	r.Storage.MediaWriteBytes = r.Storage.DeviceReportedMediaWrites * storagefmt.EventSlotSize
+	r.Storage.BlobOrphanBytes = uint64(len(g.StorageAppendCalls)) * storagefmt.EventPayloadBytes
 	r.Storage.AdminQueueDepth = 32
 	r.Storage.ForegroundIOQueueDepth = 256
 	r.Storage.BackgroundIOQueueDepth = 128
@@ -419,8 +421,14 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		{r.Storage.AdminQueueDepth != 0, "admin_queue_depth"},
 		{r.Storage.ForegroundIOQueueDepth != 0, "foreground_io_queue_depth"},
 		{r.Storage.BackgroundIOQueueDepth != 0, "background_io_queue_depth"},
+		{r.Storage.BlobOrphanBytes != 0, "blob_orphan_bytes"},
+		{r.Storage.ProjectionLagEvents != 0, "projection_lag_events"},
+		{r.Storage.ProjectionUpcastCount != 0, "projection_upcast_count"},
+		{r.Storage.ProjectionRebuildCount != 0, "projection_rebuild_count"},
 		{r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
 		{r.Storage.NvmePaths != nil, "nvme_paths"},
+		{hasStoragePathRole(r.Storage.NvmePaths, "foreground"), "nvme_paths.foreground"},
+		{hasStoragePathRole(r.Storage.NvmePaths, "background"), "nvme_paths.background"},
 		{r.Storage.CoreLinks != nil, "core_links"},
 	}
 	var ds []diag.Diagnostic
@@ -430,6 +438,15 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		}
 	}
 	return ds
+}
+
+func hasStoragePathRole(paths []report.NvmePathReport, role string) bool {
+	for _, path := range paths {
+		if path.Role == role {
+			return true
+		}
+	}
+	return false
 }
 
 func reportHasStorage(storage report.StorageReport) bool {

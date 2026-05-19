@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ryanwible/wrela3/compiler/storagefmt"
 )
 
-const nvmeStorageSentinelLBA int64 = 4096
-const nvmeStorageSentinelMagic uint64 = 0x3152564E41455257
+const nvmeStorageHotEventRegionOffset int64 = 1056768
 
 func TestNvmeEventStorageQEMU(t *testing.T) {
 	disk := filepath.Join(t.TempDir(), "storage.raw")
@@ -32,7 +33,7 @@ func TestNvmeEventStorageReplayQEMU(t *testing.T) {
 	if !strings.Contains(first, "NVME_STORAGE_APPEND_OK last_event_id=1") {
 		t.Fatalf("first boot missing append marker:\n%s", first)
 	}
-	assertStorageSentinel(t, disk, 1, 1, true)
+	assertFirstAppendEventSlots(t, disk)
 	second := runStorageQEMU(t, disk, "replay")
 	for _, want := range []string{
 		"NVME_STORAGE_REPLAY_OK last_event_id=1",
@@ -82,28 +83,63 @@ func assertInvalidStorageMode(t *testing.T, out string, err error) {
 	}
 }
 
-func assertStorageSentinel(t *testing.T, disk string, lastEventID, projectionWatermark uint64, orphanCollected bool) {
+func assertFirstAppendEventSlots(t *testing.T, disk string) {
 	t.Helper()
 	f, err := os.Open(disk)
 	if err != nil {
 		t.Fatalf("open storage disk: %v", err)
 	}
 	defer f.Close()
-	block := make([]byte, 32)
-	if _, err := f.ReadAt(block, nvmeStorageSentinelLBA*512); err != nil {
-		t.Fatalf("read storage sentinel: %v", err)
+
+	eventTypes := []uint32{1001, 1003}
+	streamSequences := []uint64{1, 2}
+	for i := uint64(0); i < 2; i++ {
+		slot := make([]byte, storagefmt.EventSlotSize)
+		if _, err := f.ReadAt(slot, nvmeStorageHotEventRegionOffset+int64(i*storagefmt.EventSlotSize)); err != nil {
+			t.Fatalf("read hot event slot %d: %v", i, err)
+		}
+		assertFirstAppendEventSlot(t, slot, i, streamSequences[i], eventTypes[i], 2, uint32(i))
 	}
-	if got := binary.LittleEndian.Uint64(block[0:8]); got != nvmeStorageSentinelMagic {
-		t.Fatalf("storage sentinel magic = %#x, want %#x", got, nvmeStorageSentinelMagic)
+}
+
+func assertFirstAppendEventSlot(t *testing.T, slot []byte, eventID, streamSequence uint64, eventTypeID, atomicGroupLen, atomicGroupIndex uint32) {
+	t.Helper()
+	if got := binary.LittleEndian.Uint64(slot[0:8]); got != eventID {
+		t.Fatalf("hot event slot event_id = %d, want %d", got, eventID)
 	}
-	if got := binary.LittleEndian.Uint64(block[8:16]); got != lastEventID {
-		t.Fatalf("storage sentinel last_event_id = %d, want %d", got, lastEventID)
+	if got := binary.LittleEndian.Uint64(slot[8:16]); got != 1 {
+		t.Fatalf("hot event slot %d stream_id = %d, want 1", eventID, got)
 	}
-	if got := binary.LittleEndian.Uint64(block[16:24]); got != projectionWatermark {
-		t.Fatalf("storage sentinel projection_watermark = %d, want %d", got, projectionWatermark)
+	if got := binary.LittleEndian.Uint64(slot[16:24]); got != streamSequence {
+		t.Fatalf("hot event slot %d stream_sequence = %d, want %d", eventID, got, streamSequence)
 	}
-	gotOrphan := binary.LittleEndian.Uint64(block[24:32]) != 0
-	if gotOrphan != orphanCollected {
-		t.Fatalf("storage sentinel orphan_collected = %v, want %v", gotOrphan, orphanCollected)
+	if got := binary.LittleEndian.Uint32(slot[24:28]); got != eventTypeID {
+		t.Fatalf("hot event slot %d event_type_id = %d, want %d", eventID, got, eventTypeID)
+	}
+	if got := binary.LittleEndian.Uint32(slot[28:32]); got != 1 {
+		t.Fatalf("hot event slot %d payload_layout_id = %d, want 1", eventID, got)
+	}
+	if got := binary.LittleEndian.Uint32(slot[32:36]); got != atomicGroupLen {
+		t.Fatalf("hot event slot %d atomic_group_len = %d, want %d", eventID, got, atomicGroupLen)
+	}
+	if got := binary.LittleEndian.Uint32(slot[36:40]); got != atomicGroupIndex {
+		t.Fatalf("hot event slot %d atomic_group_index = %d, want %d", eventID, got, atomicGroupIndex)
+	}
+	if got := binary.LittleEndian.Uint32(slot[40:44]); got != 0 {
+		t.Fatalf("hot event slot %d payload_length = %d, want 0", eventID, got)
+	}
+	if got := binary.LittleEndian.Uint16(slot[52:54]); got != 1 {
+		t.Fatalf("hot event slot %d header_version = %d, want 1", eventID, got)
+	}
+	gotChecksum := binary.LittleEndian.Uint32(slot[storagefmt.Checksum32Offset : storagefmt.Checksum32Offset+4])
+	if gotChecksum == 0 {
+		t.Fatalf("hot event slot %d checksum32 is zero", eventID)
+	}
+	checksummed := append([]byte(nil), slot...)
+	for i := uint64(0); i < 4; i++ {
+		checksummed[storagefmt.Checksum32Offset+i] = 0
+	}
+	if want := storagefmt.CRC32C(checksummed); gotChecksum != want {
+		t.Fatalf("hot event slot %d checksum32 = %#x, want CRC32C %#x", eventID, gotChecksum, want)
 	}
 }

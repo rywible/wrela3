@@ -81,10 +81,11 @@ func TestBlobRelocationMirrorContract(t *testing.T) {
 	modules := parseBlobModules(t, `
 module sem.blob_relocation_mirror
 
-use { BlobRef, RelocateBlobProposal } from storage.blob
+use { BlobRef, BlobTruth, RelocateBlobProposal } from storage.blob
 
 data BlobRelocationMirror {
     ref: BlobRef
+    truth: BlobTruth
     proposal: RelocateBlobProposal
 }
 `)
@@ -100,6 +101,31 @@ data BlobRelocationMirror {
 		"new_ref":          "BlobRef",
 		"observed_version": "U64",
 	})
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "BlobTruth"), map[string]string{
+		"blob_id": "U64",
+		"ref":     "BlobRef",
+		"version": "U64",
+	})
+}
+
+func TestBlobWriterRelocationMirrorContract(t *testing.T) {
+	modules := parseStorageWriterModules(t, `
+module sem.blob_writer_relocation_mirror
+
+use { StorageWriter, StorageAppendResult } from storage.writer
+use { BlobTruth, RelocateBlobProposal } from storage.blob
+
+class BlobWriterRelocationMirror {
+    fn run(self, writer: StorageWriter, truth: BlobTruth, proposal: RelocateBlobProposal) -> StorageAppendResult {
+        return writer.accept_relocate_blob(truth = truth, proposal = proposal)
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
 }
 
 func TestMaintenanceMutatesBlobTruthFails(t *testing.T) {

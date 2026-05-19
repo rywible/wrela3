@@ -121,11 +121,11 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 		"disable_controller",
 		"program_admin_queues",
 		"enable_controller",
-		"identify_controller",
-		"identify_namespace",
 	} {
 		methodByName(t, driver, name)
 	}
+	directStorage := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeDirectStorage")
+	methodByName(t, directStorage, "identify_namespace")
 
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
 	initialize := sourceBetween(t, source, "fn initialize(self, device: PciDevice) -> NvmeDriver {", "\n    fn disable_controller(self)")
@@ -133,8 +133,22 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 		"controller.disable_controller()",
 		"controller.program_admin_queues()",
 		"controller.enable_controller()",
-		"controller.identify_controller()",
-		"controller.identify_namespace(namespace_id = 1)",
+	})
+	if strings.Contains(source, "fn identify_controller(self)") {
+		t.Fatalf("NvmeDriver must not retain stub identify_controller")
+	}
+	driverBody := sourceBetween(t, source, "unique driver NvmeDriver {", "\n    fn foreground_storage_path")
+	if strings.Contains(driverBody, "fn identify_namespace(self") {
+		t.Fatalf("NvmeDriver must not retain stub identify_namespace")
+	}
+	directIdentify := sourceBetween(t, source, "fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {", "\n    fn create_io_completion_queue")
+	assertOrderedSubstrings(t, directIdentify, []string{
+		"self.queues.data_buffer.zero()",
+		"self.submit_admin_command(",
+		"opcode = NVME_ADMIN_OPCODE_IDENTIFY",
+		"self.poll_admin_completion(command_id = identify.command_id)",
+		"self.queues.data_buffer.read_u8(offset = 24)",
+		"self.queues.data_buffer.read_u64(offset = 0)",
 	})
 	for _, want := range []string{
 		"const NVME_RESET_TIMEOUT_POLLS: U32 = 100000",
@@ -181,20 +195,27 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
 	for _, want := range []string{
-		"let opcode = NVME_OPCODE_READ",
-		"let command_namespace_id = namespace_id",
-		"let command_prp1 = prp1",
-		"let command_dword10 = start_lba",
-		"let command_dword11 = start_lba >> 32",
-		"let command_dword12 = block_count - 1",
-		"let opcode = NVME_OPCODE_WRITE",
-		"command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)",
-		"let opcode = NVME_OPCODE_FLUSH",
-		"let opcode = NVME_OPCODE_ZONE_APPEND",
+		"return self.submit_data_command(opcode = NVME_OPCODE_READ_U8",
+		"return self.submit_data_command(opcode = NVME_OPCODE_WRITE_U8",
+		"command_dword12 = command_dword12 | 0x40000000",
+		"return self.submit_data_command(opcode = NVME_OPCODE_FLUSH_U8",
+		"return self.submit_data_command(opcode = NVME_OPCODE_ZONE_APPEND_U8",
+		"sqe.write_u8(offset = 0, value = opcode)",
+		"sqe.write_u16(offset = 2, value = command_id)",
+		"sqe.write_u32(offset = 4, value = namespace_id)",
+		"sqe.write_physical_address(offset = 24, value = prp1)",
+		"sqe.write_u32(offset = 40, value = self.low32(value = start_lba))",
+		"sqe.write_u32(offset = 44, value = self.high32(value = start_lba))",
+		"sqe.write_u32(offset = 48, value = command_dword12)",
+		"self.registers.write32(offset = 0x1000 + ((self.u16_to_u32(value = self.queue_id) * 2) * 4), value = self.submission_tail)",
+		"return NvmeSubmission(command_id = command_id)",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("nvme source missing command shape %q", want)
 		}
+	}
+	if strings.Contains(source, "return NvmeSubmission(command_id = 0)") {
+		t.Fatalf("nvme submissions must allocate real command ids")
 	}
 }
 
@@ -234,9 +255,16 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 	drain := sourceBetween(t, source, "fn drain(self) -> NvmeCompletionInterrupt {", "\n}")
 	assertOrderedSubstrings(t, drain, []string{
 		"while scanned < self.depth",
+		"let cqe_offset = self.u32_to_u64(value = self.head) * 16",
+		"let dword3 = self.entries.read_u32(offset = cqe_offset + 12)",
+		"if dword3 == 0",
+		"let entry_phase = ((dword3 >> 16) & 1) != 0",
 		"if entry_phase != self.expected_phase",
 		"return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)",
 	})
+	if strings.Contains(drain, "self.current_entry_phase") {
+		t.Fatalf("NvmeCompletionQueue.drain must inspect CQ memory, not a stored phase bit")
+	}
 	ioDrain := sourceBetween(t, source, "fn drain_completion_queue(self) -> NvmeCompletionInterrupt {", "\n    fn submit_read")
 	assertOrderedSubstrings(t, ioDrain, []string{
 		"let completion = self.completion_queue.drain()",
@@ -244,6 +272,34 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 		"self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)",
 		"return completion",
 	})
+}
+
+func TestNvmeEventStorageFixtureUsesDirectNvmeStorage(t *testing.T) {
+	source := readRepoFile(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
+	for _, forbidden := range []string{
+		"platform.uefi.block_io",
+		"UefiStorageSentinel",
+		"UefiBlockIoBootServices",
+		"read_blocks",
+		"write_blocks",
+		"NVME_DEBUG",
+		"require_device(vendor_id",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("nvme event storage fixture must not use %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)",
+		"claim_mmio_bar_at32(index = 0, base = 0xC0000000)",
+		"NvmeDirectStorage(",
+		"storage.write_first_append()",
+		"storage.read_replay_state()",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("nvme event storage fixture missing %q", required)
+		}
+	}
 }
 
 func sourceBetween(t *testing.T, source string, start string, end string) string {

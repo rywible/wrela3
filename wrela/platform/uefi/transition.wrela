@@ -69,7 +69,7 @@ unique class DelegatedHardware {
             )
         }
 
-        let pml4 = self.delegated_memory.build_identity_paging(memory_map = final_map)
+        let pml4 = self.delegated_memory.build_identity_paging(memory_map = final_map, mmio = hardware_plan.pci.nvme_bar0)
         let gdt = self.delegated_memory.build_owned_gdt()
         let idt = self.delegated_memory.build_interrupt_idt(
             fatal_handler = self.capture_fatal_idt_handler(),

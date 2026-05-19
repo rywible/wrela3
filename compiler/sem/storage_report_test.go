@@ -1,9 +1,11 @@
 package sem
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
+	"github.com/ryanwible/wrela3/compiler/storagefmt"
 )
 
 func TestStorageMetricsReportPopulation(t *testing.T) {
@@ -55,6 +57,9 @@ func TestStorageMetricsReportPopulation(t *testing.T) {
 		r.Storage.MaxAtomicGroupSlots != 32 {
 		t.Fatalf("storage batch metrics = %#v", r.Storage)
 	}
+	if r.Storage.ReservedEmptySlots != storagefmt.FinishBatch(r.Storage.ActiveLBASize, r.Storage.TargetBatchSlots).ReservedEmptySlots {
+		t.Fatalf("reserved empty slots = %d", r.Storage.ReservedEmptySlots)
+	}
 	if r.Storage.AdminQueueDepth != 32 ||
 		r.Storage.ForegroundIOQueueDepth != 256 ||
 		r.Storage.BackgroundIOQueueDepth != 128 {
@@ -65,6 +70,9 @@ func TestStorageMetricsReportPopulation(t *testing.T) {
 	}
 	if r.Storage.AppendLatencyP50US == 0 || r.Storage.AppendLatencyP99US == 0 {
 		t.Fatalf("storage latency metrics = %#v", r.Storage)
+	}
+	if r.Storage.BlobOrphanBytes != storagefmt.EventPayloadBytes {
+		t.Fatalf("blob orphan bytes = %d, want %d", r.Storage.BlobOrphanBytes, storagefmt.EventPayloadBytes)
 	}
 	if r.Storage.ProjectionLagEvents != 1 ||
 		r.Storage.ProjectionUpcastCount != 1 ||
@@ -88,13 +96,68 @@ func TestStorageMetricsReportPopulation(t *testing.T) {
 func TestStorageReportMissingMetricsEmitsSEM0124(t *testing.T) {
 	r := BuildImageReport(&CheckedProgram{
 		ImageGraph: ImageGraph{
-			StoragePaths: []StoragePathNode{{Label: "nvme.foreground", Role: "foreground"}},
+			StoragePaths: []StoragePathNode{
+				{Label: "nvme.foreground", Role: "foreground"},
+				{Label: "nvme.background", Role: "background"},
+			},
+			CoreLinkEndpoints:  []CoreLinkEndpointNode{{Label: "core_link.producer.0"}},
+			ProjectionFeeds:    []ProjectionFeedNode{{Projection: "DirectoryChildren"}},
+			StorageAppendCalls: []StorageAppendCallNode{{ResultObserved: true}},
+		},
+		Storage: StorageIndex{
+			ProjectionsByID: map[uint64]ProjectionInfo{
+				12: {
+					Name:         "DirectoryChildren",
+					ProjectionID: 12,
+					Layouts: []ProjectionLayoutInfo{
+						{ID: 1},
+						{ID: 2},
+					},
+				},
+			},
 		},
 	})
 	r.Storage.EventSlotSize = 0
+	r.Storage.BlobOrphanBytes = 0
+	r.Storage.ProjectionLagEvents = 0
+	r.Storage.ProjectionUpcastCount = 0
+	r.Storage.ProjectionRebuildCount = 0
 
 	ds := ValidateStorageReportContent(r)
 	if !hasCode(ds, diag.SEM0124) {
 		t.Fatalf("diagnostics = %#v, want SEM0124", ds)
 	}
+	for _, metric := range []string{
+		"event_slot_size",
+		"blob_orphan_bytes",
+		"projection_lag_events",
+		"projection_upcast_count",
+		"projection_rebuild_count",
+	} {
+		if !hasDiagnosticMessage(ds, metric) {
+			t.Fatalf("diagnostics = %#v, want missing %s", ds, metric)
+		}
+	}
+}
+
+func TestStorageReportMissingForegroundOrBackgroundPathEmitsSEM0124(t *testing.T) {
+	r := BuildImageReport(&CheckedProgram{
+		ImageGraph: ImageGraph{
+			StoragePaths: []StoragePathNode{{Label: "nvme.foreground", Role: "foreground"}},
+		},
+	})
+
+	ds := ValidateStorageReportContent(r)
+	if !hasDiagnosticMessage(ds, "nvme_paths.background") {
+		t.Fatalf("diagnostics = %#v, want missing background nvme path", ds)
+	}
+}
+
+func hasDiagnosticMessage(ds []diag.Diagnostic, want string) bool {
+	for _, d := range ds {
+		if strings.Contains(d.Message, want) {
+			return true
+		}
+	}
+	return false
 }

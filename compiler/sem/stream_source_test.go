@@ -2,6 +2,7 @@ package sem
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -38,10 +39,22 @@ func TestStreamSourceMirrorContract(t *testing.T) {
 	index := checkedStreamSourceIndex(t)
 	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectory"), "entry_byte_offset")
 	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectory"), "exists")
+	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectory"), "allocate_stream_id")
 	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectoryCache"), "record_hit")
 	assertMethodExists(t, moduleType(t, index, "storage.stream", "StreamDirectoryCache"), "hit_rate_x1000")
 	_ = moduleType(t, index, "storage.stream", "StreamDirectoryEntry")
 	_ = moduleType(t, index, "storage.stream", "StreamCheckpoint")
+
+	source := readRepoFile(t, "wrela/storage/stream.wrela")
+	allocate := sourceBetween(t, source, "fn allocate_stream_id(self) -> U64 {", "\n    }\n}")
+	assertOrderedSubstrings(t, allocate, []string{
+		"let stream_id = self.next_stream_id",
+		"self.next_stream_id = self.next_stream_id + 1",
+		"return stream_id",
+	})
+	if strings.Contains(allocate, "return self.next_stream_id") {
+		t.Fatalf("allocate_stream_id returns next_stream_id directly instead of the allocated stream_id")
+	}
 }
 
 func checkedStreamSourceIndex(t *testing.T) *Index {

@@ -31,7 +31,7 @@ func TestStorageSlotStoreCodegen(t *testing.T) {
 	}
 	instructions := storageSlotStoreInstructionsForTest(program.Functions[0])
 	stores := storageSlotStoresForTest(instructions)
-	for _, offset := range []uint64{24, 28} {
+	for _, offset := range []uint64{24, 28, 64} {
 		if !stores[offset] {
 			t.Fatalf("slot stores = %#v, want offset %d", stores, offset)
 		}

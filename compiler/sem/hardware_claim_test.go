@@ -47,6 +47,24 @@ func TestPciClassSelectedDeviceCanClaimBar(t *testing.T) {
 	}
 }
 
+func TestPciClassSelectedDeviceCanClaimRelocatedBar(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "class-relocated-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+`))
+	if hasCode(ds, diag.SEM0054) {
+		t.Fatalf("class-selected PCI device lost provenance for relocated BAR: %#v", ds)
+	}
+}
+
+func TestDuplicateRelocatedPciBarClaimRejected(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-relocated-bar-test.wrela", duplicatePciClaimSource(`
+        let first = edu.claim_mmio_bar(index = 0)
+        let second = edu.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+`))
+	requireOnlyDiagnostic(t, ds, diag.SEM0050, "duplicate hardware claim pci_bar:vendor=0x1234/device=0x11e8/occurrence=0.0")
+}
+
 func TestDuplicateIsaIrqClaimRejected(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-isa-irq-test.wrela", interruptClaimSource(`
         let first = irq_authority.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))

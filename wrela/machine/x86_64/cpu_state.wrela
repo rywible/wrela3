@@ -242,6 +242,7 @@ data ClaimedPciPlan {
     ivshmem_rx_msix: MsixCapability
     ivshmem_tx_bar0: MmioRegion
     nvme_bar0: MmioRegion
+    nvme_device: PciDevice
 }
 
 class ClaimedPciPlanBuilder {
@@ -258,12 +259,26 @@ class ClaimedPciPlanBuilder {
             ivshmem_rx_bar0 = empty_mmio,
             ivshmem_rx_msix = MsixCapability(device = empty_device, capability_offset = 0, table = empty_mmio, table_offset = 0),
             ivshmem_tx_bar0 = empty_mmio,
-            nvme_bar0 = empty_mmio
+            nvme_bar0 = empty_mmio,
+            nvme_device = empty_device
         )
     }
 
     fn empty_with_nvme(self, nvme_bar0: MmioRegion) -> ClaimedPciPlan {
         let plan = self.empty()
+        plan.nvme_bar0 = nvme_bar0
+        return plan
+    }
+
+    fn empty_with_nvme_device(self, nvme_device: PciDevice) -> ClaimedPciPlan {
+        let plan = self.empty()
+        plan.nvme_device = nvme_device
+        return plan
+    }
+
+    fn empty_with_nvme_device_and_bar(self, nvme_device: PciDevice, nvme_bar0: MmioRegion) -> ClaimedPciPlan {
+        let plan = self.empty()
+        plan.nvme_device = nvme_device
         plan.nvme_bar0 = nvme_bar0
         return plan
     }

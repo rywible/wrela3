@@ -3126,7 +3126,7 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 			return
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
-	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && (call.Method == "claim_mmio_bar" || call.Method == "claim_io_bar"):
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && (call.Method == "claim_mmio_bar" || call.Method == "claim_mmio_bar_at32" || call.Method == "claim_io_bar"):
 		key, ok := pciOriginKey(call.Receiver, scope)
 		if !ok {
 			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")

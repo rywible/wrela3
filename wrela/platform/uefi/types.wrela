@@ -3,6 +3,7 @@ module platform.uefi.types
 use { MutableBytes } from machine.x86_64.executor_memory
 use { BootPanic } from platform.hardware.panic
 use { PhysicalRegionAuthority } from platform.hardware.memory
+use { MmioRegion } from platform.hardware.bytes
 
 data UefiHandle {
     address: U64
@@ -321,12 +322,13 @@ class DelegatedMemory {
         ret
     }
 
-    asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
+    asm fn build_identity_paging(self, memory_map: UefiMemoryMap, mmio: MmioRegion) -> PhysicalAddress {
         push rbx
         push r12
         push r13
         push r14
         push r15
+        push rdx
 
         mov r10, self.next_offset
         add r10, self.arena_base
@@ -511,9 +513,130 @@ class DelegatedMemory {
         jmp descriptor_loop
 
     descriptors_done:
+        mov r8, [rsp]
+        mov r15, [r8]
+        mov r9, r15
+        add r9, [r8 + 8]
+        cmp r15, 0
+        jle mmio_done
+        cmp r9, r15
+        jle mmio_done
+        mov rax, 0xffffffffffe00000
+        and r15, rax
+
+    map_mmio_pages:
+        cmp r15, r9
+        jge mmio_done
+
+        mov r10, r15
+        shr r10, 39
+        cmp r10, 512
+        jge mmio_done
+
+        mov rdx, rbx
+    mmio_pml4_slot_loop:
+        cmp r10, 0
+        jle mmio_pml4_slot_ready
+        add rdx, 8
+        sub r10, 1
+        jmp mmio_pml4_slot_loop
+
+    mmio_pml4_slot_ready:
+        mov r13, [rdx]
+        cmp r13, 0
+        jne mmio_pml4_ready
+
+        mov r13, self.arena_base
+        add r13, r14
+        add r14, 4096
+        mov r11, r13
+        mov rax, 0
+        mov rcx, 512
+    mmio_zero_new_pdpt_loop:
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 1
+        jne mmio_zero_new_pdpt_loop
+
+        mov rax, r13
+        add rax, 3
+        mov [rdx], rax
+
+    mmio_pml4_ready:
+        mov rax, 0xfffffffffffff000
+        and r13, rax
+        mov r11, r15
+        shr r11, 30
+
+    mmio_reduce_pdpt_index:
+        cmp r11, 512
+        jl mmio_pdpt_index_ready
+        sub r11, 512
+        jmp mmio_reduce_pdpt_index
+
+    mmio_pdpt_index_ready:
+        mov rdx, r13
+    mmio_pdpt_slot_loop:
+        cmp r11, 0
+        jle mmio_pdpt_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp mmio_pdpt_slot_loop
+
+    mmio_pdpt_slot_ready:
+        mov r13, [rdx]
+        cmp r13, 0
+        jne mmio_pd_ready
+
+        mov r13, self.arena_base
+        add r13, r14
+        add r14, 4096
+        mov r11, r13
+        mov rax, 0
+        mov rcx, 512
+    mmio_zero_new_pd_loop:
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 1
+        jne mmio_zero_new_pd_loop
+
+        mov rax, r13
+        add rax, 3
+        mov [rdx], rax
+
+    mmio_pd_ready:
+        mov rax, 0xfffffffffffff000
+        and r13, rax
+        mov r11, r15
+        shr r11, 21
+
+    mmio_reduce_pd_index:
+        cmp r11, 512
+        jl mmio_pd_index_ready
+        sub r11, 512
+        jmp mmio_reduce_pd_index
+
+    mmio_pd_index_ready:
+        mov rdx, r13
+    mmio_pd_slot_loop:
+        cmp r11, 0
+        jle mmio_pd_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp mmio_pd_slot_loop
+
+    mmio_pd_slot_ready:
+        mov rax, r15
+        add rax, 0x83
+        mov [rdx], rax
+        add r15, 0x200000
+        jmp map_mmio_pages
+
+    mmio_done:
 
         mov self.next_offset, r14
         mov rax, rbx
+        pop rdx
         pop r15
         pop r14
         pop r13

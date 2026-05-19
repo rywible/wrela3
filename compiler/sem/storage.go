@@ -29,7 +29,17 @@ type EventLayoutInfo struct {
 	Current      bool
 	PayloadSize  uint64
 	PayloadAlign uint64
+	Fields       []EventPayloadFieldInfo
 	Span         source.Span
+}
+
+type EventPayloadFieldInfo struct {
+	Name          string
+	Type          *Type
+	PayloadOffset uint64
+	StorageSize   uint64
+	Align         uint64
+	Span          source.Span
 }
 
 type ProjectionInfo struct {
@@ -290,13 +300,14 @@ func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]E
 			currentCount++
 			currentLayoutID = id
 		}
-		payloadSize, payloadAlign, fieldNames := c.eventLayoutPayload(moduleName, layout, eventFieldTypes)
+		payloadSize, payloadAlign, fields, fieldNames := c.eventLayoutPayload(moduleName, layout, eventFieldTypes)
 		layoutFields[id] = fieldNames
 		layouts = append(layouts, EventLayoutInfo{
 			ID:           id,
 			Current:      layout.Current,
 			PayloadSize:  payloadSize,
 			PayloadAlign: payloadAlign,
+			Fields:       fields,
 			Span:         layout.Span,
 		})
 	}
@@ -325,8 +336,9 @@ func (c *checker) eventFieldTypes(moduleName string, fields []ast.Field) map[str
 	return types
 }
 
-func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl, eventFieldTypes map[string]*Type) (uint64, uint64, map[string]bool) {
+func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl, eventFieldTypes map[string]*Type) (uint64, uint64, []EventPayloadFieldInfo, map[string]bool) {
 	fieldNames := map[string]bool{}
+	fields := make([]EventPayloadFieldInfo, 0, len(layout.Fields))
 	var payloadSize uint64
 	var payloadAlign uint64 = 1
 	for _, field := range layout.Fields {
@@ -346,6 +358,14 @@ func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDe
 			continue
 		}
 		payloadSize = alignPayloadOffset(payloadSize, fieldLayout.valueAlign)
+		fields = append(fields, EventPayloadFieldInfo{
+			Name:          field.Name,
+			Type:          typ,
+			PayloadOffset: payloadSize,
+			StorageSize:   fieldLayout.storageSize,
+			Align:         fieldLayout.valueAlign,
+			Span:          field.Span,
+		})
 		payloadSize += fieldLayout.storageSize
 		if fieldLayout.valueAlign > payloadAlign {
 			payloadAlign = fieldLayout.valueAlign
@@ -355,7 +375,7 @@ func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDe
 	if payloadSize > 448 {
 		c.error(layout.Span, diag.SEM0121, "event payload exceeds inline slot budget")
 	}
-	return payloadSize, payloadAlign, fieldNames
+	return payloadSize, payloadAlign, fields, fieldNames
 }
 
 func isUnpublishedBlobRefType(typ *Type) bool {

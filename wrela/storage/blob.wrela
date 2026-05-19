@@ -40,6 +40,9 @@ data BlobTruth {
         if proposal.blob_id != self.blob_id {
             return false
         }
+        if proposal.old_ref != self.ref {
+            return false
+        }
         if proposal.observed_version != self.version {
             return false
         }

@@ -12,7 +12,9 @@ data StreamDirectory {
     }
 
     fn allocate_stream_id(self) -> U64 {
-        return self.next_stream_id
+        let stream_id = self.next_stream_id
+        self.next_stream_id = self.next_stream_id + 1
+        return stream_id
     }
 }
 

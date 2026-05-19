@@ -209,6 +209,17 @@ func (ctx *lowerContext) lowerStorageMetadata() {
 			return layouts[i].ID < layouts[j].ID
 		})
 		for _, layout := range layouts {
+			fields := make([]EventPayloadField, 0, len(layout.Fields))
+			for _, field := range layout.Fields {
+				ctx.ensureTypeInfo(field.Type, map[string]bool{})
+				fields = append(fields, EventPayloadField{
+					Name:        field.Name,
+					Type:        ctx.irType(field.Type),
+					Offset:      field.PayloadOffset,
+					StorageSize: field.StorageSize,
+					Align:       field.Align,
+				})
+			}
 			ctx.program.StorageEvents = append(ctx.program.StorageEvents, EventLayout{
 				Module:        event.Module,
 				Name:          event.Name,
@@ -217,6 +228,7 @@ func (ctx *lowerContext) lowerStorageMetadata() {
 				Current:       layout.Current,
 				PayloadSize:   layout.PayloadSize,
 				PayloadAlign:  layout.PayloadAlign,
+				PayloadFields: fields,
 				EncoderSymbol: symbolName("storage_event", event.Module, event.Name, "layout_"+strconv.FormatUint(layout.ID, 10), "encode"),
 			})
 		}
@@ -289,6 +301,13 @@ func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
 	payloadLength := &Param{Symbol: "payload_length", Type: storageIRType("U32")}
 	flags := &Param{Symbol: "flags", Type: storageIRType("U32")}
 	checksum := &StorageCRC32C{Slot: slot, Length: 512, Type: storageIRType("U32")}
+	payloadParams := make([]Value, 0, len(layout.PayloadFields))
+	payloadParamByName := map[string]*Param{}
+	for _, field := range layout.PayloadFields {
+		param := &Param{Symbol: field.Name, Type: field.Type}
+		payloadParams = append(payloadParams, param)
+		payloadParamByName[field.Name] = param
+	}
 
 	u16 := storageIRType("U16")
 	u32 := storageIRType("U32")
@@ -306,26 +325,41 @@ func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
 		storageSlotStore(slot, 52, storageConst(1, u16), u16),
 		storageSlotStore(slot, 54, storageConst(0, u16), u16),
 		storageSlotStore(slot, 56, storageConst(0, u64), u64),
-		&StoragePayloadZero{Slot: slot, Offset: 64, Length: 448},
+	}
+	payloadCursor := uint64(0)
+	for _, field := range layout.PayloadFields {
+		if field.Offset > payloadCursor {
+			ops = append(ops, &StoragePayloadZero{Slot: slot, Offset: 64 + payloadCursor, Length: field.Offset - payloadCursor})
+		}
+		ops = append(ops, storageSlotStore(slot, 64+field.Offset, payloadParamByName[field.Name], field.Type))
+		payloadCursor = field.Offset + field.StorageSize
+	}
+	if payloadCursor < 448 {
+		ops = append(ops, &StoragePayloadZero{Slot: slot, Offset: 64 + payloadCursor, Length: 448 - payloadCursor})
+	}
+	ops = append(ops,
 		storageSlotStore(slot, 48, storageConst(0, u32), u32),
 		checksum,
 		storageSlotStore(slot, 48, checksum, u32),
 		&Return{},
+	)
+
+	params := []Value{
+		slot,
+		eventID,
+		streamID,
+		streamSequence,
+		atomicGroupLen,
+		atomicGroupIndex,
+		payloadLength,
+		flags,
 	}
+	params = append(params, payloadParams...)
 
 	return Function{
 		Symbol: layout.EncoderSymbol,
 		Return: Type{Name: "void", Module: "builtin", Kind: TypeKindPrimitive},
-		Params: []Value{
-			slot,
-			eventID,
-			streamID,
-			streamSequence,
-			atomicGroupLen,
-			atomicGroupIndex,
-			payloadLength,
-			flags,
-		},
+		Params: params,
 		Blocks: []Block{{Label: "entry", Ops: ops}},
 	}
 }

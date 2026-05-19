@@ -112,3 +112,28 @@ event A id 1 {
 		t.Fatalf("diagnostics = %#v, want SEM0121", ds)
 	}
 }
+
+func TestEventLayoutPayloadFieldMetadata(t *testing.T) {
+	modules := parseModulesForTest(t, `
+module storage.event_payload_metadata
+event FileCreated id 1001 {
+    file_id: U64
+    layout 1 current {
+        file_id: U64 = self.file_id
+    }
+}`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	layout := checked.Storage.EventsByTypeID[1001].Layouts[0]
+	if len(layout.Fields) != 1 {
+		t.Fatalf("payload fields = %#v, want one field", layout.Fields)
+	}
+	field := layout.Fields[0]
+	if field.Name != "file_id" || field.PayloadOffset != 0 || field.Type.Name != "U64" || field.StorageSize != 8 || field.Align != 8 {
+		t.Fatalf("payload field metadata = %#v", field)
+	}
+}

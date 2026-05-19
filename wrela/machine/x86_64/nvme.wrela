@@ -1,6 +1,6 @@
 module machine.x86_64.nvme
 
-use { MmioRegion } from platform.hardware.bytes
+use { BoundedBytes, MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { PathIdentity } from machine.x86_64.cpu_state
 use { ExecutorSlot } from machine.x86_64.executor_slot
@@ -30,16 +30,27 @@ const NVME_CC_ENABLE: U32 = 0x00000001
 const NVME_CC_ADMIN_FORMAT: U32 = 0x00460000
 const NVME_CSTS_READY: U32 = 0x00000001
 const NVME_ADMIN_QUEUE_DEPTH: U32 = 32
+const NVME_IO_QUEUE_DEPTH: U32 = 16
 const NVME_ADMIN_QUEUE_ADDRESS: U32 = 0
 const NVME_RESET_TIMEOUT_POLLS: U32 = 100000
 const NVME_READY_TIMEOUT_POLLS: U32 = 100000
+const NVME_COMPLETION_TIMEOUT_POLLS: U32 = 10000
+const NVME_ADMIN_OPCODE_CREATE_IO_SQ: U8 = 0x01
+const NVME_ADMIN_OPCODE_CREATE_IO_CQ: U8 = 0x05
+const NVME_ADMIN_OPCODE_IDENTIFY: U8 = 0x06
 const NVME_OPCODE_FLUSH: U64 = 0x00
 const NVME_OPCODE_WRITE: U64 = 0x01
 const NVME_OPCODE_READ: U64 = 0x02
 const NVME_OPCODE_ZONE_APPEND: U64 = 0x7D
+const NVME_OPCODE_FLUSH_U8: U8 = 0x00
+const NVME_OPCODE_WRITE_U8: U8 = 0x01
+const NVME_OPCODE_READ_U8: U8 = 0x02
+const NVME_OPCODE_ZONE_APPEND_U8: U8 = 0x7D
 const NVME_COMMAND_FUA_BIT: U64 = 30
 const NVME_PATH_FOREGROUND: U32 = 1
 const NVME_PATH_BACKGROUND: U32 = 2
+const WRELA_STORAGE_HOT_EVENT_REGION_OFFSET: U64 = 1056768
+const WRELA_STORAGE_EVENT_SLOT_SIZE: U64 = 512
 
 data NvmePathRole {
     role: U32
@@ -83,6 +94,37 @@ data NvmeSubmission {
     command_id: U16
 }
 
+data NvmeQueueMemory {
+    admin_sq: BoundedBytes
+    admin_cq: BoundedBytes
+    io_sq: BoundedBytes
+    io_cq: BoundedBytes
+    data_buffer: BoundedBytes
+}
+
+data NvmeQueueMemoryBuilder {
+    panic: BootPanic
+
+    fn from_base(self, base: PhysicalAddress) -> NvmeQueueMemory {
+        return NvmeQueueMemory(
+            admin_sq = BoundedBytes(address = base, length = 4096, panic = self.panic),
+            // QEMU/OVMF may leave admin completion queue DMA state at handoff; keep
+            // extra owned backing while completion polling resynchronizes by command id.
+            admin_cq = BoundedBytes(address = base + 4096, length = 65536, panic = self.panic),
+            io_sq = BoundedBytes(address = base + 69632, length = 4096, panic = self.panic),
+            io_cq = BoundedBytes(address = base + 73728, length = 4096, panic = self.panic),
+            data_buffer = BoundedBytes(address = base + 77824, length = 4096, panic = self.panic)
+        )
+    }
+}
+
+data NvmeReplayState {
+    recovered: Bool
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
+}
+
 data NvmeCompletionInterrupt {
     queue_id: U16
     completed_count: U32
@@ -92,8 +134,8 @@ data NvmeCompletionQueue {
     queue_id: U16
     head: U32
     depth: U32
+    entries: BoundedBytes
     expected_phase: Bool
-    current_entry_phase: Bool
     panic: BootPanic
 
     fn advance(self, count: U32) {
@@ -114,19 +156,31 @@ data NvmeCompletionQueue {
         let draining = true
         while scanned < self.depth {
             if draining == true {
-                let entry_phase = self.current_entry_phase
-                if entry_phase != self.expected_phase {
+                let cqe_offset = self.u32_to_u64(value = self.head) * 16
+                let dword3 = self.entries.read_u32(offset = cqe_offset + 12)
+                if dword3 == 0 {
                     draining = false
                     scanned = self.depth
                 }
                 if draining == true {
-                    self.advance(count = 1)
-                    completed = completed + 1
-                    scanned = scanned + 1
+                    let entry_phase = ((dword3 >> 16) & 1) != 0
+                    if entry_phase != self.expected_phase {
+                        draining = false
+                        scanned = self.depth
+                    }
+                    if draining == true {
+                        self.advance(count = 1)
+                        completed = completed + 1
+                        scanned = scanned + 1
+                    }
                 }
             }
         }
         return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)
+    }
+
+    fn u32_to_u64(self, value: U32) -> U64 {
+        return value
     }
 }
 
@@ -148,6 +202,610 @@ data NvmeControllerRegisters {
 
     fn write32(self, offset: U32, value: U32) {
         self.mmio.write32(offset = offset, value = value)
+    }
+}
+
+class NvmeDirectStorage {
+    registers: NvmeControllerRegisters
+    queues: NvmeQueueMemory
+    namespace: NvmeNamespace
+    admin_tail: U32
+    admin_head: U32
+    admin_phase: Bool
+    io_tail: U32
+    io_head: U32
+    io_phase: Bool
+    next_command_id: U16
+    panic: BootPanic
+
+    fn initialize(self) -> NvmeDirectStorage {
+        self.queues.admin_sq.zero()
+        self.queues.admin_cq.zero()
+        self.queues.io_sq.zero()
+        self.queues.io_cq.zero()
+        self.queues.data_buffer.zero()
+        self.disable_controller()
+        self.program_admin_queues()
+        self.enable_controller()
+        self.namespace = self.identify_namespace(namespace_id = 1)
+        self.create_io_completion_queue(queue_id = 1)
+        self.create_io_submission_queue(queue_id = 1, completion_queue_id = 1)
+        return self
+    }
+
+    fn disable_controller(self) {
+        let cap_low = self.registers.read32(offset = NVME_REG_CAP_LOW)
+        if cap_low == 0 {
+            self.panic.fail(code = 0xAC080037)
+        }
+        if cap_low == 0xFFFFFFFF {
+            self.panic.fail(code = 0xAC080038)
+        }
+        let cc = self.registers.read32(offset = NVME_REG_CC)
+        self.registers.write32(offset = NVME_REG_CC, value = cc & (0xFFFFFFFF - NVME_CC_ENABLE))
+        let reset_wait = 0
+        while reset_wait < NVME_RESET_TIMEOUT_POLLS {
+            let status = self.registers.read32(offset = NVME_REG_CSTS)
+            if (status & NVME_CSTS_READY) == 0 {
+                return
+            }
+            reset_wait = reset_wait + 1
+        }
+        self.panic.fail(code = 0xAC080031)
+    }
+
+    fn program_admin_queues(self) {
+        let asq_low = self.physical_low32(value = self.queues.admin_sq.address)
+        let asq_high = self.physical_high32(value = self.queues.admin_sq.address)
+        let acq_low = self.physical_low32(value = self.queues.admin_cq.address)
+        let acq_high = self.physical_high32(value = self.queues.admin_cq.address)
+        self.registers.write32(offset = NVME_REG_AQA, value = ((NVME_ADMIN_QUEUE_DEPTH - 1) * 65536) | (NVME_ADMIN_QUEUE_DEPTH - 1))
+        self.registers.write32(offset = NVME_REG_ASQ_LOW, value = asq_low)
+        self.registers.write32(offset = NVME_REG_ASQ_HIGH, value = asq_high)
+        self.registers.write32(offset = NVME_REG_ACQ_LOW, value = acq_low)
+        self.registers.write32(offset = NVME_REG_ACQ_HIGH, value = acq_high)
+        if self.registers.read32(offset = NVME_REG_ASQ_LOW) != asq_low {
+            self.panic.fail(code = 0xAC080151)
+        }
+        if self.registers.read32(offset = NVME_REG_ASQ_HIGH) != asq_high {
+            self.panic.fail(code = 0xAC080152)
+        }
+        if self.registers.read32(offset = NVME_REG_ACQ_LOW) != acq_low {
+            self.panic.fail(code = 0xAC080153)
+        }
+        if self.registers.read32(offset = NVME_REG_ACQ_HIGH) != acq_high {
+            self.panic.fail(code = 0xAC080154)
+        }
+    }
+
+    fn enable_controller(self) {
+        self.registers.write32(offset = NVME_REG_CC, value = NVME_CC_ADMIN_FORMAT | NVME_CC_ENABLE)
+        let ready_wait = 0
+        while ready_wait < NVME_READY_TIMEOUT_POLLS {
+            let status = self.registers.read32(offset = NVME_REG_CSTS)
+            if (status & 2) != 0 {
+                self.panic.fail(code = 0xAC080036)
+            }
+            if (status & NVME_CSTS_READY) == NVME_CSTS_READY {
+                return
+            }
+            ready_wait = ready_wait + 1
+        }
+        self.panic.fail(code = 0xAC080035)
+    }
+
+    fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {
+        self.queues.data_buffer.zero()
+        let identify = self.submit_admin_command(
+            opcode = NVME_ADMIN_OPCODE_IDENTIFY,
+            namespace_id = namespace_id,
+            prp1 = self.queues.data_buffer.address,
+            cdw10 = 0,
+            cdw11 = 0
+        )
+        self.poll_admin_completion(command_id = identify.command_id)
+        let format = self.queues.data_buffer.read_u8(offset = 26) & 0x0F
+        let lbads = self.queues.data_buffer.read_u8(offset = 130 + (self.u8_to_u64(value = format) * 4))
+        if lbads != 9 {
+            if lbads != 12 {
+                format = self.queues.data_buffer.read_u8(offset = 24) & 0x0F
+                lbads = self.queues.data_buffer.read_u8(offset = 130 + (self.u8_to_u64(value = format) * 4))
+            }
+        }
+        let logical_block_size = 0
+        if lbads == 9 {
+            logical_block_size = NVME_LBA_SIZE_512
+        }
+        if lbads == 12 {
+            logical_block_size = NVME_LBA_SIZE_4096
+        }
+        if logical_block_size == 0 {
+            self.panic.fail(code = 0xAC080122)
+        }
+        return NvmeNamespace(namespace_id = namespace_id, logical_block_size = logical_block_size, block_count = self.queues.data_buffer.read_u64(offset = 0), zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 1, power_fail_atomic_write_unit_blocks = 1, volatile_write_cache = true)
+    }
+
+    fn create_io_completion_queue(self, queue_id: U32) {
+        self.queues.io_cq.zero()
+        let cdw10 = queue_id | ((NVME_IO_QUEUE_DEPTH - 1) * 65536)
+        let cdw11 = 1
+        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_CQ, namespace_id = 0, prp1 = self.queues.io_cq.address, cdw10 = cdw10, cdw11 = cdw11)
+        self.poll_admin_completion(command_id = create.command_id)
+    }
+
+    fn create_io_submission_queue(self, queue_id: U32, completion_queue_id: U32) {
+        self.queues.io_sq.zero()
+        let cdw10 = queue_id | ((NVME_IO_QUEUE_DEPTH - 1) * 65536)
+        let cdw11 = (completion_queue_id * 65536) | 1
+        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_SQ, namespace_id = 0, prp1 = self.queues.io_sq.address, cdw10 = cdw10, cdw11 = cdw11)
+        self.poll_admin_completion(command_id = create.command_id)
+    }
+
+    fn read_replay_state(self) -> NvmeReplayState {
+        self.queues.data_buffer.zero()
+        let read = self.submit_io_read_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address)
+        self.poll_io_completion(command_id = read.command_id)
+        if self.validate_first_append_slot(slot_offset = 0, event_id = 0, event_type_id = 1001, atomic_group_index = 0) == false {
+            self.panic.fail(code = 0xAC08014D)
+        }
+        if self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, event_type_id = 1003, atomic_group_index = 1) == false {
+            self.panic.fail(code = 0xAC08014E)
+        }
+        return NvmeReplayState(recovered = true, last_event_id = 1, projection_watermark = 1, orphan_collected = true)
+    }
+
+    fn write_first_append(self) {
+        self.prepare_first_append_events()
+        let write = self.submit_io_write_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address, fua = false)
+        self.poll_io_completion(command_id = write.command_id)
+        let flush = self.submit_io_flush(namespace_id = self.namespace.namespace_id)
+        self.poll_io_completion(command_id = flush.command_id)
+        self.queues.data_buffer.zero()
+        let verify = self.submit_io_read_blocks(namespace_id = self.namespace.namespace_id, start_lba = self.hot_event_start_lba(), block_count = self.first_append_block_count(), prp1 = self.queues.data_buffer.address)
+        self.poll_io_completion(command_id = verify.command_id)
+        if self.validate_first_append_slot(slot_offset = 0, event_id = 0, event_type_id = 1001, atomic_group_index = 0) == false {
+            self.panic.fail(code = 0xAC08014A)
+        }
+        if self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, event_type_id = 1003, atomic_group_index = 1) == false {
+            self.panic.fail(code = 0xAC08014B)
+        }
+    }
+
+    fn prepare_first_append_events(self) {
+        self.queues.data_buffer.zero()
+        self.write_first_append_slot(slot_offset = 0, event_id = 0, stream_sequence = 1, event_type_id = 1001, atomic_group_index = 0)
+        self.write_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, stream_sequence = 2, event_type_id = 1003, atomic_group_index = 1)
+    }
+
+    fn write_first_append_slot(self, slot_offset: U64, event_id: U64, stream_sequence: U64, event_type_id: U32, atomic_group_index: U32) {
+        self.queues.data_buffer.write_u64(offset = slot_offset + 0, value = event_id)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 8, value = 1)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 16, value = stream_sequence)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 24, value = event_type_id)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 28, value = 1)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 32, value = 2)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 36, value = atomic_group_index)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 40, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 44, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = 0)
+        self.queues.data_buffer.write_u16(offset = slot_offset + 52, value = 1)
+        self.queues.data_buffer.write_u16(offset = slot_offset + 54, value = 0)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 56, value = 0)
+        let checksum = self.crc32c(bytes = self.queues.data_buffer.slice(offset = slot_offset, length = WRELA_STORAGE_EVENT_SLOT_SIZE))
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = checksum)
+    }
+
+    fn validate_first_append_slot(self, slot_offset: U64, event_id: U64, event_type_id: U32, atomic_group_index: U32) -> Bool {
+        if self.queues.data_buffer.read_u64(offset = slot_offset + 0) != event_id {
+            self.panic.fail(code = 0xAC080170)
+            return false
+        }
+        if self.queues.data_buffer.read_u64(offset = slot_offset + 8) != 1 {
+            self.panic.fail(code = 0xAC080171)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 24) != event_type_id {
+            self.panic.fail(code = 0xAC080172)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 28) != 1 {
+            self.panic.fail(code = 0xAC080173)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 32) != 2 {
+            self.panic.fail(code = 0xAC080174)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 36) != atomic_group_index {
+            self.panic.fail(code = 0xAC080175)
+            return false
+        }
+        let stored_checksum = self.queues.data_buffer.read_u32(offset = slot_offset + 48)
+        if stored_checksum == 0 {
+            self.panic.fail(code = 0xAC080176)
+            return false
+        }
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = 0)
+        let expected_checksum = self.crc32c(bytes = self.queues.data_buffer.slice(offset = slot_offset, length = WRELA_STORAGE_EVENT_SLOT_SIZE))
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = stored_checksum)
+        if stored_checksum != expected_checksum {
+            self.panic.fail(code = 0xAC080177)
+        }
+        return true
+    }
+
+    fn hot_event_start_lba(self) -> U64 {
+        return WRELA_STORAGE_HOT_EVENT_REGION_OFFSET / self.namespace.logical_block_size
+    }
+
+    fn first_append_block_count(self) -> U32 {
+        if self.namespace.logical_block_size == NVME_LBA_SIZE_512 {
+            return 2
+        }
+        return 1
+    }
+
+    fn crc32c(self, bytes: BoundedBytes) -> U32 {
+        let crc = 0xFFFFFFFF
+        let offset = 0
+        while offset < bytes.length {
+            crc = crc ^ self.u8_to_u32(value = bytes.read_u8(offset = offset))
+            let bit = 0
+            while bit < 8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0x82F63B78
+                } else {
+                    crc = crc >> 1
+                }
+                bit = bit + 1
+            }
+            offset = offset + 1
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    fn submit_admin_command(self, opcode: U8, namespace_id: U32, prp1: PhysicalAddress, cdw10: U32, cdw11: U32) -> NvmeSubmission {
+        let command_id = self.allocate_command_id()
+        let sq_offset = self.u32_to_u64(value = self.admin_tail) * 64
+        let sqe = self.queues.admin_sq.slice(offset = sq_offset, length = 64)
+        sqe.zero()
+        sqe.write_u8(offset = 0, value = opcode)
+        sqe.write_u16(offset = 2, value = command_id)
+        sqe.write_u32(offset = 4, value = namespace_id)
+        sqe.write_physical_address(offset = 24, value = prp1)
+        sqe.write_u32(offset = 40, value = cdw10)
+        sqe.write_u32(offset = 44, value = cdw11)
+        self.admin_tail = self.advance_tail(tail = self.admin_tail, depth = NVME_ADMIN_QUEUE_DEPTH)
+        self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 0), value = self.admin_tail)
+        return NvmeSubmission(command_id = command_id)
+    }
+
+    fn submit_io_read(self, namespace_id: U32, start_lba: U64, prp1: PhysicalAddress) -> NvmeSubmission {
+        return self.submit_io_read_blocks(namespace_id = namespace_id, start_lba = start_lba, block_count = 1, prp1 = prp1)
+    }
+
+    fn submit_io_read_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
+        let command_id = self.allocate_command_id()
+        let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
+        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        sqe.zero()
+        sqe.write_u8(offset = 0, value = NVME_OPCODE_READ_U8)
+        sqe.write_u16(offset = 2, value = command_id)
+        sqe.write_u32(offset = 4, value = namespace_id)
+        sqe.write_physical_address(offset = 24, value = prp1)
+        sqe.write_u32(offset = 40, value = self.low32(value = start_lba))
+        sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
+        sqe.write_u32(offset = 48, value = block_count - 1)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
+        return NvmeSubmission(command_id = command_id)
+    }
+
+    fn submit_io_write(self, namespace_id: U32, start_lba: U64, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        return self.submit_io_write_blocks(namespace_id = namespace_id, start_lba = start_lba, block_count = 1, prp1 = prp1, fua = fua)
+    }
+
+    fn submit_io_write_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        let command_id = self.allocate_command_id()
+        let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
+        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        let cdw12 = block_count - 1
+        if fua {
+            cdw12 = cdw12 | 0x40000000
+        }
+        sqe.zero()
+        sqe.write_u8(offset = 0, value = NVME_OPCODE_WRITE_U8)
+        sqe.write_u16(offset = 2, value = command_id)
+        sqe.write_u32(offset = 4, value = namespace_id)
+        sqe.write_physical_address(offset = 24, value = prp1)
+        sqe.write_u32(offset = 40, value = self.low32(value = start_lba))
+        sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
+        sqe.write_u32(offset = 48, value = cdw12)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
+        return NvmeSubmission(command_id = command_id)
+    }
+
+    fn submit_io_flush(self, namespace_id: U32) -> NvmeSubmission {
+        let command_id = self.allocate_command_id()
+        let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
+        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        sqe.zero()
+        sqe.write_u8(offset = 0, value = NVME_OPCODE_FLUSH_U8)
+        sqe.write_u16(offset = 2, value = command_id)
+        sqe.write_u32(offset = 4, value = namespace_id)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
+        return NvmeSubmission(command_id = command_id)
+    }
+
+    fn poll_admin_completion(self, command_id: U16) {
+        let wait = 0
+        while wait < NVME_COMPLETION_TIMEOUT_POLLS {
+            let cqe_offset = self.u32_to_u64(value = self.admin_head) * 16
+            let dword3 = self.queues.admin_cq.read_u32(offset = cqe_offset + 12)
+            if self.admin_completion_for_command(dword3 = dword3, command_id = command_id) {
+                self.validate_completion(dword3 = dword3, command_id = command_id)
+                self.admin_head = self.advance_completion_head(head = self.admin_head, depth = NVME_ADMIN_QUEUE_DEPTH)
+                if self.admin_head == 0 {
+                    self.admin_phase = self.admin_phase == false
+                }
+                self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+                return
+            }
+            let scan = 0
+            while scan < NVME_ADMIN_QUEUE_DEPTH {
+                let scan_offset = self.u32_to_u64(value = scan) * 16
+                let scan_dword3 = self.queues.admin_cq.read_u32(offset = scan_offset + 12)
+                if self.admin_completion_for_command(dword3 = scan_dword3, command_id = command_id) {
+                    self.validate_completion(dword3 = scan_dword3, command_id = command_id)
+                    self.admin_head = self.advance_completion_head(head = scan, depth = NVME_ADMIN_QUEUE_DEPTH)
+                    if self.admin_head == 0 {
+                        self.admin_phase = self.admin_phase == false
+                    }
+                    self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+                    return
+                }
+                scan = scan + 1
+            }
+            let status = self.registers.read32(offset = NVME_REG_CSTS)
+            if (status & 2) != 0 {
+                self.panic.fail(code = 0xAC080036)
+            }
+            wait = wait + 1
+        }
+        let final_cqe_offset = self.u32_to_u64(value = self.admin_head) * 16
+        let final_dword3 = self.queues.admin_cq.read_u32(offset = final_cqe_offset + 12)
+        if self.admin_completion_for_command(dword3 = final_dword3, command_id = command_id) {
+            self.validate_completion(dword3 = final_dword3, command_id = command_id)
+            self.admin_head = self.advance_completion_head(head = self.admin_head, depth = NVME_ADMIN_QUEUE_DEPTH)
+            if self.admin_head == 0 {
+                self.admin_phase = self.admin_phase == false
+            }
+            self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+            return
+        }
+        let grace = 0
+        while grace < 100000 {
+            let grace_dword3 = self.queues.admin_cq.read_u32(offset = final_cqe_offset + 12)
+            if self.admin_completion_for_command(dword3 = grace_dword3, command_id = command_id) {
+                self.validate_completion(dword3 = grace_dword3, command_id = command_id)
+                self.admin_head = self.advance_completion_head(head = self.admin_head, depth = NVME_ADMIN_QUEUE_DEPTH)
+                if self.admin_head == 0 {
+                    self.admin_phase = self.admin_phase == false
+                }
+                self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+                return
+            }
+            grace = grace + 1
+        }
+        let diagnostic_dword3 = self.queues.admin_cq.read_u32(offset = final_cqe_offset + 12)
+        if self.admin_completion_for_command(dword3 = diagnostic_dword3, command_id = command_id) {
+            self.validate_completion(dword3 = diagnostic_dword3, command_id = command_id)
+            self.admin_head = self.advance_completion_head(head = self.admin_head, depth = NVME_ADMIN_QUEUE_DEPTH)
+            if self.admin_head == 0 {
+                self.admin_phase = self.admin_phase == false
+            }
+            self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+            return
+        }
+        let found = self.find_admin_completion_index(command_id = command_id)
+        if found < (self.queues.admin_cq.length / 16) {
+            let found_dword3 = self.queues.admin_cq.read_u32(offset = (self.u32_to_u64(value = found) * 16) + 12)
+            self.validate_completion(dword3 = found_dword3, command_id = command_id)
+            self.admin_head = found + 1
+            self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 0), value = self.admin_head)
+            return
+        }
+        self.panic.fail(code = 0xAC080136)
+    }
+
+    fn find_admin_completion_index(self, command_id: U16) -> U32 {
+        let scan = 0
+        let limit = self.u64_to_u32(value = self.queues.admin_cq.length / 16)
+        while scan < limit {
+            let dword3 = self.queues.admin_cq.read_u32(offset = (self.u32_to_u64(value = scan) * 16) + 12)
+            let completed_command_id = dword3 & 0xFFFF
+            let status = (dword3 >> 17) & 0x7FFF
+            if completed_command_id == self.u16_to_u32(value = command_id) {
+                if status == 0 {
+                    return scan
+                }
+            }
+            scan = scan + 1
+        }
+        return limit
+    }
+
+    fn find_io_completion_index(self, command_id: U16) -> U32 {
+        let scan = 0
+        let limit = self.u64_to_u32(value = self.queues.io_cq.length / 16)
+        while scan < limit {
+            let dword3 = self.queues.io_cq.read_u32(offset = (self.u32_to_u64(value = scan) * 16) + 12)
+            let completed_command_id = dword3 & 0xFFFF
+            let status = (dword3 >> 17) & 0x7FFF
+            if completed_command_id == self.u16_to_u32(value = command_id) {
+                if status == 0 {
+                    return scan
+                }
+            }
+            scan = scan + 1
+        }
+        return limit
+    }
+
+    fn poll_io_completion(self, command_id: U16) {
+        let wait = 0
+        while wait < NVME_COMPLETION_TIMEOUT_POLLS {
+            let cqe_offset = self.u32_to_u64(value = self.io_head) * 16
+            let dword3 = self.queues.io_cq.read_u32(offset = cqe_offset + 12)
+            if self.io_completion_for_command(dword3 = dword3, command_id = command_id) {
+                self.validate_completion(dword3 = dword3, command_id = command_id)
+                self.io_head = self.advance_completion_head(head = self.io_head, depth = NVME_IO_QUEUE_DEPTH)
+                if self.io_head == 0 {
+                    self.io_phase = self.io_phase == false
+                }
+                self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 1), value = self.io_head)
+                return
+            }
+            wait = wait + 1
+        }
+        let found = self.find_io_completion_index(command_id = command_id)
+        if found < self.u64_to_u32(value = self.queues.io_cq.length / 16) {
+            let found_dword3 = self.queues.io_cq.read_u32(offset = (self.u32_to_u64(value = found) * 16) + 12)
+            self.validate_completion(dword3 = found_dword3, command_id = command_id)
+            self.io_head = found + 1
+            self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 1), value = self.io_head)
+            return
+        }
+        self.panic.fail(code = 0xAC080137)
+    }
+
+    fn completion_ready(self, dword3: U32, expected_phase: Bool) -> Bool {
+        if dword3 == 0 {
+            return false
+        }
+        return self.phase_matches(dword3 = dword3, expected = expected_phase)
+    }
+
+    fn admin_completion_for_command(self, dword3: U32, command_id: U16) -> Bool {
+        if dword3 == 0 {
+            return false
+        }
+        let completed_command_id = dword3 & 0xFFFF
+        if completed_command_id != self.u16_to_u32(value = command_id) {
+            return false
+        }
+        let status = (dword3 >> 17) & 0x7FFF
+        return status == 0
+    }
+
+    fn io_completion_for_command(self, dword3: U32, command_id: U16) -> Bool {
+        if dword3 == 0 {
+            return false
+        }
+        let completed_command_id = dword3 & 0xFFFF
+        if completed_command_id != self.u16_to_u32(value = command_id) {
+            return false
+        }
+        let status = (dword3 >> 17) & 0x7FFF
+        return status == 0
+    }
+
+    fn validate_completion(self, dword3: U32, command_id: U16) {
+        let status = (dword3 >> 17) & 0x7FFF
+        if status != 0 {
+            self.panic.fail(code = 0xAC080133)
+        }
+        let completed_command_id = dword3 & 0xFFFF
+        if completed_command_id != self.u16_to_u32(value = command_id) {
+            self.panic.fail(code = 0xAC080134)
+        }
+    }
+
+    fn phase_matches(self, dword3: U32, expected: Bool) -> Bool {
+        let entry_phase = ((dword3 >> 16) & 1) != 0
+        return entry_phase == expected
+    }
+
+    fn allocate_command_id(self) -> U16 {
+        let command_id = self.next_command_id
+        self.next_command_id = self.next_command_id + 1
+        if self.next_command_id == 0 {
+            self.next_command_id = 1
+        }
+        return command_id
+    }
+
+    fn advance_tail(self, tail: U32, depth: U32) -> U32 {
+        let next = tail + 1
+        if next == depth {
+            return 0
+        }
+        return next
+    }
+
+    fn advance_completion_head(self, head: U32, depth: U32) -> U32 {
+        let next = head + 1
+        if next == depth {
+            return 0
+        }
+        return next
+    }
+
+    fn sq_doorbell_offset(self, queue_id: U32) -> U32 {
+        return self.doorbell_offset(queue_id = queue_id, completion = false)
+    }
+
+    fn cq_doorbell_offset(self, queue_id: U32) -> U32 {
+        return self.doorbell_offset(queue_id = queue_id, completion = true)
+    }
+
+    fn doorbell_offset(self, queue_id: U32, completion: Bool) -> U32 {
+        let index = queue_id * 2
+        if completion {
+            index = index + 1
+        }
+        return 0x1000 + (index * 4)
+    }
+
+    fn low32(self, value: U64) -> U32 {
+        return value & 0xFFFFFFFF
+    }
+
+    fn high32(self, value: U64) -> U32 {
+        return (value >> 32) & 0xFFFFFFFF
+    }
+
+    asm fn physical_low32(self, value: PhysicalAddress) -> U32 {
+        mov rax, value
+        ret
+    }
+
+    asm fn physical_high32(self, value: PhysicalAddress) -> U32 {
+        mov rax, value
+        shr rax, 32
+        ret
+    }
+
+    fn u8_to_u64(self, value: U8) -> U64 {
+        return value
+    }
+
+    fn u8_to_u32(self, value: U8) -> U32 {
+        return value
+    }
+
+    fn u16_to_u32(self, value: U16) -> U32 {
+        return value
+    }
+
+    fn u32_to_u64(self, value: U32) -> U64 {
+        return value
+    }
+
+    fn u64_to_u32(self, value: U64) -> U32 {
+        return value & 0xFFFFFFFF
     }
 }
 
@@ -183,8 +841,6 @@ unique driver NvmeDriver {
         controller.disable_controller()
         controller.program_admin_queues()
         controller.enable_controller()
-        controller.identify_controller()
-        controller.namespace = controller.identify_namespace(namespace_id = 1)
         return controller
     }
 
@@ -207,7 +863,7 @@ unique driver NvmeDriver {
     }
 
     fn program_admin_queues(self) {
-        self.registers.write32(offset = NVME_REG_AQA, value = ((NVME_ADMIN_QUEUE_DEPTH - 1) << 16) | (NVME_ADMIN_QUEUE_DEPTH - 1))
+        self.registers.write32(offset = NVME_REG_AQA, value = ((NVME_ADMIN_QUEUE_DEPTH - 1) * 65536) | (NVME_ADMIN_QUEUE_DEPTH - 1))
         self.registers.write32(offset = NVME_REG_ASQ_LOW, value = NVME_ADMIN_QUEUE_ADDRESS)
         self.registers.write32(offset = NVME_REG_ASQ_HIGH, value = 0)
         self.registers.write32(offset = NVME_REG_ACQ_LOW, value = NVME_ADMIN_QUEUE_ADDRESS)
@@ -226,20 +882,6 @@ unique driver NvmeDriver {
             ready_wait = ready_wait + 1
         }
         self.registers.panic.fail(code = 0xAC080035)
-    }
-
-    fn identify_controller(self) {
-        let identify_opcode = 0x06
-        let controller_cns = 1
-        let command_dword10 = controller_cns
-    }
-
-    fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {
-        let identify_opcode = 0x06
-        let namespace_cns = 0
-        let command_namespace_id = namespace_id
-        let command_dword10 = namespace_cns
-        return NvmeNamespace(namespace_id = command_namespace_id, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false)
     }
 
     fn foreground_storage_path(self, nvme_path: NvmeIoPath) -> ForegroundStoragePath {
@@ -264,6 +906,9 @@ driver path NvmeIoPath {
     queue_id: U16
     vector: U8
     registers: NvmeControllerRegisters
+    submission_queue: BoundedBytes
+    submission_tail: U32
+    next_command_id: U16
     completion_queue: NvmeCompletionQueue
     irq: TopicPublisher<NvmeCompletionInterrupt>
 
@@ -274,51 +919,78 @@ driver path NvmeIoPath {
     fn drain_completion_queue(self) -> NvmeCompletionInterrupt {
         let completion = self.completion_queue.drain()
         if completion.completed_count > 0 {
-            let completion_doorbell_offset = 0x1000 + ((self.completion_queue.queue_id << 1) << 2)
+            let completion_doorbell_offset = 0x1000 + (((self.u16_to_u32(value = self.completion_queue.queue_id) * 2) + 1) * 4)
             self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)
         }
         return completion
     }
 
     fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
-        let opcode = NVME_OPCODE_READ
-        let command_namespace_id = namespace_id
-        let command_prp1 = prp1
-        let command_dword10 = start_lba
-        let command_dword11 = start_lba >> 32
-        let command_dword12 = block_count - 1
-        return NvmeSubmission(command_id = 0)
+        return self.submit_data_command(opcode = NVME_OPCODE_READ_U8, namespace_id = namespace_id, start_lba = start_lba, command_dword12 = block_count - 1, prp1 = prp1)
     }
 
     fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
-        let opcode = NVME_OPCODE_WRITE
-        let command_namespace_id = namespace_id
-        let command_prp1 = prp1
-        let command_dword10 = start_lba
-        let command_dword11 = start_lba >> 32
         let command_dword12 = block_count - 1
         if fua {
-            command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)
+            command_dword12 = command_dword12 | 0x40000000
         }
-        return NvmeSubmission(command_id = 0)
+        return self.submit_data_command(opcode = NVME_OPCODE_WRITE_U8, namespace_id = namespace_id, start_lba = start_lba, command_dword12 = command_dword12, prp1 = prp1)
     }
 
     fn submit_flush(self, namespace_id: U32) -> NvmeSubmission {
-        let opcode = NVME_OPCODE_FLUSH
-        let command_namespace_id = namespace_id
-        return NvmeSubmission(command_id = 0)
+        return self.submit_data_command(opcode = NVME_OPCODE_FLUSH_U8, namespace_id = namespace_id, start_lba = 0, command_dword12 = 0, prp1 = self.submission_queue.address)
     }
 
     fn submit_zone_append(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
-        let opcode = NVME_OPCODE_ZONE_APPEND
-        let command_namespace_id = namespace_id
-        let command_prp1 = prp1
-        let command_dword10 = start_lba
-        let command_dword11 = start_lba >> 32
         let command_dword12 = block_count - 1
         if fua {
-            command_dword12 = command_dword12 | (1 << NVME_COMMAND_FUA_BIT)
+            command_dword12 = command_dword12 | 0x40000000
         }
-        return NvmeSubmission(command_id = 0)
+        return self.submit_data_command(opcode = NVME_OPCODE_ZONE_APPEND_U8, namespace_id = namespace_id, start_lba = start_lba, command_dword12 = command_dword12, prp1 = prp1)
+    }
+
+    fn submit_data_command(self, opcode: U8, namespace_id: U32, start_lba: U64, command_dword12: U32, prp1: PhysicalAddress) -> NvmeSubmission {
+        let command_id = self.allocate_command_id()
+        let sq_offset = self.u32_to_u64(value = self.submission_tail) * 64
+        let sqe = self.submission_queue.slice(offset = sq_offset, length = 64)
+        sqe.zero()
+        sqe.write_u8(offset = 0, value = opcode)
+        sqe.write_u16(offset = 2, value = command_id)
+        sqe.write_u32(offset = 4, value = namespace_id)
+        sqe.write_physical_address(offset = 24, value = prp1)
+        sqe.write_u32(offset = 40, value = self.low32(value = start_lba))
+        sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
+        sqe.write_u32(offset = 48, value = command_dword12)
+        self.submission_tail = self.submission_tail + 1
+        if self.submission_tail == self.completion_queue.depth {
+            self.submission_tail = 0
+        }
+        self.registers.write32(offset = 0x1000 + ((self.u16_to_u32(value = self.queue_id) * 2) * 4), value = self.submission_tail)
+        return NvmeSubmission(command_id = command_id)
+    }
+
+    fn allocate_command_id(self) -> U16 {
+        let command_id = self.next_command_id
+        self.next_command_id = self.next_command_id + 1
+        if self.next_command_id == 0 {
+            self.next_command_id = 1
+        }
+        return command_id
+    }
+
+    fn low32(self, value: U64) -> U32 {
+        return value & 0xFFFFFFFF
+    }
+
+    fn high32(self, value: U64) -> U32 {
+        return (value >> 32) & 0xFFFFFFFF
+    }
+
+    fn u16_to_u32(self, value: U16) -> U32 {
+        return value
+    }
+
+    fn u32_to_u64(self, value: U32) -> U64 {
+        return value
     }
 }

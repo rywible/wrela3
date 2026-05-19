@@ -5,13 +5,20 @@ import "testing"
 func TestStorageIRMetadataShape(t *testing.T) {
 	program := Program{
 		StorageEvents: []EventLayout{{
-			Module:        "app",
-			Name:          "FileCreated",
-			EventTypeID:   1001,
-			LayoutID:      1,
-			Current:       true,
-			PayloadSize:   40,
-			PayloadAlign:  8,
+			Module:       "app",
+			Name:         "FileCreated",
+			EventTypeID:  1001,
+			LayoutID:     1,
+			Current:      true,
+			PayloadSize:  40,
+			PayloadAlign: 8,
+			PayloadFields: []EventPayloadField{{
+				Name:        "file_id",
+				Type:        Type{Name: "U64", Module: "builtin", Kind: TypeKindPrimitive},
+				Offset:      0,
+				StorageSize: 8,
+				Align:       8,
+			}},
 			EncoderSymbol: "_wrela_storage_event_app_FileCreated_layout_1_encode",
 		}},
 		StorageProjections: []ProjectionLayout{{
@@ -60,6 +67,13 @@ func TestLowerStorageEventMetadata(t *testing.T) {
 	}
 	if event.PayloadSize == 0 || event.PayloadAlign == 0 {
 		t.Fatalf("payload layout not populated: %#v", event)
+	}
+	if len(event.PayloadFields) != 1 {
+		t.Fatalf("payload fields = %#v, want one field", event.PayloadFields)
+	}
+	field := event.PayloadFields[0]
+	if field.Name != "file_id" || field.Offset != 0 || field.Type.Name != "U64" || field.StorageSize != 8 || field.Align != 8 {
+		t.Fatalf("payload field metadata = %#v", field)
 	}
 	if len(program.StorageProjections) != 1 {
 		t.Fatalf("storage projections = %d, want 1", len(program.StorageProjections))

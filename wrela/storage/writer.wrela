@@ -3,7 +3,7 @@ module storage.writer
 use { StorageMetrics } from storage.format
 use { ForegroundStoragePath, BackgroundStoragePath } from machine.x86_64.nvme
 use { StreamDirectory } from storage.stream
-use { RelocateBlobProposal } from storage.blob
+use { BlobTruth, RelocateBlobProposal } from storage.blob
 
 data PendingAtomicGroup {
     semantic_event_count: U64
@@ -99,8 +99,8 @@ data StorageWriter {
         return PublishedBlobRef(ref = ref)
     }
 
-    fn accept_relocate_blob(self, proposal: RelocateBlobProposal) -> StorageAppendResult {
-        if proposal.observed_version == 0 {
+    fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> StorageAppendResult {
+        if truth.accept_relocate(proposal = proposal) == false {
             return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1118)
         }
         return StorageAppendResult(accepted = true, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 0)

@@ -327,6 +327,54 @@ func TestRelocateBlobRejectsStaleVersion(t *testing.T) {
 	}
 }
 
+func TestRelocateBlobRejectsStaleOldRef(t *testing.T) {
+	truth := BlobTruth{Version: 4, Ref: BlobRef{BlobID: 9, StartLBA: 20, BlockCount: 2}}
+	ok := truth.AcceptRelocate(RelocateBlobProposal{
+		BlobID:          9,
+		OldRef:          BlobRef{BlobID: 9, StartLBA: 10, BlockCount: 2},
+		NewRef:          BlobRef{BlobID: 9, StartLBA: 30, BlockCount: 2},
+		ObservedVersion: 4,
+	})
+	if ok {
+		t.Fatal("stale old ref must be rejected")
+	}
+}
+
+func TestRelocateBlobAcceptsOnlyCurrentTruth(t *testing.T) {
+	truth := BlobTruth{Version: 4, Ref: BlobRef{BlobID: 9, StartLBA: 20, BlockCount: 2}}
+	writer := WriterPolicy{}
+
+	staleVersion := writer.AcceptRelocateBlob(&truth, RelocateBlobProposal{
+		BlobID:          9,
+		OldRef:          truth.Ref,
+		NewRef:          BlobRef{BlobID: 9, StartLBA: 30, BlockCount: 2},
+		ObservedVersion: 3,
+	})
+	if staleVersion.Accepted {
+		t.Fatalf("stale version relocation accepted: %#v", staleVersion)
+	}
+
+	staleOldRef := writer.AcceptRelocateBlob(&truth, RelocateBlobProposal{
+		BlobID:          9,
+		OldRef:          BlobRef{BlobID: 9, StartLBA: 10, BlockCount: 2},
+		NewRef:          BlobRef{BlobID: 9, StartLBA: 30, BlockCount: 2},
+		ObservedVersion: 4,
+	})
+	if staleOldRef.Accepted {
+		t.Fatalf("stale old ref relocation accepted: %#v", staleOldRef)
+	}
+
+	current := writer.AcceptRelocateBlob(&truth, RelocateBlobProposal{
+		BlobID:          9,
+		OldRef:          truth.Ref,
+		NewRef:          BlobRef{BlobID: 9, StartLBA: 30, BlockCount: 2},
+		ObservedVersion: 4,
+	})
+	if !current.Accepted || truth.Ref.StartLBA != 30 || truth.Version != 5 {
+		t.Fatalf("current relocation = %#v, truth = %#v", current, truth)
+	}
+}
+
 func TestDirectoryProjectionPublishesGroupWatermark(t *testing.T) {
 	p := DirectoryProjection{}
 	p.ApplyGroup(CommittedGroup{LastEventID: 9}, []Event{{TypeID: 1001, FileID: 7}})

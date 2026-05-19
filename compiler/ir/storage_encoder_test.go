@@ -33,8 +33,11 @@ func TestStorageEventEncoderIRStoresHeaderFields(t *testing.T) {
 			t.Fatalf("encoder missing header store at offset %d; got %#v", offset, offsets)
 		}
 	}
-	if zero == nil || zero.Offset != 64 || zero.Length != 448 {
-		t.Fatalf("payload zero fill = %#v, want offset 64 length 448", zero)
+	if !offsets[64] {
+		t.Fatalf("encoder missing payload store at offset 64; got %#v", offsets)
+	}
+	if zero == nil || zero.Offset != 72 || zero.Length != 440 {
+		t.Fatalf("payload zero fill = %#v, want offset 72 length 440", zero)
 	}
 	if crc == nil || crc.Length != 512 {
 		t.Fatalf("crc op = %#v, want length 512", crc)

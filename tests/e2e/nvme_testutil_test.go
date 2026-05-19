@@ -56,12 +56,14 @@ func runStorageQEMUResult(t *testing.T, disk, mode string) (string, error) {
 		OVMFVars:    vars,
 		ESPDir:      filepath.Join(tmp, "esp"),
 		ImagePath:   image,
+		CPU:         "Haswell-v3,phys-bits=48",
 		SMP:         2,
 		SuccessText: "NVME_STORAGE_DONE",
 		Timeout:     qemuTimeout(),
 		ExtraArgs: []string{
+			"-global", "q35-pcihost.pci-hole64-size=0",
 			"-drive", "file=" + disk + ",if=none,id=nvme0,format=raw",
-			"-device", "nvme,drive=nvme0,serial=wrela-storage-0",
+			"-device", "nvme,drive=nvme0,serial=wrela-storage-0,bootindex=-1",
 			"-fw_cfg", "name=opt/wrela.storage.mode,string=wrela:" + mode,
 		},
 	})

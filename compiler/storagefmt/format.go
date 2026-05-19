@@ -555,6 +555,13 @@ func (w WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
 	}
 }
 
+func (w WriterPolicy) AcceptRelocateBlob(truth *BlobTruth, proposal RelocateBlobProposal) EnqueueResult {
+	if truth == nil || !truth.AcceptRelocate(proposal) {
+		return EnqueueResult{Accepted: false, OpenBatchSlots: w.OpenBatchSlots, RejectCode: "SEM0118"}
+	}
+	return EnqueueResult{Accepted: true, OpenBatchSlots: w.OpenBatchSlots}
+}
+
 func AssignEventIDs(first uint64, count uint64) (firstEventID uint64, lastEventID uint64) {
 	return first, first + count - 1
 }

@@ -746,7 +746,16 @@ type EventLayout struct {
 	Current       bool
 	PayloadSize   uint64
 	PayloadAlign  uint64
+	PayloadFields []EventPayloadField
 	EncoderSymbol string
+}
+
+type EventPayloadField struct {
+	Name        string
+	Type        Type
+	Offset      uint64
+	StorageSize uint64
+	Align       uint64
 }
 
 type ProjectionLayout struct {

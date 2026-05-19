@@ -92,6 +92,14 @@ data PcieEcamWindow {
         self.write_io_config32(address = self.io_config_address(bus = bus, device = device, function = function, offset = offset), value = value)
     }
 
+    fn read_config32_mmio(self, bus: U8, device: U8, function: U8, offset: U16) -> U32 {
+        return self.read_mmio_config32(address = self.config_address(bus = bus, device = device, function = function, offset = offset))
+    }
+
+    fn write_config32_mmio(self, bus: U8, device: U8, function: U8, offset: U16, value: U32) {
+        self.write_mmio_config32(address = self.config_address(bus = bus, device = device, function = function, offset = offset), value = value)
+    }
+
     asm fn read_io_config32(self, address: U32) -> U32 {
         mov eax, address
         mov dx, 0x0CF8
@@ -108,6 +116,19 @@ data PcieEcamWindow {
         mov eax, value
         mov dx, 0x0CFC
         out dx, eax
+        ret
+    }
+
+    asm fn read_mmio_config32(self, address: PhysicalAddress) -> U32 {
+        mov r11, address
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn write_mmio_config32(self, address: PhysicalAddress, value: U32) {
+        mov r11, address
+        mov eax, value
+        mov [r11], eax
         ret
     }
 }
@@ -178,13 +199,29 @@ data PciDevice {
         self.window.write_config32(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset, value = value)
     }
 
+    fn read_config32_mmio(self, offset: U16) -> U32 {
+        return self.window.read_config32_mmio(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset)
+    }
+
+    fn write_config32_mmio(self, offset: U16, value: U32) {
+        self.window.write_config32_mmio(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset, value = value)
+    }
+
     fn claim_mmio_bar(self, index: U8) -> MmioRegion {
         let offset = 0x10 + (index << 2)
-        let original = self.read_config32(offset = offset)
+        let original = self.read_config32_mmio(offset = offset)
         if (original & 1) != 0 {
             self.panic.fail(code = 0xAC060001)
         }
         let bar_kind = original & 6
+        if bar_kind == 0 {
+            self.write_config32(offset = offset, value = 0xFFFFFFFF)
+            let kind_probe = self.read_config32(offset = offset) & 6
+            self.write_config32(offset = offset, value = original)
+            if kind_probe == 4 {
+                bar_kind = 4
+            }
+        }
         if bar_kind == 0 {
             self.write_config32(offset = offset, value = 0xFFFFFFFF)
             let mask = self.read_config32(offset = offset)
@@ -220,9 +257,120 @@ data PciDevice {
             }
         }
         let base = (self.u32_to_u64(value = original_high) << 32) | self.u32_to_u64(value = original & 0xFFFFFFF0)
-        let mask = (self.u32_to_u64(value = mask_high) << 32) | self.u32_to_u64(value = masked_low)
-        let size = 0 - mask
+        let size = self.u32_to_u64(value = (0 - masked_low) & 0xFFFFFFFF)
+        if size == 0 {
+            let mask = (self.u32_to_u64(value = mask_high) << 32) | self.u32_to_u64(value = masked_low)
+            size = 0 - mask
+        }
         return MmioRegion(address = base, length = size, panic = self.panic)
+    }
+
+    fn claim_mmio_bar_at32(self, index: U8, base: U32) -> MmioRegion {
+        if (base & 0xF) != 0 {
+            self.panic.fail(code = 0xAC060006)
+        }
+        let base64 = self.u32_to_u64(value = base)
+        let offset = 0x10 + (index << 2)
+        let original = self.read_config32_mmio(offset = offset)
+        if (original & 1) != 0 {
+            self.panic.fail(code = 0xAC060001)
+        }
+        let bar_kind = original & 6
+        let command_status = self.read_config32_mmio(offset = 0x04)
+        self.write_config32_mmio(offset = 0x04, value = command_status & 0x0000FFF9)
+        if bar_kind == 0 {
+            self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+            let kind_probe = self.read_config32_mmio(offset = offset) & 6
+            self.write_config32_mmio(offset = offset, value = original)
+            if kind_probe == 4 {
+                bar_kind = 4
+            }
+        }
+        if bar_kind == 0 {
+            self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+            let mask = self.read_config32_mmio(offset = offset)
+            let masked = mask & 0xFFFFFFF0
+            if masked == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+            let size = (0 - masked) & 0xFFFFFFFF
+            let size64 = self.u32_to_u64(value = size)
+            if (base64 & (size64 - 1)) != 0 {
+                self.panic.fail(code = 0xAC060007)
+            }
+            if (base64 + size64) > 0x100000000 {
+                self.panic.fail(code = 0xAC060008)
+            }
+            self.write_config32_mmio(offset = offset, value = (base & 0xFFFFFFF0) | (original & 0xF))
+            if (self.read_config32_mmio(offset = offset) & 0xFFFFFFF0) != (base & 0xFFFFFFF0) {
+                self.panic.fail(code = 0xAC06000C)
+            }
+            self.enable_mmio_and_bus_master()
+            return MmioRegion(address = base64, length = size64, panic = self.panic)
+        }
+        if bar_kind < 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if bar_kind > 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if index >= 5 {
+            self.panic.fail(code = 0xAC060004)
+        }
+        let high_offset = offset + 4
+        let original_high = self.read_config32_mmio(offset = high_offset)
+        self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+        self.write_config32_mmio(offset = high_offset, value = 0xFFFFFFFF)
+        let mask_low = self.read_config32_mmio(offset = offset)
+        let mask_high = self.read_config32_mmio(offset = high_offset)
+        self.write_config32_mmio(offset = high_offset, value = original_high)
+        self.write_config32_mmio(offset = offset, value = original)
+        let masked_low = mask_low & 0xFFFFFFF0
+        if masked_low == 0 {
+            if mask_high == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+        }
+        let size = self.u32_to_u64(value = (0 - masked_low) & 0xFFFFFFFF)
+        if size == 0 {
+            let mask = (self.u32_to_u64(value = mask_high) << 32) | self.u32_to_u64(value = masked_low)
+            size = 0 - mask
+            if size == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+            if size > 0xFFFFFFFF {
+                self.panic.fail(code = 0xAC060009)
+            }
+        }
+        if (base64 & (size - 1)) != 0 {
+            self.panic.fail(code = 0xAC06000A)
+        }
+        if (base64 + size) > 0x100000000 {
+            self.panic.fail(code = 0xAC06000B)
+        }
+        let bar_attrs = original & 0xF
+        if (bar_attrs & 6) == 0 {
+            bar_attrs = (bar_attrs & 0x9) | 4
+        }
+        self.write_config32_mmio(offset = high_offset, value = 0)
+        self.write_config32_mmio(offset = offset, value = (base & 0xFFFFFFF0) | bar_attrs)
+        self.write_config32_mmio(offset = high_offset, value = 0)
+        if (self.read_config32_mmio(offset = offset) & 0xFFFFFFF0) != (base & 0xFFFFFFF0) {
+            self.panic.fail(code = 0xAC06000C)
+        }
+        if (self.read_config32_mmio(offset = offset) & 6) != 4 {
+            self.panic.fail(code = 0xAC06000F)
+        }
+        self.enable_mmio_and_bus_master()
+        self.write_config32_mmio(offset = 0x04, value = 0x00000006)
+        if (self.read_config32_mmio(offset = 0x04) & 0x00000006) != 0x00000006 {
+            self.panic.fail(code = 0xAC06000D)
+        }
+        return MmioRegion(address = base64, length = size, panic = self.panic)
+    }
+
+    fn reapply_mmio_bar_at32(self, index: U8, base: U32) -> MmioRegion {
+        return self.claim_mmio_bar_at32(index = index, base = base)
     }
 
     fn claim_io_bar(self, index: U8) -> IoPortRegion {

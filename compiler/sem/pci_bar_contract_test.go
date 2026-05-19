@@ -9,11 +9,17 @@ func TestPciBarClaimSourceContract(t *testing.T) {
 	source := readRepoFile(t, "wrela/machine/x86_64/pci.wrela")
 	required := []string{
 		"fn claim_mmio_bar(self, index: U8) -> MmioRegion",
+		"fn claim_mmio_bar_at32(self, index: U8, base: U32) -> MmioRegion",
 		"fn claim_io_bar(self, index: U8) -> IoPortRegion",
 		"self.write_config32(offset = offset, value = 0xFFFFFFFF)",
 		"let mask = self.read_config32(offset = offset)",
 		"original & 0xFFFFFFF0",
 		"mask & 0xFFFFFFF0",
+		"command_status & 0x0000FFF9",
+		"(base64 + size) > 0x100000000",
+		"(base & 0xFFFFFFF0) | (original & 0xF)",
+		"self.write_config32_mmio(offset = high_offset, value = 0)",
+		"0xAC060006",
 		"let bar_kind = original & 6",
 		"bar_kind < 4",
 		"bar_kind > 4",
@@ -37,6 +43,9 @@ func TestPciBarClaimSourceContract(t *testing.T) {
 		if !strings.Contains(source, needle) {
 			t.Fatalf("pci BAR contract missing %q", needle)
 		}
+	}
+	if strings.Contains(source, "self.write_config32_mmio(offset = 0x14, value = 0)") {
+		t.Fatalf("pci BAR contract must not zero a hard-coded BAR1 high half")
 	}
 	tableClaim := strings.Index(source, "let table = self.claim_mmio_bar(index = table_bar_index)")
 	if tableClaim < 0 || !strings.Contains(source[tableClaim:], "self.enable_mmio_and_bus_master()") {
