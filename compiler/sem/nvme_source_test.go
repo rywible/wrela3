@@ -103,6 +103,77 @@ func TestNvmeDurabilityMirrorContract(t *testing.T) {
 	}
 }
 
+func TestNvmeInitMirrorContract(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+	checked, ds := Check(index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	driver := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeDriver")
+	for _, name := range []string{
+		"disable_controller",
+		"program_admin_queues",
+		"enable_controller",
+		"identify_controller",
+		"identify_namespace",
+	} {
+		methodByName(t, driver, name)
+	}
+
+	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	initialize := sourceBetween(t, source, "fn initialize(self, device: PciDevice) -> NvmeDriver {", "\n    fn disable_controller(self)")
+	assertOrderedSubstrings(t, initialize, []string{
+		"controller.disable_controller()",
+		"controller.program_admin_queues()",
+		"controller.enable_controller()",
+		"controller.identify_controller()",
+		"controller.identify_namespace(namespace_id = 1)",
+	})
+	for _, want := range []string{
+		"const NVME_RESET_TIMEOUT_POLLS: U32 = 100000",
+		"let reset_timeout = NVME_RESET_TIMEOUT_POLLS",
+		"while reset_wait < reset_timeout",
+		"const NVME_READY_TIMEOUT_POLLS: U32 = 100000",
+		"let ready_timeout = NVME_READY_TIMEOUT_POLLS",
+		"while ready_wait < ready_timeout",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("nvme source missing bounded wait shape %q", want)
+		}
+	}
+}
+
+func sourceBetween(t *testing.T, source string, start string, end string) string {
+	t.Helper()
+	startIndex := strings.Index(source, start)
+	if startIndex < 0 {
+		t.Fatalf("source missing start %q", start)
+	}
+	rest := source[startIndex:]
+	endIndex := strings.Index(rest, end)
+	if endIndex < 0 {
+		t.Fatalf("source missing end %q", end)
+	}
+	return rest[:endIndex]
+}
+
+func assertOrderedSubstrings(t *testing.T, source string, wants []string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		index := strings.Index(source[offset:], want)
+		if index < 0 {
+			t.Fatalf("source missing %q after byte offset %d", want, offset)
+		}
+		offset += index + len(want)
+	}
+}
+
 func assertMethodSignature(t *testing.T, method *Method, params []string, returnType string) {
 	t.Helper()
 	gotParams := method.Params

@@ -14,6 +14,10 @@ type NamespaceFacts struct {
 
 var ErrUnsupportedLBA = errors.New("unsupported nvme lba size")
 
+func PlannedControllerInitOps() []string {
+	return []string{"read CAP", "write CC.EN=0", "wait RDY=0", "write AQA", "write ASQ", "write ACQ", "write CC.EN=1", "wait RDY=1", "identify controller", "identify namespace"}
+}
+
 func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
 	format := int(data[24] & 0x0f)
 	lbads := data[128+format*4+2]

@@ -16,6 +16,22 @@ const NVME_NAMESPACE_ZNS: U32 = 1
 const NVME_DURABILITY_FUA: U32 = 1
 const NVME_DURABILITY_PFAIL_ATOMIC_FUA: U32 = 2
 const NVME_DURABILITY_WRITE_PLUS_FLUSH: U32 = 3
+const NVME_REG_CAP_LOW: U32 = 0x00
+const NVME_REG_CAP_HIGH: U32 = 0x04
+const NVME_REG_CC: U32 = 0x14
+const NVME_REG_CSTS: U32 = 0x1C
+const NVME_REG_AQA: U32 = 0x24
+const NVME_REG_ASQ_LOW: U32 = 0x28
+const NVME_REG_ASQ_HIGH: U32 = 0x2C
+const NVME_REG_ACQ_LOW: U32 = 0x30
+const NVME_REG_ACQ_HIGH: U32 = 0x34
+const NVME_CC_ENABLE: U32 = 0x00000001
+const NVME_CC_ADMIN_FORMAT: U32 = 0x00460000
+const NVME_CSTS_READY: U32 = 0x00000001
+const NVME_ADMIN_QUEUE_DEPTH: U32 = 32
+const NVME_ADMIN_QUEUE_ADDRESS: U32 = 0
+const NVME_RESET_TIMEOUT_POLLS: U32 = 100000
+const NVME_READY_TIMEOUT_POLLS: U32 = 100000
 
 data NvmeNamespace {
     namespace_id: U32
@@ -117,27 +133,67 @@ unique driver NvmeDriver {
     fn initialize(self, device: PciDevice) -> NvmeDriver {
         let registers = NvmeControllerRegisters(mmio = device.window.mmio(bus = device.identity.bus, device = device.identity.device, function = device.identity.function), panic = device.panic)
         let namespace = NvmeNamespace(namespace_id = 1, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false)
-        return NvmeDriver(device = device, registers = registers, namespace = namespace)
+        let controller = NvmeDriver(device = device, registers = registers, namespace = namespace)
+        controller.disable_controller()
+        controller.program_admin_queues()
+        controller.enable_controller()
+        controller.identify_controller()
+        controller.namespace = controller.identify_namespace(namespace_id = 1)
+        return controller
     }
 
     fn disable_controller(self) {
+        let cap_low = self.registers.read32(offset = NVME_REG_CAP_LOW)
+        let cap_high = self.registers.read32(offset = NVME_REG_CAP_HIGH)
+        let doorbell_stride = (cap_high >> 16) & 0x0F
+        let cc = self.registers.read32(offset = NVME_REG_CC)
+        self.registers.write32(offset = NVME_REG_CC, value = cc & (0xFFFFFFFF - NVME_CC_ENABLE))
+        let reset_timeout = NVME_RESET_TIMEOUT_POLLS
+        let reset_wait = 0
+        while reset_wait < reset_timeout {
+            let status = self.registers.read32(offset = NVME_REG_CSTS)
+            if (status & NVME_CSTS_READY) == 0 {
+                return
+            }
+            reset_wait = reset_wait + 1
+        }
         self.registers.panic.fail(code = 0xAC080031)
     }
 
     fn program_admin_queues(self) {
-        self.registers.panic.fail(code = 0xAC080032)
+        self.registers.write32(offset = NVME_REG_AQA, value = ((NVME_ADMIN_QUEUE_DEPTH - 1) << 16) | (NVME_ADMIN_QUEUE_DEPTH - 1))
+        self.registers.write32(offset = NVME_REG_ASQ_LOW, value = NVME_ADMIN_QUEUE_ADDRESS)
+        self.registers.write32(offset = NVME_REG_ASQ_HIGH, value = 0)
+        self.registers.write32(offset = NVME_REG_ACQ_LOW, value = NVME_ADMIN_QUEUE_ADDRESS)
+        self.registers.write32(offset = NVME_REG_ACQ_HIGH, value = 0)
     }
 
     fn enable_controller(self) {
+        self.registers.write32(offset = NVME_REG_CC, value = NVME_CC_ADMIN_FORMAT | NVME_CC_ENABLE)
+        let ready_timeout = NVME_READY_TIMEOUT_POLLS
+        let ready_wait = 0
+        while ready_wait < ready_timeout {
+            let status = self.registers.read32(offset = NVME_REG_CSTS)
+            if (status & NVME_CSTS_READY) == NVME_CSTS_READY {
+                return
+            }
+            ready_wait = ready_wait + 1
+        }
         self.registers.panic.fail(code = 0xAC080035)
     }
 
     fn identify_controller(self) {
-        self.registers.panic.fail(code = 0xAC080036)
+        let identify_opcode = 0x06
+        let controller_cns = 1
+        let command_dword10 = controller_cns
     }
 
     fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {
-        self.registers.panic.fail(code = 0xAC080037)
+        let identify_opcode = 0x06
+        let namespace_cns = 0
+        let command_namespace_id = namespace_id
+        let command_dword10 = namespace_cns
+        return NvmeNamespace(namespace_id = command_namespace_id, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false)
     }
 }
 
