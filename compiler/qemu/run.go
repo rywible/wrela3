@@ -28,6 +28,7 @@ type Options struct {
 	SuccessText    string
 	UseSerialPipe  bool
 	SerialPipePath string
+	ExtraArgs      []string
 
 	IvshmemServerBinary   string
 	InputText             string
@@ -98,6 +99,7 @@ func Args(opts Options) []string {
 			"-device", "ivshmem-doorbell,vectors=1,chardev=ivshmem1,addr=0x7",
 		)
 	}
+	args = append(args, opts.ExtraArgs...)
 
 	return args
 }

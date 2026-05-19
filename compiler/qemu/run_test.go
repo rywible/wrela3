@@ -71,6 +71,17 @@ func TestArgsIncludesSMPWhenRequested(t *testing.T) {
 	}
 }
 
+func TestArgsAppendsExtraArgs(t *testing.T) {
+	args := Args(Options{
+		ImagePath: "boot.efi",
+		ExtraArgs: []string{"-device", "nvme,serial=test"},
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-device nvme,serial=test") {
+		t.Fatalf("QEMU args missing extra args:\n%s", joined)
+	}
+}
+
 func TestArgsUsesSerialPipeWhenRequested(t *testing.T) {
 	args := strings.Join(Args(Options{
 		ImagePath:      "x.efi",
