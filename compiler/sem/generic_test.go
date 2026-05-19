@@ -110,7 +110,7 @@ data Slots<T> {
 class Worker {
     fn run(self, slots: Slots<Event>) {
         let mutable = slots.fill(value = Event(kind = 1))
-        let event = mutable.get(index = 0)
+        let payload = mutable.get(index = 0)
     }
 }
 `)
