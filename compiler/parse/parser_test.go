@@ -84,6 +84,59 @@ image Boot {
 	}
 }
 
+func TestParseEventDeclaration(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module storage.test
+event FileRenamed id 17 {
+    file_id: FileId
+    layout 1 {
+        old_name_ref: BlobRefPayload
+    }
+    layout 2 current {
+        file_id: U64 = self.file_id.value
+    }
+    upcast 1 -> 2 {
+        old_name_ref -> name_ref
+    }
+}
+`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if len(mod.Decls) != 1 {
+		t.Fatalf("decls = %d, want 1", len(mod.Decls))
+	}
+	ev, ok := mod.Decls[0].(*ast.EventDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want *ast.EventDecl", mod.Decls[0])
+	}
+	if ev.ID != "17" {
+		t.Fatalf("event id = %q, want 17", ev.ID)
+	}
+	if len(ev.Fields) != 1 {
+		t.Fatalf("event fields = %d, want 1", len(ev.Fields))
+	}
+	if len(ev.Layouts) != 2 {
+		t.Fatalf("event layouts = %d, want 2", len(ev.Layouts))
+	}
+	if !ev.Layouts[1].Current {
+		t.Fatalf("layout 2 current = false, want true")
+	}
+	if len(ev.Upcasts) != 1 {
+		t.Fatalf("event upcasts = %d, want 1", len(ev.Upcasts))
+	}
+	if len(ev.Layouts[1].Fields) != 1 || ev.Layouts[1].Fields[0].Encode == nil {
+		t.Fatalf("layout 2 fields = %#v, want field with encode", ev.Layouts[1].Fields)
+	}
+	if len(ev.Upcasts[0].Mappings) != 1 {
+		t.Fatalf("upcast mappings = %d, want 1", len(ev.Upcasts[0].Mappings))
+	}
+	mapping := ev.Upcasts[0].Mappings[0]
+	if mapping.From != "old_name_ref" || mapping.To != "name_ref" {
+		t.Fatalf("mapping = %#v, want old_name_ref -> name_ref", mapping)
+	}
+}
+
 func TestParseStatements(t *testing.T) {
 	mod, ds := parseModuleForTest(t, `
 module m

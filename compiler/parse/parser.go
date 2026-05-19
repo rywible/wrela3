@@ -183,6 +183,11 @@ func (p *Parser) parseDecl() (ast.Decl, []diag.Diagnostic) {
 			return nil, p.err(p.peek(), diag.PAR0002, "image may not be unique")
 		}
 		return p.parseImageDecl()
+	case lex.KeywordEvent:
+		if unique {
+			return nil, p.err(p.peek(), diag.PAR0002, "event may not be unique")
+		}
+		return p.parseEventDecl()
 	case lex.KeywordConst:
 		if unique {
 			return nil, p.err(p.peek(), diag.PAR0002, "unique may not prefix const in v0")
@@ -277,6 +282,188 @@ func (p *Parser) parseConstDecl() (ast.Decl, []diag.Diagnostic) {
 		Type:  typeRef,
 		Value: value,
 		SpanV: p.span(start.Start, value.Span().End),
+	}, nil
+}
+
+func (p *Parser) parseEventDecl() (ast.Decl, []diag.Diagnostic) {
+	start := p.next()
+	name, ds := p.expectIdentifier("expected event name")
+	if len(ds) != 0 {
+		return nil, ds
+	}
+	if _, ds := p.consumeContextualIdentifier("id", "expected id in event declaration"); len(ds) != 0 {
+		return nil, ds
+	}
+	id, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return nil, p.err(p.peek(), diag.PAR0001, "expected event id")
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	var fields []ast.Field
+	var layouts []ast.EventLayoutDecl
+	var upcasts []ast.LayoutUpcastDecl
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		if p.peek().Kind == lex.Identifier && p.peek().Text == "layout" {
+			layout, ds := p.parseEventLayoutDecl()
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			layouts = append(layouts, layout)
+		} else if p.peek().Kind == lex.Identifier && p.peek().Text == "upcast" {
+			upcast, ds := p.parseLayoutUpcastDecl()
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			upcasts = append(upcasts, upcast)
+		} else {
+			field, ds := p.parseFieldDecl()
+			if len(ds) != 0 {
+				return nil, ds
+			}
+			fields = append(fields, field)
+		}
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
+		return nil, ds
+	}
+
+	return &ast.EventDecl{
+		Name:    name.Text,
+		ID:      id.Text,
+		Fields:  fields,
+		Layouts: layouts,
+		Upcasts: upcasts,
+		SpanV:   p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseEventLayoutDecl() (ast.EventLayoutDecl, []diag.Diagnostic) {
+	start, ds := p.consumeContextualIdentifier("layout", "expected layout declaration")
+	if len(ds) != 0 {
+		return ast.EventLayoutDecl{}, ds
+	}
+	id, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return ast.EventLayoutDecl{}, p.err(p.peek(), diag.PAR0001, "expected layout id")
+	}
+	current := false
+	if p.peek().Kind == lex.Identifier && p.peek().Text == "current" {
+		p.next()
+		current = true
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return ast.EventLayoutDecl{}, ds
+	}
+
+	var fields []ast.EventLayoutField
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		field, ds := p.parseEventLayoutField()
+		if len(ds) != 0 {
+			return ast.EventLayoutDecl{}, ds
+		}
+		fields = append(fields, field)
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
+		return ast.EventLayoutDecl{}, ds
+	}
+
+	return ast.EventLayoutDecl{
+		ID:      id.Text,
+		Current: current,
+		Fields:  fields,
+		Span:    p.span(start.Start, p.previous().End),
+	}, nil
+}
+
+func (p *Parser) parseEventLayoutField() (ast.EventLayoutField, []diag.Diagnostic) {
+	name, ds := p.expectIdentifier("expected layout field name")
+	if len(ds) != 0 {
+		return ast.EventLayoutField{}, ds
+	}
+	if _, ds := p.consume(lex.Colon); len(ds) != 0 {
+		return ast.EventLayoutField{}, ds
+	}
+	typ, ds := p.parseTypeRef()
+	if len(ds) != 0 {
+		return ast.EventLayoutField{}, ds
+	}
+	var encode ast.Expr
+	if p.match(lex.Equal) {
+		expr, ds := p.parseExpr(0)
+		if len(ds) != 0 {
+			return ast.EventLayoutField{}, ds
+		}
+		encode = expr
+	}
+	return ast.EventLayoutField{Name: name.Text, Type: typ, Encode: encode, Span: p.span(name.Start, p.previous().End)}, nil
+}
+
+func (p *Parser) parseLayoutUpcastDecl() (ast.LayoutUpcastDecl, []diag.Diagnostic) {
+	start, ds := p.consumeContextualIdentifier("upcast", "expected upcast declaration")
+	if len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, ds
+	}
+	from, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, p.err(p.peek(), diag.PAR0001, "expected upcast source layout id")
+	}
+	if _, ds := p.consume(lex.Arrow); len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, ds
+	}
+	to, ds := p.consume(lex.Integer)
+	if len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, p.err(p.peek(), diag.PAR0001, "expected upcast target layout id")
+	}
+	if _, ds := p.consume(lex.LBrace); len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, ds
+	}
+
+	var mappings []ast.LayoutUpcastMapping
+	for p.peek().Kind != lex.RBrace && p.peek().Kind != lex.EOF {
+		p.skipSeparators()
+		if p.peek().Kind == lex.RBrace || p.peek().Kind == lex.EOF {
+			break
+		}
+		fromField, ds := p.expectIdentifier("expected upcast source field")
+		if len(ds) != 0 {
+			return ast.LayoutUpcastDecl{}, ds
+		}
+		if _, ds := p.consume(lex.Arrow); len(ds) != 0 {
+			return ast.LayoutUpcastDecl{}, ds
+		}
+		toField, ds := p.expectIdentifier("expected upcast target field")
+		if len(ds) != 0 {
+			return ast.LayoutUpcastDecl{}, ds
+		}
+		mappings = append(mappings, ast.LayoutUpcastMapping{
+			From: fromField.Text,
+			To:   toField.Text,
+			Span: p.span(fromField.Start, toField.End),
+		})
+		p.skipSeparators()
+	}
+	if _, ds := p.consume(lex.RBrace); len(ds) != 0 {
+		return ast.LayoutUpcastDecl{}, ds
+	}
+
+	return ast.LayoutUpcastDecl{
+		FromID:   from.Text,
+		ToID:     to.Text,
+		Mappings: mappings,
+		Span:     p.span(start.Start, p.previous().End),
 	}, nil
 }
 
@@ -1564,6 +1751,14 @@ func (p *Parser) consumeIdentifier(kind lex.Kind, msg string) (lex.Token, []diag
 	}
 	if kind == lex.Identifier {
 		return tok, p.err(tok, diag.PAR0001, msg)
+	}
+	return tok, p.err(tok, diag.PAR0001, msg)
+}
+
+func (p *Parser) consumeContextualIdentifier(text, msg string) (lex.Token, []diag.Diagnostic) {
+	tok := p.peek()
+	if tok.Kind == lex.Identifier && tok.Text == text {
+		return p.next(), nil
 	}
 	return tok, p.err(tok, diag.PAR0001, msg)
 }
