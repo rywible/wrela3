@@ -91,6 +91,27 @@ type SegmentIndexEntry struct {
 	ByteOffset   uint64
 }
 
+type StreamDirectory struct {
+	NextStreamID uint64
+}
+
+type StreamDirectoryEntry struct {
+	LatestSequence      uint64
+	LatestEventID       uint64
+	LatestCheckpointRef uint64
+	Flags               uint64
+}
+
+type StreamCheckpoint struct {
+	CurrentLayoutID uint64
+	StateLayoutID   uint64
+}
+
+type StreamDirectoryCache struct {
+	Hits   uint64
+	Misses uint64
+}
+
 type PackedSegment struct {
 	BaseEventID uint64
 	Bytes       []byte
@@ -240,6 +261,44 @@ func ValidSlotForTest(eventID uint64) Slot {
 	}}
 	RefreshSlotChecksum(&slot)
 	return slot
+}
+
+func (d StreamDirectory) EntryOffset(streamID uint64) uint64 {
+	return streamID * 32
+}
+
+func (d StreamDirectory) Exists(streamID uint64) bool {
+	return streamID < d.NextStreamID
+}
+
+func (d *StreamDirectory) AllocateStreamID() uint64 {
+	streamID := d.NextStreamID
+	d.NextStreamID++
+	return streamID
+}
+
+func (e StreamDirectoryEntry) ExpectsSequence(sequence uint64) bool {
+	return sequence == e.LatestSequence+1
+}
+
+func (c StreamCheckpoint) Applies() bool {
+	return c.StateLayoutID == c.CurrentLayoutID
+}
+
+func (c *StreamDirectoryCache) RecordHit() {
+	c.Hits++
+}
+
+func (c *StreamDirectoryCache) RecordMiss() {
+	c.Misses++
+}
+
+func (c StreamDirectoryCache) HitRateX1000() uint64 {
+	total := c.Hits + c.Misses
+	if total == 0 {
+		return 0
+	}
+	return c.Hits * 1000 / total
 }
 
 func ReservedEmptySlotForTest(eventID uint64) Slot {

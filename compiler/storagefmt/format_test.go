@@ -258,3 +258,53 @@ func TestPackedSegmentCodecStripsPadding(t *testing.T) {
 		t.Fatalf("packed index = %#v", packed.Index)
 	}
 }
+
+func TestStreamDirectoryMath(t *testing.T) {
+	dir := StreamDirectory{NextStreamID: 8}
+	if !dir.Exists(7) || dir.Exists(8) {
+		t.Fatalf("stream existence broken")
+	}
+	if got := dir.EntryOffset(5); got != 160 {
+		t.Fatalf("entry offset = %d, want 160", got)
+	}
+}
+
+func TestStreamDirectoryAllocatesMonotonicIDs(t *testing.T) {
+	dir := StreamDirectory{NextStreamID: 9}
+	first := dir.AllocateStreamID()
+	second := dir.AllocateStreamID()
+
+	if first != 9 || second != 10 || dir.NextStreamID != 11 {
+		t.Fatalf("allocated (%d, %d), next = %d; want (9, 10), next 11", first, second, dir.NextStreamID)
+	}
+}
+
+func TestStreamDirectoryEntryExpectedSequence(t *testing.T) {
+	entry := StreamDirectoryEntry{LatestSequence: 41}
+	if !entry.ExpectsSequence(42) || entry.ExpectsSequence(41) {
+		t.Fatalf("expected sequence validation broken")
+	}
+}
+
+func TestStreamDirectoryCheckpointIgnoresStaleLayout(t *testing.T) {
+	checkpoint := StreamCheckpoint{CurrentLayoutID: 7, StateLayoutID: 6}
+	if checkpoint.Applies() {
+		t.Fatalf("stale checkpoint should be ignored")
+	}
+
+	checkpoint.StateLayoutID = 7
+	if !checkpoint.Applies() {
+		t.Fatalf("checkpoint with current layout should apply")
+	}
+}
+
+func TestStreamDirectoryCacheHitRateX1000(t *testing.T) {
+	cache := StreamDirectoryCache{}
+	cache.RecordHit()
+	cache.RecordHit()
+	cache.RecordMiss()
+
+	if got := cache.HitRateX1000(); got != 666 {
+		t.Fatalf("hit rate x1000 = %d, want 666", got)
+	}
+}
