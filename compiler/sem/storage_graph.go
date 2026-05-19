@@ -49,6 +49,7 @@ type StorageAppendCallNode struct {
 
 func (c *checker) recordStoragePathConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
 	c.recordCoreLinkEndpointConstructor(moduleName, expr, typ, scope)
+	c.recordProjectionFeedConstructor(moduleName, expr, typ, scope)
 	if typ == nil || typ.Kind != KindDriverPath || typ.Name != "NvmeIoPath" {
 		return
 	}
@@ -192,6 +193,114 @@ func (c *checker) checkStoragePathOwnership() {
 			c.error(writer.Span, diag.SEM0111, "background storage path cannot use foreground NVMe path")
 		}
 	}
+	c.checkProjectionFeeds()
+}
+
+func (c *checker) recordProjectionFeedConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
+	projection := projectionWorkerProjection(typ)
+	if projection == "" {
+		return
+	}
+	sourceArg := projectionWorkerSourceArg(expr, typ)
+	sourceType := c.exprStaticType(moduleName, sourceArg, scope)
+	if !isCommittedGroupConsumer(sourceType) {
+		c.error(expr.SpanV, diag.SEM0120, "projection worker feed is not boot wired")
+		return
+	}
+	sourceOrigin := c.originForExprValue(moduleName, sourceArg, sourceType, scope)
+	if sourceOrigin.Constructor == nil {
+		c.error(expr.SpanV, diag.SEM0120, "projection worker feed is not boot wired")
+		return
+	}
+	owner := c.storagePathOwnerLabel(moduleName, constructorArg(sourceOrigin.Constructor, "owner"), scope)
+	c.graph.ProjectionFeeds = append(c.graph.ProjectionFeeds, ProjectionFeedNode{
+		Projection:  projection,
+		SourceLabel: coreLinkEndpointLabel("consumer", owner),
+		Owner:       owner,
+		Span:        expr.SpanV,
+	})
+}
+
+func (c *checker) checkProjectionFeeds() {
+	for _, exec := range c.graph.Executors {
+		c.checkProjectionWorkerFeed(exec.Type, exec.Span)
+	}
+	for _, node := range c.graph.Constructed {
+		c.checkProjectionWorkerFeed(node.Type, node.Span)
+	}
+	for _, feed := range c.graph.ProjectionFeeds {
+		if feed.Owner != "maintenance" || !c.projectionFeedHasProducer(feed.Owner) {
+			c.error(feed.Span, diag.SEM0120, "projection worker feed is not boot wired")
+		}
+	}
+}
+
+func (c *checker) checkProjectionWorkerFeed(typ *Type, span source.Span) {
+	projection := projectionWorkerProjection(typ)
+	if projection == "" || c.hasProjectionFeed(projection) {
+		return
+	}
+	c.error(span, diag.SEM0120, "projection worker feed is not boot wired")
+}
+
+func (c *checker) hasProjectionFeed(projection string) bool {
+	for _, feed := range c.graph.ProjectionFeeds {
+		if feed.Projection == projection {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *checker) projectionFeedHasProducer(owner string) bool {
+	for _, endpoint := range c.graph.CoreLinkEndpoints {
+		if endpoint.Role == "producer" && endpoint.Peer == owner {
+			return true
+		}
+	}
+	return false
+}
+
+func projectionWorkerProjection(typ *Type) string {
+	if typ == nil || (typ.Kind != KindClass && typ.Kind != KindExecutor) {
+		return ""
+	}
+	for _, field := range typ.Fields {
+		if field.Type == nil || field.Type.Name != "ProjectionWriter" || len(field.Type.TypeArgs) != 1 {
+			continue
+		}
+		projection := field.Type.TypeArgs[0]
+		if projection != nil && projection.Kind == KindProjection {
+			return qualifiedTypeName(projection)
+		}
+	}
+	return ""
+}
+
+func projectionWorkerSourceArg(expr *ast.ConstructorExpr, typ *Type) ast.Expr {
+	if typ == nil {
+		return nil
+	}
+	for _, field := range typ.Fields {
+		if isCommittedGroupConsumer(field.Type) {
+			return constructorArg(expr, field.Name)
+		}
+	}
+	return nil
+}
+
+func isCommittedGroupConsumer(typ *Type) bool {
+	return typ != nil &&
+		qualifiedTypeName(typ) == "machine.x86_64.core_link.CoreSpscConsumer" &&
+		len(typ.TypeArgs) == 1 &&
+		qualifiedTypeName(typ.TypeArgs[0]) == "storage.writer.CommittedAtomicGroup"
+}
+
+func coreLinkEndpointLabel(role string, owner string) string {
+	if owner == "" {
+		return ""
+	}
+	return "core_link." + role + "." + owner
 }
 
 func (c *checker) checkStoragePathSubmitCall(moduleName string, expr *ast.CallExpr, receiverType *Type, scope *Scope) {
