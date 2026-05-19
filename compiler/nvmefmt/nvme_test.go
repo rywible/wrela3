@@ -50,15 +50,39 @@ func TestParseIdentifyNamespaceRejectsUnsupportedLBA(t *testing.T) {
 	}
 }
 
-func TestSelectDurability(t *testing.T) {
-	fua := SelectDurability(NamespaceFacts{SupportsFUA: true})
-	if fua.Mode != DurabilityFUA || !fua.UseFUA || fua.RequiresFlush {
-		t.Fatalf("SelectDurability(SupportsFUA) = %+v, want FUA without flush", fua)
+func TestSelectDurabilityModes(t *testing.T) {
+	tests := []struct {
+		name string
+		ns   NamespaceFacts
+		want DurabilityMode
+	}{
+		{
+			name: "FUA for supported 512 byte namespace",
+			ns:   NamespaceFacts{LogicalBlockSize: 512, SupportsFUA: true},
+			want: DurabilityMode{Mode: DurabilityFUA, UseFUA: true},
+		},
+		{
+			name: "write plus flush for 4096 byte namespace without FUA",
+			ns:   NamespaceFacts{LogicalBlockSize: 4096},
+			want: DurabilityMode{Mode: DurabilityWritePlusFlush, RequiresFlush: true},
+		},
 	}
 
-	writePlusFlush := SelectDurability(NamespaceFacts{})
-	if writePlusFlush.Mode != DurabilityWritePlusFlush || writePlusFlush.UseFUA || !writePlusFlush.RequiresFlush {
-		t.Fatalf("SelectDurability(no FUA) = %+v, want write-plus-flush", writePlusFlush)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := SelectDurability(tt.ns)
+			if err != nil {
+				t.Fatalf("SelectDurability() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("SelectDurability() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+
+	_, err := SelectDurability(NamespaceFacts{LogicalBlockSize: 1024, SupportsFUA: true})
+	if !errors.Is(err, ErrUnsupportedLBA) {
+		t.Fatalf("SelectDurability(unsupported LBA) error = %v, want %v", err, ErrUnsupportedLBA)
 	}
 }
 

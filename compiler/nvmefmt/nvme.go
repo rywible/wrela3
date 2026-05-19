@@ -36,12 +36,15 @@ type DurabilityMode struct {
 	UseFUA        bool
 }
 
-func SelectDurability(ns NamespaceFacts) DurabilityMode {
+func SelectDurability(ns NamespaceFacts) (DurabilityMode, error) {
+	if ns.LogicalBlockSize != 512 && ns.LogicalBlockSize != 4096 {
+		return DurabilityMode{}, ErrUnsupportedLBA
+	}
 	if ns.SupportsFUA {
-		return DurabilityMode{Mode: DurabilityFUA, UseFUA: true}
+		return DurabilityMode{Mode: DurabilityFUA, UseFUA: true}, nil
 	}
 
-	return DurabilityMode{Mode: DurabilityWritePlusFlush, RequiresFlush: true}
+	return DurabilityMode{Mode: DurabilityWritePlusFlush, RequiresFlush: true}, nil
 }
 
 func WriteCommandDword12(blockCount uint32, fua bool) uint32 {

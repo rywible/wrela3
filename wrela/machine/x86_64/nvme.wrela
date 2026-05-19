@@ -9,6 +9,13 @@ use { TopicPublisher } from machine.x86_64.topic
 const NVME_CLASS_MASS_STORAGE: U64 = 0x01
 const NVME_SUBCLASS_NVM: U64 = 0x08
 const NVME_PROGIF_EXPRESS: U64 = 0x02
+const NVME_LBA_SIZE_512: U64 = 512
+const NVME_LBA_SIZE_4096: U64 = 4096
+const NVME_NAMESPACE_CONVENTIONAL: U32 = 0
+const NVME_NAMESPACE_ZNS: U32 = 1
+const NVME_DURABILITY_FUA: U32 = 1
+const NVME_DURABILITY_PFAIL_ATOMIC_FUA: U32 = 2
+const NVME_DURABILITY_WRITE_PLUS_FLUSH: U32 = 3
 
 data NvmeNamespace {
     namespace_id: U32
@@ -20,6 +27,28 @@ data NvmeNamespace {
     atomic_write_unit_blocks: U32
     power_fail_atomic_write_unit_blocks: U32
     volatile_write_cache: Bool
+}
+
+data NvmeDurabilityMode {
+    mode: U32
+    requires_flush: Bool
+    use_fua: Bool
+}
+
+data NvmeDurabilitySelector {
+    panic: BootPanic
+
+    fn choose(self, namespace: NvmeNamespace, target_batch_blocks: U32) -> NvmeDurabilityMode {
+        if namespace.logical_block_size != 512 {
+            if namespace.logical_block_size != 4096 {
+                self.panic.fail(code = 0xAC080122)
+            }
+        }
+        if namespace.supports_fua {
+            return NvmeDurabilityMode(mode = NVME_DURABILITY_FUA, requires_flush = false, use_fua = true)
+        }
+        return NvmeDurabilityMode(mode = NVME_DURABILITY_WRITE_PLUS_FLUSH, requires_flush = true, use_fua = false)
+    }
 }
 
 data NvmeSubmission {
