@@ -380,6 +380,9 @@ func BuildIndex(modules []*ast.Module) (*Index, []diag.Diagnostic) {
 				typ.TypeParams = toTypeParams(d.TypeParams)
 				typ.EnumVariants, localDiags = buildEnumVariants(idx, mod.Name, d.Variants, params)
 				diagOut = append(diagOut, localDiags...)
+			case *ast.EventDecl:
+				typ.Fields, localDiags = buildFields(idx, mod.Name, d.Fields, nil)
+				diagOut = append(diagOut, localDiags...)
 			case *ast.TraitDecl:
 				params, localDiags = buildTypeParamMap(d.TypeParams)
 				diagOut = append(diagOut, localDiags...)

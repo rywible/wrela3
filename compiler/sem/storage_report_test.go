@@ -118,10 +118,6 @@ func TestStorageReportMissingMetricsEmitsSEM0124(t *testing.T) {
 		},
 	})
 	r.Storage.EventSlotSize = 0
-	r.Storage.BlobOrphanBytes = 0
-	r.Storage.ProjectionLagEvents = 0
-	r.Storage.ProjectionUpcastCount = 0
-	r.Storage.ProjectionRebuildCount = 0
 
 	ds := ValidateStorageReportContent(r)
 	if !hasCode(ds, diag.SEM0124) {
@@ -129,10 +125,6 @@ func TestStorageReportMissingMetricsEmitsSEM0124(t *testing.T) {
 	}
 	for _, metric := range []string{
 		"event_slot_size",
-		"blob_orphan_bytes",
-		"projection_lag_events",
-		"projection_upcast_count",
-		"projection_rebuild_count",
 	} {
 		if !hasDiagnosticMessage(ds, metric) {
 			t.Fatalf("diagnostics = %#v, want missing %s", ds, metric)

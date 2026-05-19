@@ -1,6 +1,6 @@
 module storage.writer
 
-use { StorageMetrics } from storage.format
+use { STORAGE_MAX_ATOMIC_GROUP_SLOTS, STORAGE_TARGET_BATCH_SLOTS, STORAGE_MAX_BATCH_SLOTS, StorageMetrics } from storage.format
 use { ForegroundStoragePath, BackgroundStoragePath } from machine.x86_64.nvme
 use { StreamDirectory } from storage.stream
 use { BlobTruth, RelocateBlobProposal } from storage.blob
@@ -71,13 +71,29 @@ data StorageWriter {
     open_batch_slots: U64
 
     fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult {
-        if group.semantic_event_count > 32 {
+        if group.semantic_event_count == 0 {
+            return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
+        }
+        if group.semantic_event_count > STORAGE_MAX_ATOMIC_GROUP_SLOTS {
             return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
         }
         let first = self.next_event_id
         let last = self.next_event_id + group.semantic_event_count - 1
-        let open = self.open_batch_slots + group.semantic_event_count
-        let flush = open >= 64
+        let combined = self.open_batch_slots + group.semantic_event_count
+        let open = combined
+        let flush = false
+        if combined <= STORAGE_TARGET_BATCH_SLOTS {
+            flush = false
+        } else {
+            if combined <= STORAGE_MAX_BATCH_SLOTS {
+                flush = true
+            } else {
+                open = group.semantic_event_count
+                flush = true
+            }
+        }
+        self.next_event_id = last + 1
+        self.open_batch_slots = open
         return StorageAppendResult(accepted = true, first_event_id = first, last_event_id = last, open_batch_slots = open, flush_requested = flush, reject_code = 0)
     }
 

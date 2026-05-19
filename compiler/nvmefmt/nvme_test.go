@@ -7,7 +7,7 @@ import (
 
 func identifyNamespaceWithFormat(format byte, lbads byte) []byte {
 	data := make([]byte, 128+16*4)
-	data[24] = format
+	data[26] = format
 	data[128+int(format)*4+2] = lbads
 	return data
 }
@@ -47,6 +47,21 @@ func TestParseIdentifyNamespaceRejectsUnsupportedLBA(t *testing.T) {
 	_, err := ParseIdentifyNamespace(identifyNamespaceWithFormat(0, 10))
 	if !errors.Is(err, ErrUnsupportedLBA) {
 		t.Fatalf("ParseIdentifyNamespace() error = %v, want %v", err, ErrUnsupportedLBA)
+	}
+}
+
+func TestParseIdentifyControllerDurabilityFacts(t *testing.T) {
+	data := make([]byte, 4096)
+	data[256] = 1
+	data[512] = 7
+	data[514] = 3
+
+	got := ParseIdentifyController(data)
+	if !got.SupportsFUA || !got.VolatileWriteCache {
+		t.Fatalf("controller facts = %+v, want FUA and volatile write cache", got)
+	}
+	if got.AtomicWriteUnitBlocks != 8 || got.PowerFailAtomicWriteUnitBlocks != 4 {
+		t.Fatalf("controller atomic facts = %+v, want AWUN=8 AWUPF=4", got)
 	}
 }
 
@@ -190,6 +205,26 @@ func TestCommandRejectsTransferPastPRPLimit(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if cmd, err := build(); !errors.Is(err, ErrTransferTooLarge) {
 				t.Fatalf("build command = %#v, error = %v, want %v", cmd, err, ErrTransferTooLarge)
+			}
+		})
+	}
+}
+
+func TestCommandRejectsZeroBlockCount(t *testing.T) {
+	for name, build := range map[string]func() (Command, error){
+		"read": func() (Command, error) {
+			return BuildReadCommand(1, 0, 0, 0x200000, 512)
+		},
+		"write": func() (Command, error) {
+			return BuildWriteCommand(1, 0, 0, 0x200000, 512, false)
+		},
+		"zone append": func() (Command, error) {
+			return BuildZoneAppendCommand(1, 0, 0, 0x200000, 512, false)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if cmd, err := build(); !errors.Is(err, ErrInvalidBlockCount) {
+				t.Fatalf("build command = %#v, error = %v, want %v", cmd, err, ErrInvalidBlockCount)
 			}
 		})
 	}

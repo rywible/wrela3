@@ -124,7 +124,7 @@ func (c *checker) checkBlobCipherPolicy(moduleName string, expr *ast.Constructor
 		return
 	}
 	mode, ok := c.constValueOfExpr(moduleName, constructorArg(expr, "mode"))
-	if !ok || mode != 1 {
+	if ok && mode != 1 {
 		return
 	}
 	optIn, ok := constructorArg(expr, "development_opt_in").(*ast.BoolLiteral)
@@ -152,11 +152,11 @@ func (c *checker) checkProjectionAdvanceCall(moduleName string, expr *ast.CallEx
 	}
 }
 
-func (c *checker) checkBlobTruthMutation(expr *ast.CallExpr, receiverType *Type) {
-	if c.currentType == nil || c.currentType.Name != "MaintenanceWorker" {
+func (c *checker) checkBlobTruthMutation(moduleName string, expr *ast.CallExpr, receiverType *Type) {
+	if qualifiedTypeName(receiverType) != "storage.blob.BlobTruth" || expr.Method != "accept_relocate" {
 		return
 	}
-	if qualifiedTypeName(receiverType) != "storage.blob.BlobTruth" || expr.Method != "accept_relocate" {
+	if moduleName == "storage.blob" || moduleName == "storage.writer" {
 		return
 	}
 	c.error(expr.SpanV, diag.SEM0118, "maintenance proposal mutates truth directly")
@@ -300,7 +300,8 @@ func (c *checker) checkEventLayouts(moduleName string, decl *ast.EventDecl) ([]E
 			currentCount++
 			currentLayoutID = id
 		}
-		payloadSize, payloadAlign, fields, fieldNames := c.eventLayoutPayload(moduleName, layout, eventFieldTypes)
+		eventType := c.index.resolveInScope(moduleName, decl.Name)
+		payloadSize, payloadAlign, fields, fieldNames := c.eventLayoutPayload(moduleName, layout, eventFieldTypes, eventType)
 		layoutFields[id] = fieldNames
 		layouts = append(layouts, EventLayoutInfo{
 			ID:           id,
@@ -336,17 +337,23 @@ func (c *checker) eventFieldTypes(moduleName string, fields []ast.Field) map[str
 	return types
 }
 
-func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl, eventFieldTypes map[string]*Type) (uint64, uint64, []EventPayloadFieldInfo, map[string]bool) {
+func (c *checker) eventLayoutPayload(moduleName string, layout ast.EventLayoutDecl, eventFieldTypes map[string]*Type, eventType *Type) (uint64, uint64, []EventPayloadFieldInfo, map[string]bool) {
 	fieldNames := map[string]bool{}
 	fields := make([]EventPayloadFieldInfo, 0, len(layout.Fields))
 	var payloadSize uint64
 	var payloadAlign uint64 = 1
+	encodeScope := NewScope(nil)
+	encodeScope.Define("self", eventType)
 	for _, field := range layout.Fields {
 		fieldNames[field.Name] = true
 		typ, ds := c.index.LookupTypeRef(moduleName, field.Type, nil)
 		if len(ds) != 0 || typ == nil {
 			c.error(field.Span, diag.SEM0103, "invalid event layout field "+field.Name)
 			continue
+		}
+		if field.Encode != nil {
+			encodeType := c.typeExprExpected(moduleName, field.Encode, encodeScope, ContextNormalMethod, typ)
+			c.checkTypeAssign(field.Encode.Span(), typ, encodeType)
 		}
 		if isUnpublishedBlobRefType(typ) || eventEncodeReferencesUnpublishedBlob(field.Encode, eventFieldTypes) {
 			c.error(field.Span, diag.SEM0117, "event payload cannot reference unpublished blob bytes")

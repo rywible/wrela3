@@ -177,6 +177,17 @@ func TestChooseSuperblockIgnoresInvalidChecksum(t *testing.T) {
 	}
 }
 
+func TestChooseSuperblockRejectsBothInvalidChecksums(t *testing.T) {
+	a := validSuperblockForTest(1)
+	b := validSuperblockForTest(3)
+	a.Checksum32++
+	b.Checksum32++
+
+	if _, err := ChooseSuperblock(a, b); err != ErrNoValidSuperblock {
+		t.Fatalf("ChooseSuperblock() error = %v, want %v", err, ErrNoValidSuperblock)
+	}
+}
+
 func TestRegionOverlap(t *testing.T) {
 	err := ValidateRegions([]Region{
 		{Name: "a", Offset: 0, Size: 10},
@@ -221,6 +232,20 @@ func TestRecoveryStopsBeforeIncompleteAtomicGroup(t *testing.T) {
 	}
 	if got.VisibleEvents != 0 || got.NextEventID != 0 {
 		t.Fatalf("recovery = %#v, want no visible events", got)
+	}
+}
+
+func TestRecoveryRejectsZeroLengthAtomicGroup(t *testing.T) {
+	slot := ValidSlotForTest(0)
+	slot.Header.AtomicGroupLen = 0
+	RefreshSlotChecksum(&slot)
+
+	got := RecoverSlots([]Slot{slot})
+	if got.StopReason != StopIncompleteAtomicGroup {
+		t.Fatalf("stop reason = %v, want incomplete atomic group", got.StopReason)
+	}
+	if got.VisibleEvents != 0 || got.NextEventID != 0 {
+		t.Fatalf("recovery = %#v, want stop before zero-length group", got)
 	}
 }
 
@@ -412,6 +437,17 @@ func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	}
 }
 
+func TestStorageWriterRejectsZeroAtomicGroup(t *testing.T) {
+	writer := WriterPolicy{NextEventID: 7, OpenBatchSlots: 3}
+	got := writer.EnqueueAtomicGroup(0)
+	if got.Accepted || got.RejectCode != "SEM0114" {
+		t.Fatalf("enqueue = %#v, want SEM0114 rejection", got)
+	}
+	if writer.NextEventID != 7 || writer.OpenBatchSlots != 3 {
+		t.Fatalf("writer state mutated on rejection: %#v", writer)
+	}
+}
+
 func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
 	writer := WriterPolicy{OpenBatchSlots: 63}
 	got := writer.EnqueueAtomicGroup(2)
@@ -420,14 +456,47 @@ func TestStorageWriterBatchOverflowDoesNotSplitGroup(t *testing.T) {
 	}
 }
 
+func TestStorageWriterStartsNewBatchAfterMaxOverflow(t *testing.T) {
+	writer := WriterPolicy{NextEventID: 10, OpenBatchSlots: 70}
+	got := writer.EnqueueAtomicGroup(3)
+	if !got.Accepted || got.FirstEventID != 10 || got.LastEventID != 12 {
+		t.Fatalf("enqueue ids = %#v, want 10..12", got)
+	}
+	if got.OpenBatchSlots != 3 || !got.FlushRequested {
+		t.Fatalf("enqueue batch state = %#v, want new open batch with flush signal", got)
+	}
+	if writer.NextEventID != 13 || writer.OpenBatchSlots != 3 {
+		t.Fatalf("writer state = %#v, want next_event_id=13 open_batch_slots=3", writer)
+	}
+}
+
 func TestStorageWriterFirstAtomicGroupStartsAtZero(t *testing.T) {
-	got := WriterPolicy{}.EnqueueAtomicGroup(2)
+	writer := WriterPolicy{}
+	got := writer.EnqueueAtomicGroup(2)
 	if !got.Accepted || got.FirstEventID != 0 || got.LastEventID != 1 {
 		t.Fatalf("enqueue = %#v, want event ids 0..1", got)
 	}
 	first, last := AssignEventIDs(9, 3)
 	if first != 9 || last != 11 {
 		t.Fatalf("AssignEventIDs = %d, %d; want 9, 11", first, last)
+	}
+}
+
+func TestStorageWriterAdvancesEventIDsAcrossAppends(t *testing.T) {
+	writer := WriterPolicy{}
+	first := writer.EnqueueAtomicGroup(2)
+	second := writer.EnqueueAtomicGroup(3)
+	if !first.Accepted || !second.Accepted {
+		t.Fatalf("appends rejected: first=%#v second=%#v", first, second)
+	}
+	if first.FirstEventID != 0 || first.LastEventID != 1 {
+		t.Fatalf("first append = %#v, want event ids 0..1", first)
+	}
+	if second.FirstEventID != 2 || second.LastEventID != 4 {
+		t.Fatalf("second append = %#v, want event ids 2..4", second)
+	}
+	if writer.NextEventID != 5 || writer.OpenBatchSlots != 5 {
+		t.Fatalf("writer state = %#v, want next_event_id=5 open_batch_slots=5", writer)
 	}
 }
 

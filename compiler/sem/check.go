@@ -1178,6 +1178,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			c.recordReliableTryPublishCall(moduleName, s.Expr, scope, true)
 			c.recordSubscriptionMethodCall(moduleName, s.Expr, scope)
 		}
+		c.recordStorageAppendCall(moduleName, s.Expr, scope, true)
 		valueLifetime := c.lifetimeOfExpr(s.Expr, scope)
 		scope.Define(s.Name, valueType)
 		origin := c.originForLetValue(moduleName, s.Expr, valueType, scope)
@@ -4119,7 +4120,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	c.recordPlacementGraphCall(moduleName, expr, recvType, scope)
 	c.checkStoragePathSubmitCall(moduleName, expr, recvType, scope)
 	c.checkProjectionAdvanceCall(moduleName, expr, recvType, scope)
-	c.checkBlobTruthMutation(expr, recvType)
+	c.checkBlobTruthMutation(moduleName, expr, recvType)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}

@@ -10,10 +10,12 @@ type NamespaceFacts struct {
 	SupportsFUA                    bool
 	VolatileWriteCache             bool
 	PowerFailAtomicWriteUnitBlocks uint32
+	AtomicWriteUnitBlocks          uint32
 }
 
 var ErrUnsupportedLBA = errors.New("unsupported nvme lba size")
 var ErrTransferTooLarge = errors.New("nvme transfer exceeds max prp bytes")
+var ErrInvalidBlockCount = errors.New("nvme transfer block count must be nonzero")
 
 const (
 	NVME_OPCODE_FLUSH       uint64 = 0x00
@@ -25,11 +27,27 @@ const (
 )
 
 func PlannedControllerInitOps() []string {
-	return []string{"read CAP", "write CC.EN=0", "wait RDY=0", "write AQA", "write ASQ", "write ACQ", "write CC.EN=1", "wait RDY=1", "identify controller", "identify namespace"}
+	return []string{
+		"read CAP",
+		"write CC.EN=0",
+		"wait RDY=0",
+		"write AQA",
+		"write ASQ",
+		"write ACQ",
+		"write CC.EN=1",
+		"wait RDY=1",
+		"identify controller",
+		"identify namespace",
+		"create foreground IO CQ",
+		"create foreground IO SQ",
+		"create background IO CQ",
+		"create background IO SQ",
+		"route MSI-X or MSI",
+	}
 }
 
 func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
-	format := int(data[24] & 0x0f)
+	format := int(data[26] & 0x0f)
 	lbads := data[128+format*4+2]
 	logicalBlockSize := uint64(1) << lbads
 	if logicalBlockSize != 512 && logicalBlockSize != 4096 {
@@ -37,6 +55,22 @@ func ParseIdentifyNamespace(data []byte) (NamespaceFacts, error) {
 	}
 
 	return NamespaceFacts{LogicalBlockSize: logicalBlockSize}, nil
+}
+
+func ParseIdentifyController(data []byte) NamespaceFacts {
+	facts := NamespaceFacts{
+		SupportsFUA:                    true,
+		VolatileWriteCache:             len(data) > 256 && data[256]&1 != 0,
+		AtomicWriteUnitBlocks:          1,
+		PowerFailAtomicWriteUnitBlocks: 1,
+	}
+	if len(data) >= 514 {
+		facts.AtomicWriteUnitBlocks = uint32(binary.LittleEndian.Uint16(data[512:514])) + 1
+	}
+	if len(data) >= 516 {
+		facts.PowerFailAtomicWriteUnitBlocks = uint32(binary.LittleEndian.Uint16(data[514:516])) + 1
+	}
+	return facts
 }
 
 const (
@@ -138,6 +172,9 @@ func BuildZoneAppendCommand(namespaceID uint32, startLBA uint64, blockCount uint
 }
 
 func buildDataCommand(opcode uint64, namespaceID uint32, startLBA uint64, blockCount uint32, prp1 uint64, logicalBlockSize uint64, fua bool) (Command, error) {
+	if blockCount == 0 {
+		return Command{}, ErrInvalidBlockCount
+	}
 	if uint64(blockCount) > MaxPRPTransferBytes/logicalBlockSize {
 		return Command{}, ErrTransferTooLarge
 	}

@@ -30,7 +30,8 @@ const NVME_CC_ENABLE: U32 = 0x00000001
 const NVME_CC_ADMIN_FORMAT: U32 = 0x00460000
 const NVME_CSTS_READY: U32 = 0x00000001
 const NVME_ADMIN_QUEUE_DEPTH: U32 = 32
-const NVME_IO_QUEUE_DEPTH: U32 = 16
+const NVME_FOREGROUND_IO_QUEUE_DEPTH: U32 = 256
+const NVME_BACKGROUND_IO_QUEUE_DEPTH: U32 = 128
 const NVME_ADMIN_QUEUE_ADDRESS: U32 = 0
 const NVME_RESET_TIMEOUT_POLLS: U32 = 100000
 const NVME_READY_TIMEOUT_POLLS: U32 = 100000
@@ -68,6 +69,13 @@ data NvmeNamespace {
     volatile_write_cache: Bool
 }
 
+data NvmeControllerFacts {
+    supports_fua: Bool
+    atomic_write_unit_blocks: U32
+    power_fail_atomic_write_unit_blocks: U32
+    volatile_write_cache: Bool
+}
+
 data NvmeDurabilityMode {
     mode: U32
     requires_flush: Bool
@@ -97,8 +105,10 @@ data NvmeSubmission {
 data NvmeQueueMemory {
     admin_sq: BoundedBytes
     admin_cq: BoundedBytes
-    io_sq: BoundedBytes
-    io_cq: BoundedBytes
+    foreground_io_sq: BoundedBytes
+    foreground_io_cq: BoundedBytes
+    background_io_sq: BoundedBytes
+    background_io_cq: BoundedBytes
     data_buffer: BoundedBytes
 }
 
@@ -111,9 +121,11 @@ data NvmeQueueMemoryBuilder {
             // QEMU/OVMF may leave admin completion queue DMA state at handoff; keep
             // extra owned backing while completion polling resynchronizes by command id.
             admin_cq = BoundedBytes(address = base + 4096, length = 65536, panic = self.panic),
-            io_sq = BoundedBytes(address = base + 69632, length = 4096, panic = self.panic),
-            io_cq = BoundedBytes(address = base + 73728, length = 4096, panic = self.panic),
-            data_buffer = BoundedBytes(address = base + 77824, length = 4096, panic = self.panic)
+            foreground_io_sq = BoundedBytes(address = base + 69632, length = 16384, panic = self.panic),
+            foreground_io_cq = BoundedBytes(address = base + 86016, length = 4096, panic = self.panic),
+            background_io_sq = BoundedBytes(address = base + 90112, length = 8192, panic = self.panic),
+            background_io_cq = BoundedBytes(address = base + 98304, length = 2048, panic = self.panic),
+            data_buffer = BoundedBytes(address = base + 102400, length = 4096, panic = self.panic)
         )
     }
 }
@@ -158,21 +170,15 @@ data NvmeCompletionQueue {
             if draining == true {
                 let cqe_offset = self.u32_to_u64(value = self.head) * 16
                 let dword3 = self.entries.read_u32(offset = cqe_offset + 12)
-                if dword3 == 0 {
+                let entry_phase = ((dword3 >> 16) & 1) != 0
+                if entry_phase != self.expected_phase {
                     draining = false
                     scanned = self.depth
                 }
                 if draining == true {
-                    let entry_phase = ((dword3 >> 16) & 1) != 0
-                    if entry_phase != self.expected_phase {
-                        draining = false
-                        scanned = self.depth
-                    }
-                    if draining == true {
-                        self.advance(count = 1)
-                        completed = completed + 1
-                        scanned = scanned + 1
-                    }
+                    self.advance(count = 1)
+                    completed = completed + 1
+                    scanned = scanned + 1
                 }
             }
         }
@@ -221,15 +227,19 @@ class NvmeDirectStorage {
     fn initialize(self) -> NvmeDirectStorage {
         self.queues.admin_sq.zero()
         self.queues.admin_cq.zero()
-        self.queues.io_sq.zero()
-        self.queues.io_cq.zero()
+        self.queues.foreground_io_sq.zero()
+        self.queues.foreground_io_cq.zero()
+        self.queues.background_io_sq.zero()
+        self.queues.background_io_cq.zero()
         self.queues.data_buffer.zero()
         self.disable_controller()
         self.program_admin_queues()
         self.enable_controller()
         self.namespace = self.identify_namespace(namespace_id = 1)
-        self.create_io_completion_queue(queue_id = 1)
-        self.create_io_submission_queue(queue_id = 1, completion_queue_id = 1)
+        self.create_io_completion_queue(queue_id = 1, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH, queue = self.queues.foreground_io_cq)
+        self.create_io_submission_queue(queue_id = 1, completion_queue_id = 1, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH, queue = self.queues.foreground_io_sq)
+        self.create_io_completion_queue(queue_id = 2, depth = NVME_BACKGROUND_IO_QUEUE_DEPTH, queue = self.queues.background_io_cq)
+        self.create_io_submission_queue(queue_id = 2, completion_queue_id = 2, depth = NVME_BACKGROUND_IO_QUEUE_DEPTH, queue = self.queues.background_io_sq)
         return self
     }
 
@@ -294,7 +304,29 @@ class NvmeDirectStorage {
         self.panic.fail(code = 0xAC080035)
     }
 
+    fn identify_controller(self) -> NvmeControllerFacts {
+        self.queues.data_buffer.zero()
+        let identify = self.submit_admin_command(
+            opcode = NVME_ADMIN_OPCODE_IDENTIFY,
+            namespace_id = 0,
+            prp1 = self.queues.data_buffer.address,
+            cdw10 = 1,
+            cdw11 = 0
+        )
+        self.poll_admin_completion(command_id = identify.command_id)
+        let vwc = (self.queues.data_buffer.read_u8(offset = 256) & 1) != 0
+        let awun = self.u16_to_u32(value = self.queues.data_buffer.read_u16(offset = 512)) + 1
+        let awupf = self.u16_to_u32(value = self.queues.data_buffer.read_u16(offset = 514)) + 1
+        return NvmeControllerFacts(
+            supports_fua = true,
+            atomic_write_unit_blocks = awun,
+            power_fail_atomic_write_unit_blocks = awupf,
+            volatile_write_cache = vwc
+        )
+    }
+
     fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {
+        let controller = self.identify_controller()
         self.queues.data_buffer.zero()
         let identify = self.submit_admin_command(
             opcode = NVME_ADMIN_OPCODE_IDENTIFY,
@@ -306,12 +338,6 @@ class NvmeDirectStorage {
         self.poll_admin_completion(command_id = identify.command_id)
         let format = self.queues.data_buffer.read_u8(offset = 26) & 0x0F
         let lbads = self.queues.data_buffer.read_u8(offset = 130 + (self.u8_to_u64(value = format) * 4))
-        if lbads != 9 {
-            if lbads != 12 {
-                format = self.queues.data_buffer.read_u8(offset = 24) & 0x0F
-                lbads = self.queues.data_buffer.read_u8(offset = 130 + (self.u8_to_u64(value = format) * 4))
-            }
-        }
         let logical_block_size = 0
         if lbads == 9 {
             logical_block_size = NVME_LBA_SIZE_512
@@ -322,22 +348,32 @@ class NvmeDirectStorage {
         if logical_block_size == 0 {
             self.panic.fail(code = 0xAC080122)
         }
-        return NvmeNamespace(namespace_id = namespace_id, logical_block_size = logical_block_size, block_count = self.queues.data_buffer.read_u64(offset = 0), zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 1, power_fail_atomic_write_unit_blocks = 1, volatile_write_cache = true)
+        return NvmeNamespace(
+            namespace_id = namespace_id,
+            logical_block_size = logical_block_size,
+            block_count = self.queues.data_buffer.read_u64(offset = 0),
+            zone_size_blocks = 0,
+            supports_zns = false,
+            supports_fua = controller.supports_fua,
+            atomic_write_unit_blocks = controller.atomic_write_unit_blocks,
+            power_fail_atomic_write_unit_blocks = controller.power_fail_atomic_write_unit_blocks,
+            volatile_write_cache = controller.volatile_write_cache
+        )
     }
 
-    fn create_io_completion_queue(self, queue_id: U32) {
-        self.queues.io_cq.zero()
-        let cdw10 = queue_id | ((NVME_IO_QUEUE_DEPTH - 1) * 65536)
+    fn create_io_completion_queue(self, queue_id: U32, depth: U32, queue: BoundedBytes) {
+        queue.zero()
+        let cdw10 = queue_id | ((depth - 1) * 65536)
         let cdw11 = 1
-        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_CQ, namespace_id = 0, prp1 = self.queues.io_cq.address, cdw10 = cdw10, cdw11 = cdw11)
+        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_CQ, namespace_id = 0, prp1 = queue.address, cdw10 = cdw10, cdw11 = cdw11)
         self.poll_admin_completion(command_id = create.command_id)
     }
 
-    fn create_io_submission_queue(self, queue_id: U32, completion_queue_id: U32) {
-        self.queues.io_sq.zero()
-        let cdw10 = queue_id | ((NVME_IO_QUEUE_DEPTH - 1) * 65536)
+    fn create_io_submission_queue(self, queue_id: U32, completion_queue_id: U32, depth: U32, queue: BoundedBytes) {
+        queue.zero()
+        let cdw10 = queue_id | ((depth - 1) * 65536)
         let cdw11 = (completion_queue_id * 65536) | 1
-        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_SQ, namespace_id = 0, prp1 = self.queues.io_sq.address, cdw10 = cdw10, cdw11 = cdw11)
+        let create = self.submit_admin_command(opcode = NVME_ADMIN_OPCODE_CREATE_IO_SQ, namespace_id = 0, prp1 = queue.address, cdw10 = cdw10, cdw11 = cdw11)
         self.poll_admin_completion(command_id = create.command_id)
     }
 
@@ -350,6 +386,9 @@ class NvmeDirectStorage {
         }
         if self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, event_type_id = 1003, atomic_group_index = 1) == false {
             self.panic.fail(code = 0xAC08014E)
+        }
+        if self.validate_first_append_reserved_empty_padding() == false {
+            self.panic.fail(code = 0xAC08014F)
         }
         return NvmeReplayState(recovered = true, last_event_id = 1, projection_watermark = 1, orphan_collected = true)
     }
@@ -369,12 +408,23 @@ class NvmeDirectStorage {
         if self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, event_type_id = 1003, atomic_group_index = 1) == false {
             self.panic.fail(code = 0xAC08014B)
         }
+        if self.validate_first_append_reserved_empty_padding() == false {
+            self.panic.fail(code = 0xAC08014C)
+        }
     }
 
     fn prepare_first_append_events(self) {
         self.queues.data_buffer.zero()
         self.write_first_append_slot(slot_offset = 0, event_id = 0, stream_sequence = 1, event_type_id = 1001, atomic_group_index = 0)
         self.write_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE, event_id = 1, stream_sequence = 2, event_type_id = 1003, atomic_group_index = 1)
+        if self.namespace.logical_block_size == NVME_LBA_SIZE_4096 {
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 2, event_id = 2)
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 3, event_id = 3)
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 4, event_id = 4)
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 5, event_id = 5)
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 6, event_id = 6)
+            self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 7, event_id = 7)
+        }
     }
 
     fn write_first_append_slot(self, slot_offset: U64, event_id: U64, stream_sequence: U64, event_type_id: U32, atomic_group_index: U32) {
@@ -387,6 +437,24 @@ class NvmeDirectStorage {
         self.queues.data_buffer.write_u32(offset = slot_offset + 36, value = atomic_group_index)
         self.queues.data_buffer.write_u32(offset = slot_offset + 40, value = 0)
         self.queues.data_buffer.write_u32(offset = slot_offset + 44, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = 0)
+        self.queues.data_buffer.write_u16(offset = slot_offset + 52, value = 1)
+        self.queues.data_buffer.write_u16(offset = slot_offset + 54, value = 0)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 56, value = 0)
+        let checksum = self.crc32c(bytes = self.queues.data_buffer.slice(offset = slot_offset, length = WRELA_STORAGE_EVENT_SLOT_SIZE))
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = checksum)
+    }
+
+    fn write_reserved_empty_slot(self, slot_offset: U64, event_id: U64) {
+        self.queues.data_buffer.write_u64(offset = slot_offset + 0, value = event_id)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 8, value = 0)
+        self.queues.data_buffer.write_u64(offset = slot_offset + 16, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 24, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 28, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 32, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 36, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 40, value = 0)
+        self.queues.data_buffer.write_u32(offset = slot_offset + 44, value = 1)
         self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = 0)
         self.queues.data_buffer.write_u16(offset = slot_offset + 52, value = 1)
         self.queues.data_buffer.write_u16(offset = slot_offset + 54, value = 0)
@@ -430,12 +498,97 @@ class NvmeDirectStorage {
         self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = stored_checksum)
         if stored_checksum != expected_checksum {
             self.panic.fail(code = 0xAC080177)
+            return false
+        }
+        return true
+    }
+
+    fn validate_first_append_reserved_empty_padding(self) -> Bool {
+        if self.namespace.logical_block_size != NVME_LBA_SIZE_4096 {
+            return true
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 2, event_id = 2) == false {
+            return false
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 3, event_id = 3) == false {
+            return false
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 4, event_id = 4) == false {
+            return false
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 5, event_id = 5) == false {
+            return false
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 6, event_id = 6) == false {
+            return false
+        }
+        if self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 7, event_id = 7) == false {
+            return false
+        }
+        return true
+    }
+
+    fn validate_reserved_empty_slot(self, slot_offset: U64, event_id: U64) -> Bool {
+        if self.queues.data_buffer.read_u64(offset = slot_offset + 0) != event_id {
+            self.panic.fail(code = 0xAC080178)
+            return false
+        }
+        if self.queues.data_buffer.read_u64(offset = slot_offset + 8) != 0 {
+            self.panic.fail(code = 0xAC080179)
+            return false
+        }
+        if self.queues.data_buffer.read_u64(offset = slot_offset + 16) != 0 {
+            self.panic.fail(code = 0xAC08017A)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 24) != 0 {
+            self.panic.fail(code = 0xAC08017B)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 28) != 0 {
+            self.panic.fail(code = 0xAC08017C)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 32) != 0 {
+            self.panic.fail(code = 0xAC08017D)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 36) != 0 {
+            self.panic.fail(code = 0xAC08017E)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 40) != 0 {
+            self.panic.fail(code = 0xAC08017F)
+            return false
+        }
+        if self.queues.data_buffer.read_u32(offset = slot_offset + 44) != 1 {
+            self.panic.fail(code = 0xAC080180)
+            return false
+        }
+        let stored_checksum = self.queues.data_buffer.read_u32(offset = slot_offset + 48)
+        if stored_checksum == 0 {
+            self.panic.fail(code = 0xAC080181)
+            return false
+        }
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = 0)
+        let expected_checksum = self.crc32c(bytes = self.queues.data_buffer.slice(offset = slot_offset, length = WRELA_STORAGE_EVENT_SLOT_SIZE))
+        self.queues.data_buffer.write_u32(offset = slot_offset + 48, value = stored_checksum)
+        if stored_checksum != expected_checksum {
+            self.panic.fail(code = 0xAC080182)
+            return false
         }
         return true
     }
 
     fn hot_event_start_lba(self) -> U64 {
         return WRELA_STORAGE_HOT_EVENT_REGION_OFFSET / self.namespace.logical_block_size
+    }
+
+    fn first_append_reserved_empty_slots(self) -> U64 {
+        if self.namespace.logical_block_size == NVME_LBA_SIZE_4096 {
+            return 6
+        }
+        return 0
     }
 
     fn first_append_block_count(self) -> U32 {
@@ -485,9 +638,12 @@ class NvmeDirectStorage {
     }
 
     fn submit_io_read_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
+        if block_count == 0 {
+            self.panic.fail(code = 0xAC080183)
+        }
         let command_id = self.allocate_command_id()
         let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
-        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        let sqe = self.queues.foreground_io_sq.slice(offset = sq_offset, length = 64)
         sqe.zero()
         sqe.write_u8(offset = 0, value = NVME_OPCODE_READ_U8)
         sqe.write_u16(offset = 2, value = command_id)
@@ -496,7 +652,7 @@ class NvmeDirectStorage {
         sqe.write_u32(offset = 40, value = self.low32(value = start_lba))
         sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
         sqe.write_u32(offset = 48, value = block_count - 1)
-        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH)
         self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
         return NvmeSubmission(command_id = command_id)
     }
@@ -506,9 +662,12 @@ class NvmeDirectStorage {
     }
 
     fn submit_io_write_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        if block_count == 0 {
+            self.panic.fail(code = 0xAC080184)
+        }
         let command_id = self.allocate_command_id()
         let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
-        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        let sqe = self.queues.foreground_io_sq.slice(offset = sq_offset, length = 64)
         let cdw12 = block_count - 1
         if fua {
             cdw12 = cdw12 | 0x40000000
@@ -521,7 +680,7 @@ class NvmeDirectStorage {
         sqe.write_u32(offset = 40, value = self.low32(value = start_lba))
         sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
         sqe.write_u32(offset = 48, value = cdw12)
-        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH)
         self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
         return NvmeSubmission(command_id = command_id)
     }
@@ -529,12 +688,12 @@ class NvmeDirectStorage {
     fn submit_io_flush(self, namespace_id: U32) -> NvmeSubmission {
         let command_id = self.allocate_command_id()
         let sq_offset = self.u32_to_u64(value = self.io_tail) * 64
-        let sqe = self.queues.io_sq.slice(offset = sq_offset, length = 64)
+        let sqe = self.queues.foreground_io_sq.slice(offset = sq_offset, length = 64)
         sqe.zero()
         sqe.write_u8(offset = 0, value = NVME_OPCODE_FLUSH_U8)
         sqe.write_u16(offset = 2, value = command_id)
         sqe.write_u32(offset = 4, value = namespace_id)
-        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_IO_QUEUE_DEPTH)
+        self.io_tail = self.advance_tail(tail = self.io_tail, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH)
         self.registers.write32(offset = self.sq_doorbell_offset(queue_id = 1), value = self.io_tail)
         return NvmeSubmission(command_id = command_id)
     }
@@ -639,9 +798,9 @@ class NvmeDirectStorage {
 
     fn find_io_completion_index(self, command_id: U16) -> U32 {
         let scan = 0
-        let limit = self.u64_to_u32(value = self.queues.io_cq.length / 16)
+        let limit = self.u64_to_u32(value = self.queues.foreground_io_cq.length / 16)
         while scan < limit {
-            let dword3 = self.queues.io_cq.read_u32(offset = (self.u32_to_u64(value = scan) * 16) + 12)
+            let dword3 = self.queues.foreground_io_cq.read_u32(offset = (self.u32_to_u64(value = scan) * 16) + 12)
             let completed_command_id = dword3 & 0xFFFF
             let status = (dword3 >> 17) & 0x7FFF
             if completed_command_id == self.u16_to_u32(value = command_id) {
@@ -658,10 +817,10 @@ class NvmeDirectStorage {
         let wait = 0
         while wait < NVME_COMPLETION_TIMEOUT_POLLS {
             let cqe_offset = self.u32_to_u64(value = self.io_head) * 16
-            let dword3 = self.queues.io_cq.read_u32(offset = cqe_offset + 12)
+            let dword3 = self.queues.foreground_io_cq.read_u32(offset = cqe_offset + 12)
             if self.io_completion_for_command(dword3 = dword3, command_id = command_id) {
                 self.validate_completion(dword3 = dword3, command_id = command_id)
-                self.io_head = self.advance_completion_head(head = self.io_head, depth = NVME_IO_QUEUE_DEPTH)
+                self.io_head = self.advance_completion_head(head = self.io_head, depth = NVME_FOREGROUND_IO_QUEUE_DEPTH)
                 if self.io_head == 0 {
                     self.io_phase = self.io_phase == false
                 }
@@ -671,8 +830,8 @@ class NvmeDirectStorage {
             wait = wait + 1
         }
         let found = self.find_io_completion_index(command_id = command_id)
-        if found < self.u64_to_u32(value = self.queues.io_cq.length / 16) {
-            let found_dword3 = self.queues.io_cq.read_u32(offset = (self.u32_to_u64(value = found) * 16) + 12)
+        if found < self.u64_to_u32(value = self.queues.foreground_io_cq.length / 16) {
+            let found_dword3 = self.queues.foreground_io_cq.read_u32(offset = (self.u32_to_u64(value = found) * 16) + 12)
             self.validate_completion(dword3 = found_dword3, command_id = command_id)
             self.io_head = found + 1
             self.registers.write32(offset = self.cq_doorbell_offset(queue_id = 1), value = self.io_head)
@@ -766,7 +925,12 @@ class NvmeDirectStorage {
         if completion {
             index = index + 1
         }
-        return 0x1000 + (index * 4)
+        return 0x1000 + (index * self.doorbell_stride_bytes())
+    }
+
+    fn doorbell_stride_bytes(self) -> U32 {
+        let dstrd = self.registers.read32(offset = NVME_REG_CAP_HIGH) & 0x0F
+        return 4 << dstrd
     }
 
     fn low32(self, value: U64) -> U32 {
@@ -847,7 +1011,7 @@ unique driver NvmeDriver {
     fn disable_controller(self) {
         let cap_low = self.registers.read32(offset = NVME_REG_CAP_LOW)
         let cap_high = self.registers.read32(offset = NVME_REG_CAP_HIGH)
-        let doorbell_stride = (cap_high >> 16) & 0x0F
+        let doorbell_stride = cap_high & 0x0F
         let cc = self.registers.read32(offset = NVME_REG_CC)
         self.registers.write32(offset = NVME_REG_CC, value = cc & (0xFFFFFFFF - NVME_CC_ENABLE))
         let reset_timeout = NVME_RESET_TIMEOUT_POLLS
@@ -908,6 +1072,7 @@ driver path NvmeIoPath {
     registers: NvmeControllerRegisters
     submission_queue: BoundedBytes
     submission_tail: U32
+    submission_depth: U32
     next_command_id: U16
     completion_queue: NvmeCompletionQueue
     irq: TopicPublisher<NvmeCompletionInterrupt>
@@ -919,17 +1084,22 @@ driver path NvmeIoPath {
     fn drain_completion_queue(self) -> NvmeCompletionInterrupt {
         let completion = self.completion_queue.drain()
         if completion.completed_count > 0 {
-            let completion_doorbell_offset = 0x1000 + (((self.u16_to_u32(value = self.completion_queue.queue_id) * 2) + 1) * 4)
-            self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)
+            self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)
         }
         return completion
     }
 
     fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {
+        if block_count == 0 {
+            self.completion_queue.panic.fail(code = 0xAC080185)
+        }
         return self.submit_data_command(opcode = NVME_OPCODE_READ_U8, namespace_id = namespace_id, start_lba = start_lba, command_dword12 = block_count - 1, prp1 = prp1)
     }
 
     fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        if block_count == 0 {
+            self.completion_queue.panic.fail(code = 0xAC080186)
+        }
         let command_dword12 = block_count - 1
         if fua {
             command_dword12 = command_dword12 | 0x40000000
@@ -942,6 +1112,9 @@ driver path NvmeIoPath {
     }
 
     fn submit_zone_append(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {
+        if block_count == 0 {
+            self.completion_queue.panic.fail(code = 0xAC080187)
+        }
         let command_dword12 = block_count - 1
         if fua {
             command_dword12 = command_dword12 | 0x40000000
@@ -962,11 +1135,32 @@ driver path NvmeIoPath {
         sqe.write_u32(offset = 44, value = self.high32(value = start_lba))
         sqe.write_u32(offset = 48, value = command_dword12)
         self.submission_tail = self.submission_tail + 1
-        if self.submission_tail == self.completion_queue.depth {
+        if self.submission_tail == self.submission_depth {
             self.submission_tail = 0
         }
-        self.registers.write32(offset = 0x1000 + ((self.u16_to_u32(value = self.queue_id) * 2) * 4), value = self.submission_tail)
+        self.registers.write32(offset = self.sq_doorbell_offset(), value = self.submission_tail)
         return NvmeSubmission(command_id = command_id)
+    }
+
+    fn sq_doorbell_offset(self) -> U32 {
+        return self.doorbell_offset(completion = false)
+    }
+
+    fn cq_doorbell_offset(self) -> U32 {
+        return self.doorbell_offset(completion = true)
+    }
+
+    fn doorbell_offset(self, completion: Bool) -> U32 {
+        let index = self.u16_to_u32(value = self.queue_id) * 2
+        if completion {
+            index = index + 1
+        }
+        return 0x1000 + (index * self.doorbell_stride_bytes())
+    }
+
+    fn doorbell_stride_bytes(self) -> U32 {
+        let dstrd = self.registers.read32(offset = NVME_REG_CAP_HIGH) & 0x0F
+        return 4 << dstrd
     }
 
     fn allocate_command_id(self) -> U16 {

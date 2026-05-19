@@ -64,6 +64,41 @@ func TestBuildWritesReportWhenRequested(t *testing.T) {
 	}
 }
 
+func TestBuildNvmeFixtureWritesStorageReport(t *testing.T) {
+	dir := t.TempDir()
+	result, err := Build(BuildOptions{
+		Mode:       ModeDev,
+		RootPath:   "tests/e2e/fixtures/nvme_event_storage/main.wrela",
+		OutputPath: filepath.Join(dir, "nvme.efi"),
+		ReportPath: filepath.Join(dir, "nvme.report.json"),
+		RepoRoot:   ".",
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if result.Report == nil {
+		t.Fatal("BuildResult.Report is nil")
+	}
+	data, err := os.ReadFile(result.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, key := range []string{
+		`"blob_orphan_bytes"`,
+		`"projection_lag_events"`,
+		`"projection_upcast_count"`,
+		`"projection_rebuild_count"`,
+	} {
+		if !bytes.Contains(data, []byte(key)) {
+			t.Fatalf("storage report missing key %s:\n%s", key, data)
+		}
+	}
+	storage := result.Report.Storage
+	if storage.EventSlotSize == 0 || storage.ActiveLBASize == 0 || len(storage.NvmePaths) != 2 {
+		t.Fatalf("storage report missing required metrics: %#v", storage)
+	}
+}
+
 func TestBuildImportRootsLoadCoreLanguageImports(t *testing.T) {
 	dir := t.TempDir()
 	repoRoot := resolveRepoRoot(".")

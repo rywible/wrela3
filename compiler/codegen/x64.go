@@ -1556,15 +1556,20 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 		emitRegRegMove(e, scratchRegs[0], asm.MustLookup("rdx"))
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
-		if !ok || constValue.Value > 63 {
-			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: " + op.Op})
-			return
-		}
 		opcode := byte(0x05)
 		if op.Op == "shl" {
 			opcode = 0x04
 		}
-		emitShiftImm(e, opcode, scratchRegs[0], byte(constValue.Value))
+		if ok {
+			if constValue.Value > 63 {
+				e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: " + op.Op})
+				return
+			}
+			emitShiftImm(e, opcode, scratchRegs[0], byte(constValue.Value))
+		} else {
+			emitLoadValue(e, frame, op.Right, asm.MustLookup("rcx"))
+			emitShiftCL(e, opcode, scratchRegs[0], valueWidthBits(e.ctx, op))
+		}
 	case "eq", "ne", "lt", "le", "gt", "ge":
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitCmpRegReg(e, scratchRegs[0], scratchRegs[1])
@@ -1588,6 +1593,20 @@ func emitShiftImm(e *Emitter, opcode byte, reg asm.Reg, amount byte) {
 		rex |= 0x01
 	}
 	e.emit(rex, 0xC1, 0xC0|(opcode<<3)|byte(reg.Low3), amount)
+}
+
+func emitShiftCL(e *Emitter, opcode byte, reg asm.Reg, width int) {
+	rex := byte(0)
+	if width == 64 {
+		rex |= 0x48
+	}
+	if reg.REX {
+		rex |= 0x41
+	}
+	if rex != 0 {
+		e.emit(rex)
+	}
+	e.emit(0xD3, 0xC0|(opcode<<3)|byte(reg.Low3))
 }
 
 func emitCall(e *Emitter, call *ir.Call, frame Frame) {

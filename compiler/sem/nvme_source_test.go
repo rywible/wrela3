@@ -125,31 +125,78 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 		methodByName(t, driver, name)
 	}
 	directStorage := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeDirectStorage")
+	methodByName(t, directStorage, "identify_controller")
 	methodByName(t, directStorage, "identify_namespace")
 
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	for name, want := range map[string]uint64{
+		"NVME_ADMIN_QUEUE_DEPTH":         32,
+		"NVME_FOREGROUND_IO_QUEUE_DEPTH": 256,
+		"NVME_BACKGROUND_IO_QUEUE_DEPTH": 128,
+	} {
+		if got := checked.Index.ConstValue("machine.x86_64.nvme", name); got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
+	}
 	initialize := sourceBetween(t, source, "fn initialize(self, device: PciDevice) -> NvmeDriver {", "\n    fn disable_controller(self)")
 	assertOrderedSubstrings(t, initialize, []string{
 		"controller.disable_controller()",
 		"controller.program_admin_queues()",
 		"controller.enable_controller()",
 	})
-	if strings.Contains(source, "fn identify_controller(self)") {
+	driverBody := sourceBetween(t, source, "unique driver NvmeDriver {", "\n    fn foreground_storage_path")
+	if strings.Contains(driverBody, "fn identify_controller(self)") {
 		t.Fatalf("NvmeDriver must not retain stub identify_controller")
 	}
-	driverBody := sourceBetween(t, source, "unique driver NvmeDriver {", "\n    fn foreground_storage_path")
 	if strings.Contains(driverBody, "fn identify_namespace(self") {
 		t.Fatalf("NvmeDriver must not retain stub identify_namespace")
 	}
+	directController := sourceBetween(t, source, "fn identify_controller(self) -> NvmeControllerFacts {", "\n    fn identify_namespace")
+	for _, want := range []string{
+		"cdw10 = 1",
+		"let vwc = (self.queues.data_buffer.read_u8(offset = 256) & 1) != 0",
+		"self.queues.data_buffer.read_u16(offset = 512)",
+		"self.queues.data_buffer.read_u16(offset = 514)",
+		"supports_fua = true",
+	} {
+		if !strings.Contains(directController, want) {
+			t.Fatalf("Identify Controller source missing %q", want)
+		}
+	}
 	directIdentify := sourceBetween(t, source, "fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {", "\n    fn create_io_completion_queue")
 	assertOrderedSubstrings(t, directIdentify, []string{
+		"let controller = self.identify_controller()",
 		"self.queues.data_buffer.zero()",
 		"self.submit_admin_command(",
 		"opcode = NVME_ADMIN_OPCODE_IDENTIFY",
 		"self.poll_admin_completion(command_id = identify.command_id)",
-		"self.queues.data_buffer.read_u8(offset = 24)",
+		"let format = self.queues.data_buffer.read_u8(offset = 26) & 0x0F",
 		"self.queues.data_buffer.read_u64(offset = 0)",
+		"supports_fua = controller.supports_fua",
+		"atomic_write_unit_blocks = controller.atomic_write_unit_blocks",
+		"power_fail_atomic_write_unit_blocks = controller.power_fail_atomic_write_unit_blocks",
+		"volatile_write_cache = controller.volatile_write_cache",
 	})
+	if strings.Contains(directIdentify, "read_u8(offset = 24)") {
+		t.Fatalf("Identify Namespace FLBAS must use NVMe byte offset 26")
+	}
+	directInit := sourceBetween(t, source, "fn initialize(self) -> NvmeDirectStorage {", "\n    fn disable_controller(self)")
+	assertOrderedSubstrings(t, directInit, []string{
+		"self.create_io_completion_queue(queue_id = 1",
+		"depth = NVME_FOREGROUND_IO_QUEUE_DEPTH",
+		"self.create_io_submission_queue(queue_id = 1",
+		"depth = NVME_FOREGROUND_IO_QUEUE_DEPTH",
+		"self.create_io_completion_queue(queue_id = 2",
+		"depth = NVME_BACKGROUND_IO_QUEUE_DEPTH",
+		"self.create_io_submission_queue(queue_id = 2",
+		"depth = NVME_BACKGROUND_IO_QUEUE_DEPTH",
+	})
+	queueMemory := sourceBetween(t, source, "data NvmeQueueMemory {", "\n}\n\ndata NvmeQueueMemoryBuilder")
+	for _, want := range []string{"foreground_io_sq", "foreground_io_cq", "background_io_sq", "background_io_cq"} {
+		if !strings.Contains(queueMemory, want) {
+			t.Fatalf("NvmeQueueMemory missing %s", want)
+		}
+	}
 	for _, want := range []string{
 		"const NVME_RESET_TIMEOUT_POLLS: U32 = 100000",
 		"let reset_timeout = NVME_RESET_TIMEOUT_POLLS",
@@ -197,6 +244,11 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 	for _, want := range []string{
 		"return self.submit_data_command(opcode = NVME_OPCODE_READ_U8",
 		"return self.submit_data_command(opcode = NVME_OPCODE_WRITE_U8",
+		"self.panic.fail(code = 0xAC080183)",
+		"self.panic.fail(code = 0xAC080184)",
+		"self.completion_queue.panic.fail(code = 0xAC080185)",
+		"self.completion_queue.panic.fail(code = 0xAC080186)",
+		"self.completion_queue.panic.fail(code = 0xAC080187)",
 		"command_dword12 = command_dword12 | 0x40000000",
 		"return self.submit_data_command(opcode = NVME_OPCODE_FLUSH_U8",
 		"return self.submit_data_command(opcode = NVME_OPCODE_ZONE_APPEND_U8",
@@ -207,7 +259,7 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 		"sqe.write_u32(offset = 40, value = self.low32(value = start_lba))",
 		"sqe.write_u32(offset = 44, value = self.high32(value = start_lba))",
 		"sqe.write_u32(offset = 48, value = command_dword12)",
-		"self.registers.write32(offset = 0x1000 + ((self.u16_to_u32(value = self.queue_id) * 2) * 4), value = self.submission_tail)",
+		"self.registers.write32(offset = self.sq_doorbell_offset(), value = self.submission_tail)",
 		"return NvmeSubmission(command_id = command_id)",
 	} {
 		if !strings.Contains(source, want) {
@@ -257,11 +309,13 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 		"while scanned < self.depth",
 		"let cqe_offset = self.u32_to_u64(value = self.head) * 16",
 		"let dword3 = self.entries.read_u32(offset = cqe_offset + 12)",
-		"if dword3 == 0",
 		"let entry_phase = ((dword3 >> 16) & 1) != 0",
 		"if entry_phase != self.expected_phase",
 		"return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)",
 	})
+	if strings.Contains(drain, "if dword3 == 0") {
+		t.Fatalf("completion drain must stop on phase mismatch, not zero DW3")
+	}
 	if strings.Contains(drain, "self.current_entry_phase") {
 		t.Fatalf("NvmeCompletionQueue.drain must inspect CQ memory, not a stored phase bit")
 	}
@@ -269,9 +323,35 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 	assertOrderedSubstrings(t, ioDrain, []string{
 		"let completion = self.completion_queue.drain()",
 		"if completion.completed_count > 0",
-		"self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)",
+		"self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)",
 		"return completion",
 	})
+}
+
+func TestNvmeDoorbellsAndReservedPaddingSourceContract(t *testing.T) {
+	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	for _, want := range []string{
+		"fn doorbell_stride_bytes(self) -> U32",
+		"let dstrd = self.registers.read32(offset = NVME_REG_CAP_HIGH) & 0x0F",
+		"return 4 << dstrd",
+		"return 0x1000 + (index * self.doorbell_stride_bytes())",
+		"fn write_reserved_empty_slot(self, slot_offset: U64, event_id: U64)",
+		"fn validate_reserved_empty_slot(self, slot_offset: U64, event_id: U64) -> Bool",
+		"fn validate_first_append_reserved_empty_padding(self) -> Bool",
+		"fn first_append_reserved_empty_slots(self) -> U64",
+		"self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 2, event_id = 2)",
+		"self.write_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 7, event_id = 7)",
+		"self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 2, event_id = 2)",
+		"self.validate_reserved_empty_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE * 7, event_id = 7)",
+		"self.submission_depth",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("nvme source missing %q", want)
+		}
+	}
+	if strings.Contains(source, "let doorbell_stride = (cap_high >> 16) & 0x0F") {
+		t.Fatalf("doorbell stride must come from CAP.DSTRD bits")
+	}
 }
 
 func TestNvmeEventStorageFixtureUsesDirectNvmeStorage(t *testing.T) {
@@ -293,6 +373,7 @@ func TestNvmeEventStorageFixtureUsesDirectNvmeStorage(t *testing.T) {
 		"require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)",
 		"claim_mmio_bar_at32(index = 0, base = 0xC0000000)",
 		"NvmeDirectStorage(",
+		"event_slots_reserved_empty = storage.first_append_reserved_empty_slots()",
 		"storage.write_first_append()",
 		"storage.read_replay_state()",
 	} {

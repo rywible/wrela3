@@ -113,6 +113,34 @@ event A id 1 {
 	}
 }
 
+func TestEventLayoutEncodeRejectsMissingSelfField(t *testing.T) {
+	ds := storageDiagsForSource(t, `
+module storage.bad_encode_missing_self_field
+event A id 1 {
+    id: U64
+    layout 1 current {
+        id: U64 = self.missing
+    }
+}`)
+	if !hasMessage(ds, diag.CG0001, "unknown field missing") {
+		t.Fatalf("diagnostics = %#v, want CG0001 unknown field missing", ds)
+	}
+}
+
+func TestEventLayoutEncodeRejectsTypeMismatch(t *testing.T) {
+	ds := storageDiagsForSource(t, `
+module storage.bad_encode_type_mismatch
+event A id 1 {
+    flag: Bool
+    layout 1 current {
+        id: U64 = self.flag
+    }
+}`)
+	if !hasMessage(ds, diag.CG0001, "type mismatch") {
+		t.Fatalf("diagnostics = %#v, want CG0001 type mismatch", ds)
+	}
+}
+
 func TestEventLayoutPayloadFieldMetadata(t *testing.T) {
 	modules := parseModulesForTest(t, `
 module storage.event_payload_metadata

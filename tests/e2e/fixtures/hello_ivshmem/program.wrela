@@ -65,7 +65,7 @@ executor HelloWorld {
             match self.ivshmem_events.try_next() {
                 Option.Some(value = ivshmem_event) => {
                     self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                    self.ivshmem_rx.ack_doorbell(event = ivshmem_event)
+                    self.ivshmem_rx.ack_doorbell(doorbell = ivshmem_event)
                 }
                 Option.None => {
                     self.ivshmem_events.arm_wait()
@@ -92,7 +92,7 @@ executor HelloWorld {
             if let Option.Some(value = ivshmem_retry) = self.ivshmem_events.try_next() {
                 had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry)
+                self.ivshmem_rx.ack_doorbell(doorbell = ivshmem_retry)
             }
             if had_retry_event == false {
                 if self.serial_rx.is_wait_armed() {

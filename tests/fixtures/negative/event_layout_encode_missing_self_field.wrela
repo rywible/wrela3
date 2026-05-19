@@ -1,0 +1,10 @@
+// expect: CG0001: unknown field missing
+module negative.event_layout_encode_missing_self_field
+
+event A id 1 {
+    id: U64
+
+    layout 1 current {
+        id: U64 = self.missing
+    }
+}

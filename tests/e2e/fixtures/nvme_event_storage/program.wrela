@@ -57,7 +57,7 @@ data FirstAppendBuilder {
     marker: U64
 
     fn events(self) -> FirstAppendEvents {
-        let blob = PublishedBlobRef(ref = BlobRef(blob_id = 1))
+        let blob = PublishedBlobRef(ref = BlobRef(blob_id = 1, start_lba = 20, block_count = 2))
         return FirstAppendEvents(
             created = FileCreated(
                 file_id = FileId(value = 1),
@@ -115,14 +115,14 @@ data FirstAppendBuilder {
         let scanner = EventRecoveryScanner()
         let first_recovery = scanner.validate_group_member(header = first_header)
         let projected = events.directory_worker.apply_group(last_event_id = second_header.event_id, event_type_id = 1003)
-        let old_ref = BlobRef(blob_id = 10)
-        let new_ref = BlobRef(blob_id = 20)
+        let old_ref = BlobRef(blob_id = 10, start_lba = 20, block_count = 2)
+        let new_ref = BlobRef(blob_id = 20, start_lba = 40, block_count = 2)
         let truth = BlobTruth(blob_id = 1, ref = old_ref, version = 1)
         let relocation = RelocateBlobProposal(blob_id = 1, old_ref = old_ref, new_ref = new_ref, observed_version = 0)
-        let relocation_accepted = truth.accept_relocate(proposal = relocation)
+        let relocation_accepted = truth.can_accept_relocate(proposal = relocation)
         let collector = BlobOrphanCollector(
             allocated = Extent(start_lba = 20, block_count = 2),
-            acknowledged_refs = old_ref
+            acknowledged_refs = new_ref
         )
         let reclaimed = collector.reclaimable()
         let orphan_collected = false

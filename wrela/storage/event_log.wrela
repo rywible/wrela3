@@ -2,6 +2,7 @@ module storage.event_log
 
 use {
     STORAGE_EVENT_SLOT_SIZE,
+    STORAGE_MAX_ATOMIC_GROUP_SLOTS,
     STORAGE_SLOT_RESERVED_EMPTY,
     EventSlotHeader,
     StorageRegion,
@@ -68,10 +69,48 @@ data SuperblockPair {
     second: StorageSuperblock
 
     fn choose(self) -> SuperblockChoice {
-        if self.second.generation > self.first.generation {
+        let first_valid = self.superblock_valid(block = self.first)
+        let second_valid = self.superblock_valid(block = self.second)
+        if first_valid {
+            if second_valid {
+                if self.second.generation > self.first.generation {
+                    return SuperblockChoice(selected_generation = self.second.generation, valid = true)
+                }
+            }
+            return SuperblockChoice(selected_generation = self.first.generation, valid = true)
+        }
+        if second_valid {
             return SuperblockChoice(selected_generation = self.second.generation, valid = true)
         }
-        return SuperblockChoice(selected_generation = self.first.generation, valid = true)
+        return SuperblockChoice(selected_generation = 0, valid = false)
+    }
+
+    fn superblock_valid(self, block: StorageSuperblock) -> Bool {
+        return block.checksum32 == self.superblock_checksum(generation = block.generation)
+    }
+
+    fn superblock_checksum(self, generation: U64) -> U32 {
+        let crc = 0xFFFFFFFF
+        let byte_index = 0
+        while byte_index < 8 {
+            let shift = byte_index * 8
+            crc = crc ^ self.u64_to_u32(value = (generation >> shift) & 0xFF)
+            let bit = 0
+            while bit < 8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0x82F63B78
+                } else {
+                    crc = crc >> 1
+                }
+                bit = bit + 1
+            }
+            byte_index = byte_index + 1
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    fn u64_to_u32(self, value: U64) -> U32 {
+        return value & 0xFFFFFFFF
     }
 }
 
@@ -115,6 +154,9 @@ data EventRecoveryScanner {
             }
         }
         if header.atomic_group_len == 0 {
+            return RecoveryResult(visible_events = 0, next_event_id = header.event_id, last_committed_group_end = 0, stop_reason = STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP)
+        }
+        if header.atomic_group_len > STORAGE_MAX_ATOMIC_GROUP_SLOTS {
             return RecoveryResult(visible_events = 0, next_event_id = header.event_id, last_committed_group_end = 0, stop_reason = STORAGE_RECOVERY_STOP_INCOMPLETE_ATOMIC_GROUP)
         }
         return RecoveryResult(visible_events = 1, next_event_id = header.event_id + 1, last_committed_group_end = header.event_id, stop_reason = STORAGE_RECOVERY_STOP_CLEAN_EOF)

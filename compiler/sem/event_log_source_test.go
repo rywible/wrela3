@@ -90,6 +90,24 @@ data SuperblockConsumer {
 		"selected_generation": "U64",
 		"valid":               "Bool",
 	})
+
+	source := readRepoFile(t, "wrela/storage/event_log.wrela")
+	choose := sourceBetween(t, source, "fn choose(self) -> SuperblockChoice {", "\n    fn superblock_valid")
+	for _, want := range []string{
+		"let first_valid = self.superblock_valid(block = self.first)",
+		"let second_valid = self.superblock_valid(block = self.second)",
+		"if first_valid",
+		"if second_valid",
+		"valid = false",
+	} {
+		if !strings.Contains(choose, want) {
+			t.Fatalf("SuperblockPair.choose missing checksum-validity branch %q", want)
+		}
+	}
+	valid := sourceBetween(t, source, "fn superblock_valid(self, block: StorageSuperblock) -> Bool {", "\n    fn superblock_checksum")
+	if !strings.Contains(valid, "block.checksum32 == self.superblock_checksum(generation = block.generation)") {
+		t.Fatalf("SuperblockPair.superblock_valid must compare checksum32 against generation checksum")
+	}
 }
 
 func TestEventLogRecoveryMirrorContract(t *testing.T) {

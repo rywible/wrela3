@@ -5,6 +5,8 @@ const BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
 
 data BlobRef {
     blob_id: U64
+    start_lba: U64
+    block_count: U64
 }
 
 data BlobCipherPolicy {
@@ -36,7 +38,7 @@ data BlobTruth {
     ref: BlobRef
     version: U64
 
-    fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+    fn can_accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
         if proposal.blob_id != self.blob_id {
             return false
         }
@@ -47,6 +49,10 @@ data BlobTruth {
             return false
         }
         return true
+    }
+
+    fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+        return self.can_accept_relocate(proposal = proposal)
     }
 }
 
@@ -73,10 +79,37 @@ data BlobExtentAllocator {
         if self.first.block_count < block_count {
             return Extent(start_lba = 0, block_count = 0)
         }
-        return Extent(start_lba = self.first.start_lba, block_count = block_count)
+        let allocated = Extent(start_lba = self.first.start_lba, block_count = block_count)
+        if self.first.block_count == block_count {
+            self.first = Extent(start_lba = 0, block_count = 0)
+            self.free_extent_count = 0
+            return allocated
+        }
+        self.first = Extent(start_lba = self.first.start_lba + block_count, block_count = self.first.block_count - block_count)
+        return allocated
     }
 
     fn free(self, extent: Extent) -> BlobExtentAllocator {
+        if extent.block_count == 0 {
+            return self
+        }
+        if self.first.block_count == 0 {
+            return BlobExtentAllocator(free_extent_count = 1, first = extent)
+        }
+        let extent_end = extent.start_lba + extent.block_count
+        let first_end = self.first.start_lba + self.first.block_count
+        if extent_end == self.first.start_lba {
+            return BlobExtentAllocator(
+                free_extent_count = self.free_extent_count,
+                first = Extent(start_lba = extent.start_lba, block_count = extent.block_count + self.first.block_count)
+            )
+        }
+        if first_end == extent.start_lba {
+            return BlobExtentAllocator(
+                free_extent_count = self.free_extent_count,
+                first = Extent(start_lba = self.first.start_lba, block_count = self.first.block_count + extent.block_count)
+            )
+        }
         if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT {
             return self
         }
@@ -89,7 +122,7 @@ data BlobExtentAllocator {
 
     fn write_blob(self, blob_id: U64, logical_bytes: U64, policy: BlobCipherPolicy) -> UnpublishedBlobRef {
         let extent = self.allocate(block_count = logical_bytes)
-        return UnpublishedBlobRef(ref = BlobRef(blob_id = blob_id), manifest_lba = extent.start_lba)
+        return UnpublishedBlobRef(ref = BlobRef(blob_id = blob_id, start_lba = extent.start_lba, block_count = extent.block_count), manifest_lba = extent.start_lba)
     }
 }
 
@@ -102,8 +135,10 @@ data BlobOrphanCollector {
     }
 
     fn reclaimable(self) -> Extent {
-        if self.acknowledged_refs.blob_id == self.allocated.start_lba {
-            return Extent(start_lba = 0, block_count = 0)
+        if self.acknowledged_refs.start_lba == self.allocated.start_lba {
+            if self.acknowledged_refs.block_count == self.allocated.block_count {
+                return Extent(start_lba = 0, block_count = 0)
+            }
         }
         return self.allocated
     }

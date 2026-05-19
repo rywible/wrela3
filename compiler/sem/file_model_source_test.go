@@ -111,6 +111,7 @@ data FileModelWorkerConsumer {
 		"event_type_id == FILE_EVENT_RENAMED",
 		"event_type_id == FILE_EVENT_CONTENT_COMMITTED",
 		"event_type_id == FILE_EVENT_DELETED",
+		"return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)",
 	} {
 		if !strings.Contains(sourceText, want) {
 			t.Fatalf("DirectoryProjectionWorker.apply_group missing %q", want)

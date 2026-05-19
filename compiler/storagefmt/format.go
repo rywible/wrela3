@@ -409,10 +409,7 @@ func RecoverSlots(slots []Slot) RecoveryResult {
 		}
 
 		groupLen := slot.Header.AtomicGroupLen
-		if groupLen == 0 {
-			groupLen = 1
-		}
-		if i+int(groupLen) > len(slots) {
+		if groupLen == 0 || groupLen > uint32(StorageMaxAtomicGroupSlots) || i+int(groupLen) > len(slots) {
 			result.NextEventID = expectedEventID
 			result.StopReason = StopIncompleteAtomicGroup
 			return result
@@ -540,18 +537,30 @@ func (c StreamDirectoryCache) HitRateX1000() uint64 {
 	return c.Hits * 1000 / total
 }
 
-func (w WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
-	if semanticSlots > StorageMaxAtomicGroupSlots {
+func (w *WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+	if semanticSlots == 0 || semanticSlots > StorageMaxAtomicGroupSlots {
 		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
 	}
 	first, last := AssignEventIDs(w.NextEventID, semanticSlots)
-	open := w.OpenBatchSlots + semanticSlots
+	combined := w.OpenBatchSlots + semanticSlots
+	open := combined
+	flush := false
+	switch {
+	case combined <= StorageTargetBatchSlots:
+	case combined <= StorageMaxBatchSlots:
+		flush = true
+	default:
+		open = semanticSlots
+		flush = true
+	}
+	w.NextEventID = last + 1
+	w.OpenBatchSlots = open
 	return EnqueueResult{
 		Accepted:       true,
 		FirstEventID:   first,
 		LastEventID:    last,
 		OpenBatchSlots: open,
-		FlushRequested: open >= StorageTargetBatchSlots,
+		FlushRequested: flush,
 	}
 }
 

@@ -2,6 +2,7 @@ package sem
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -59,7 +60,9 @@ data BlobMirror {
 
 	assertWrelaConstU64(t, checked.Index, "storage.blob", "BLOB_ALLOCATOR_FREE_EXTENT_LIMIT", 1024)
 	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "BlobRef"), map[string]string{
-		"blob_id": "U64",
+		"blob_id":     "U64",
+		"start_lba":   "U64",
+		"block_count": "U64",
 	})
 	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "Extent"), map[string]string{
 		"start_lba":   "U64",
@@ -75,6 +78,35 @@ data BlobMirror {
 	assertMethodExists(t, allocator, "allocate")
 	assertMethodExists(t, allocator, "free")
 	assertMethodExists(t, allocator, "extents")
+
+	source := readRepoFile(t, "wrela/storage/blob.wrela")
+	for _, want := range []string{
+		"self.first.start_lba + block_count",
+		"self.first.block_count - block_count",
+		"extent.start_lba + extent.block_count",
+		"self.first.start_lba + self.first.block_count",
+		"if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("BlobExtentAllocator source missing split/coalesce shape %q", want)
+		}
+	}
+	coalesce := strings.Index(source, "if extent_end == self.first.start_lba")
+	capacity := strings.Index(source, "if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT")
+	if coalesce < 0 || capacity < 0 || capacity < coalesce {
+		t.Fatalf("BlobExtentAllocator.free must attempt coalescing before enforcing capacity")
+	}
+	if strings.Contains(source, "acknowledged_refs.blob_id == self.allocated.start_lba") {
+		t.Fatalf("BlobOrphanCollector must not compare blob_id to start_lba")
+	}
+	for _, want := range []string{
+		"self.acknowledged_refs.start_lba == self.allocated.start_lba",
+		"self.acknowledged_refs.block_count == self.allocated.block_count",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("BlobOrphanCollector source missing extent liveness check %q", want)
+		}
+	}
 }
 
 func TestBlobRelocationMirrorContract(t *testing.T) {
@@ -135,6 +167,25 @@ module sem.maintenance_mutates_blob_truth
 use { BlobTruth, RelocateBlobProposal } from storage.blob
 
 class MaintenanceWorker {
+    fn run(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> Bool {
+        return truth.accept_relocate(proposal = proposal)
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0118) {
+		t.Fatalf("diagnostics = %#v, want SEM0118", ds)
+	}
+}
+
+func TestDirectBlobTruthMutationFailsIndependentOfClassName(t *testing.T) {
+	modules := parseBlobModules(t, `
+module sem.renamed_worker_mutates_blob_truth
+
+use { BlobTruth, RelocateBlobProposal } from storage.blob
+
+class Relocator {
     fn run(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> Bool {
         return truth.accept_relocate(proposal = proposal)
     }

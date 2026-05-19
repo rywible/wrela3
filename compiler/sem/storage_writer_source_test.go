@@ -2,6 +2,7 @@ package sem
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
@@ -54,6 +55,25 @@ func TestStorageWriterSourceMirrorContract(t *testing.T) {
 		"open_batch_slots": "U64",
 		"flush_requested":  "Bool",
 	})
+	source := readRepoFile(t, "wrela/storage/writer.wrela")
+	enqueue := sourceBetween(t, source, "fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult {", "\n    fn on_durability_completed")
+	for _, want := range []string{
+		"group.semantic_event_count == 0",
+		"self.next_event_id = last + 1",
+		"self.open_batch_slots = open",
+		"STORAGE_MAX_ATOMIC_GROUP_SLOTS",
+		"STORAGE_TARGET_BATCH_SLOTS",
+		"STORAGE_MAX_BATCH_SLOTS",
+	} {
+		if !strings.Contains(enqueue, want) {
+			t.Fatalf("StorageWriter.enqueue_atomic_group missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{" > 32", ">= 64", "<= 64", "<= 72"} {
+		if strings.Contains(enqueue, forbidden) {
+			t.Fatalf("StorageWriter.enqueue_atomic_group should use storage constants, found %q", forbidden)
+		}
+	}
 }
 
 func TestStorageWriterDurabilityMirrorContract(t *testing.T) {

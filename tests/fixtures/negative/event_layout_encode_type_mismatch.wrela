@@ -1,0 +1,10 @@
+// expect: CG0001: type mismatch: U64 cannot assign Bool
+module negative.event_layout_encode_type_mismatch
+
+event A id 1 {
+    flag: Bool
+
+    layout 1 current {
+        id: U64 = self.flag
+    }
+}

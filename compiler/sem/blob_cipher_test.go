@@ -38,6 +38,34 @@ executor BlobCipherExecutor {
 	}
 }
 
+func TestBlobCipherDynamicModeRequiresOptIn(t *testing.T) {
+	modules := parseBlobModules(t, `
+module sem.dynamic_blob_cipher
+
+use { BlobCipherPolicy } from storage.blob
+
+executor BlobCipherExecutor {
+    mode: U64
+
+    start fn main(self) -> never {
+        let policy = BlobCipherPolicy(
+            mode = self.mode,
+            key_id = 0,
+            nonce_low = 0,
+            nonce_high = 0,
+            development_opt_in = false
+        )
+        while true {}
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0123) {
+		t.Fatalf("diagnostics = %#v, want SEM0123", ds)
+	}
+}
+
 func TestEventCannotReferenceUnpublishedBlob(t *testing.T) {
 	modules := parseBlobModules(t, `
 module sem.bad_unpublished_blob
@@ -87,7 +115,7 @@ data BlobPublicationConsumer {
     }
 
     fn published(self) -> PublishedBlobRef {
-        return PublishedBlobRef(ref = BlobRef(blob_id = 7))
+        return PublishedBlobRef(ref = BlobRef(blob_id = 7, start_lba = 1, block_count = 1))
     }
 }
 `)

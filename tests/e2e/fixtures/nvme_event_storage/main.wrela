@@ -195,10 +195,11 @@ image NvmeEventStorageImage {
             queue_id = 1,
             vector = 0x50,
             registers = nvme_registers,
-            submission_queue = storage.queues.io_sq,
+            submission_queue = storage.queues.foreground_io_sq,
             submission_tail = 0,
+            submission_depth = 256,
             next_command_id = 1,
-            completion_queue = NvmeCompletionQueue(queue_id = 1, head = 0, depth = 16, entries = storage.queues.io_cq, expected_phase = true, panic = BootPanic()),
+            completion_queue = NvmeCompletionQueue(queue_id = 1, head = 0, depth = 256, entries = storage.queues.foreground_io_cq, expected_phase = true, panic = BootPanic()),
             irq = nvme_interrupts
         ))
         let background = BackgroundStoragePath(nvme_path = NvmeIoPath(
@@ -208,10 +209,11 @@ image NvmeEventStorageImage {
             queue_id = 2,
             vector = 0x51,
             registers = nvme_registers,
-            submission_queue = storage.queues.io_sq,
+            submission_queue = storage.queues.background_io_sq,
             submission_tail = 0,
+            submission_depth = 128,
             next_command_id = 1,
-            completion_queue = NvmeCompletionQueue(queue_id = 2, head = 0, depth = 16, entries = storage.queues.io_cq, expected_phase = true, panic = BootPanic()),
+            completion_queue = NvmeCompletionQueue(queue_id = 2, head = 0, depth = 128, entries = storage.queues.background_io_cq, expected_phase = true, panic = BootPanic()),
             irq = nvme_interrupts
         ))
         let stream_directory = StreamDirectory(next_stream_id = 0)
@@ -227,7 +229,7 @@ image NvmeEventStorageImage {
             event_header_size = STORAGE_EVENT_HEADER_SIZE,
             event_payload_bytes = STORAGE_EVENT_PAYLOAD_BYTES,
             event_slots_written = 0,
-            event_slots_reserved_empty = 0,
+            event_slots_reserved_empty = storage.first_append_reserved_empty_slots(),
             event_slots_recovered = 0,
             blob_orphan_bytes = 0,
             projection_lag_events = 0,
