@@ -48,6 +48,7 @@ type StorageAppendCallNode struct {
 }
 
 func (c *checker) recordStoragePathConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
+	c.recordCoreLinkEndpointConstructor(moduleName, expr, typ, scope)
 	if typ == nil || typ.Kind != KindDriverPath || typ.Name != "NvmeIoPath" {
 		return
 	}
@@ -66,6 +67,36 @@ func (c *checker) recordStoragePathConstructor(moduleName string, expr *ast.Cons
 		QueueID: uint16(queueID),
 		Vector:  uint8(vector),
 		Span:    expr.SpanV,
+	})
+}
+
+func (c *checker) recordCoreLinkEndpointConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
+	if typ == nil || typ.Module != "machine.x86_64.core_link" {
+		return
+	}
+	role := ""
+	direction := ""
+	switch typ.Name {
+	case "CoreSpscProducer":
+		role = "producer"
+		direction = "tx"
+	case "CoreSpscConsumer":
+		role = "consumer"
+		direction = "rx"
+	default:
+		return
+	}
+	owner := c.storagePathOwnerLabel(moduleName, constructorArg(expr, "owner"), scope)
+	peer := c.storagePathOwnerLabel(moduleName, constructorArg(expr, "peer"), scope)
+	depth, _ := unsignedIntegerLiteral(constructorArg(expr, "capacity"))
+	c.graph.CoreLinkEndpoints = append(c.graph.CoreLinkEndpoints, CoreLinkEndpointNode{
+		Label:     fmt.Sprintf("core_link.%s.%d", role, len(c.graph.CoreLinkEndpoints)),
+		Direction: direction,
+		Role:      role,
+		Owner:     owner,
+		Peer:      peer,
+		Depth:     depth,
+		Span:      expr.SpanV,
 	})
 }
 
@@ -164,6 +195,7 @@ func (c *checker) checkStoragePathOwnership() {
 }
 
 func (c *checker) checkStoragePathSubmitCall(moduleName string, expr *ast.CallExpr, receiverType *Type, scope *Scope) {
+	c.checkCoreLinkEndpointCall(expr, receiverType)
 	if receiverType != nil && receiverType.Name == "MaintenanceWorker" && expr.Method == "submit" {
 		if storageCallHasForegroundPathArg(moduleName, c, expr, scope) {
 			c.error(expr.SpanV, diag.SEM0111, "maintenance worker cannot submit through foreground NVMe path")
@@ -176,6 +208,53 @@ func (c *checker) checkStoragePathSubmitCall(moduleName string, expr *ast.CallEx
 	if storageReceiverIsForegroundPath(moduleName, c, expr.Receiver, scope) {
 		c.error(expr.SpanV, diag.SEM0111, "maintenance worker cannot submit through foreground NVMe path")
 	}
+}
+
+func (c *checker) checkCoreLinkEndpointCall(expr *ast.CallExpr, receiverType *Type) {
+	role := ""
+	switch {
+	case receiverType != nil && receiverType.Module == "machine.x86_64.core_link" && receiverType.Name == "CoreSpscProducer" && expr.Method == "try_send":
+		role = "producer"
+	case receiverType != nil && receiverType.Module == "machine.x86_64.core_link" && receiverType.Name == "CoreSpscConsumer" && (expr.Method == "try_next" || expr.Method == "arm_wait"):
+		role = "consumer"
+	default:
+		return
+	}
+	owner := c.currentExecutorSlotLabel()
+	if owner == "" {
+		return
+	}
+	endpoint, ok := c.singleCoreLinkEndpoint(role)
+	if !ok || endpoint.Owner == "" || endpoint.Owner == owner {
+		return
+	}
+	c.error(expr.SpanV, diag.SEM0112, role+" endpoint owned by "+endpoint.Owner+" cannot be used by executor "+owner)
+}
+
+func (c *checker) currentExecutorSlotLabel() string {
+	if c.currentType == nil || c.currentType.Kind != KindExecutor {
+		return ""
+	}
+	for _, exec := range c.graph.Executors {
+		if exec.Type != nil && exec.Type.Key() == c.currentType.Key() {
+			return exec.SlotLabel
+		}
+	}
+	return ""
+}
+
+func (c *checker) singleCoreLinkEndpoint(role string) (CoreLinkEndpointNode, bool) {
+	var out CoreLinkEndpointNode
+	for _, endpoint := range c.graph.CoreLinkEndpoints {
+		if endpoint.Role != role {
+			continue
+		}
+		if out.Role != "" {
+			return CoreLinkEndpointNode{}, false
+		}
+		out = endpoint
+	}
+	return out, out.Role != ""
 }
 
 func storageCallHasForegroundPathArg(moduleName string, c *checker, expr *ast.CallExpr, scope *Scope) bool {
