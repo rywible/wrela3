@@ -83,8 +83,8 @@ capability or protocol extension instead of a rewrite of the stack.
 
 ### Whole-Machine Network Shape
 
-Wrela should not expose ambient network access. The image source declares the
-network shape it needs, and the compiler reports that shape.
+Wrela should not expose ambient network access by default. The image source
+declares the network shape it needs, and the compiler reports that shape.
 
 The default model is closed:
 
@@ -94,6 +94,27 @@ The default model is closed:
 - connection, request, and stream budgets are derived from declarations and
   call-graph use where possible
 - endpoint-specific TLS policy is compiled into the image
+
+Dynamic web access is still allowed, but it is a named authority rather than a
+silent escape hatch. A browser-like image can hold broad authorities such as:
+
+```text
+GeneralWebClientAuthority:
+  user-entered or app-computed HTTPS destinations are allowed
+
+DynamicDnsAuthority:
+  runtime DNS can resolve names outside the closed endpoint set
+
+PublicTrustAuthority:
+  a declared public trust store or public-root policy can validate arbitrary
+  web endpoints
+```
+
+The compiler cannot enumerate every host for a general browser, but it can still
+report that the image has dynamic outbound authority, what schemes and ports are
+allowed, maximum concurrent connections, DNS policy, trust policy, and memory
+budgets. Closed endpoint authority is the default for appliances; dynamic web
+authority is the explicit shape for free browsing.
 
 Conceptual source shape:
 
@@ -121,10 +142,12 @@ route instead of being the first source of truth. Fully dynamic DNS remains
 possible, but it is an explicit authority with its own budget and attack
 surface.
 
-### Network IO Core Owns Hardware
+### Single-Core Network Reactor First
 
-The first milestone uses a `NetworkExecutor` permanently placed on a dedicated
-executor slot and CPU. It owns NIC hardware state:
+The default architecture is a single dedicated network reactor core. The goal is
+to keep all networking on that core until measurements prove a split is needed.
+
+The network reactor owns:
 
 - NIC driver path authority
 - RX and TX descriptor rings
@@ -132,16 +155,45 @@ executor slot and CPU. It owns NIC hardware state:
 - link state
 - ARP cache
 - IPv4 address state
+- ICMP
+- UDP
+- DNS
+- DHCP
+- TCP
+- TLS
+- HTTP/1.1
+- QUIC
+- HTTP/3
+- network timers
+- retransmits
+- semantic network event emission
 
 Other executors communicate with networking through typed request queues,
 topics, or connection authorities. This keeps ownership reviewable and avoids
 cross-core mutation of descriptor rings or protocol state.
 
-The long-term model should not require one core to own all TCP, TLS, HTTP/2,
-QUIC, and HTTP/3 work forever. The intended evolution is:
+The reactor loop should have budgeted lanes so expensive work cannot starve
+urgent packet maintenance:
 
 ```text
-NetworkIoExecutor:
+urgent lane:
+  RX descriptor reclaim, TX completion, ARP, ICMP, TCP ACK/RST, retransmit
+  deadlines
+
+normal lane:
+  established TCP/TLS records, UDP endpoints, DNS, DHCP, HTTP request parsing
+
+expensive lane:
+  TLS handshakes, ML-KEM, certificate validation, large JSON bodies, QUIC crypto
+  bursts
+```
+
+The escape hatch is measured and explicit. If one core is not enough for a
+declared target, Wrela can split selected flows or crypto work onto helper
+executors:
+
+```text
+NetworkReactor:
   owns NIC rings, RX quarantine, TX completion, ARP, routing, and packet dispatch
 
 Flow executors:
@@ -151,10 +203,9 @@ Crypto executors, optional:
   own expensive handshake or bulk crypto work when the image declares them
 ```
 
-The IO executor remains the truth owner for NIC queues and packet memory. Per-flow
-executors receive narrowed authorities for specific flows and buffer leases. This
-keeps the first core model simple while leaving a path to multiqueue, RSS, and
-per-flow scaling without replacing the protocol stack.
+The reactor remains the truth owner for NIC queues and packet memory. Per-flow
+executors receive narrowed authorities for specific flows and buffer leases.
+Helper cores are a performance escape valve, not the baseline architecture.
 
 ### Cross-Executor Queue Contract
 
@@ -206,7 +257,7 @@ Conceptual typestate:
 
 ```wrela
 data QuarantinedRxBytes {
-    owner: NetworkIoExecutorSlot
+    owner: NetworkReactorSlot
     buffer: DmaBufferLease<U8>
     length: U64
 }
@@ -322,6 +373,23 @@ Timers should be represented as bounded state-machine resources. Each protocol
 declares its timer slots and maximum events per tick. The network report should
 include ARP, DNS, DHCP, TCP, TLS, and QUIC timer capacities.
 
+Wrela already has a hardware-derived `TimerAuthority` and
+`TimerDiscovery.require_periodic(...)` for periodic ticks. Networking should
+consume that authority instead of inventing a parallel timer driver. The
+networking work is the bounded timer wheel/table layered on top of the existing
+timer authority.
+
+Entropy should also be explicit. Candidate entropy sources include:
+
+- `RDSEED`
+- `RDRAND`
+- UEFI RNG protocol during boot
+- TPM RNG
+- `virtio-rng` under QEMU
+
+These sources feed a Wrela-owned CSPRNG with health checks and provenance in the
+image report. Hardware entropy is an input authority, not ambient randomness.
+
 ### Attack Surface And Exhaustion Policy
 
 Networking is hostile input. The stack should report its exposed parser and
@@ -391,9 +459,9 @@ should therefore build the boring universal path before QUIC/HTTP/3.
 ```text
 Application executors
   |
-  | typed network requests and responses
+  | typed semantic network events and response commands
   v
-Flow executors or NetworkExecutor-owned flows
+Network reactor on dedicated core
   |
   +-- HTTP/3 over QUIC over UDP later
   |
@@ -407,9 +475,6 @@ Flow executors or NetworkExecutor-owned flows
   |
   +-- ICMP over IPv4
   |
-  v
-NetworkIoExecutor on dedicated core
-  |
   +-- ARP + IPv4 + UDP/TCP
   |
   v
@@ -421,6 +486,11 @@ e1000e Ethernet device path
   v
 PCI BAR + DMA rings + MSI/MSI-X interrupt receiver
 ```
+
+The baseline path does not move packet or protocol work off the reactor. It
+emits semantic app events and accepts semantic response commands. Optional flow
+or crypto helper executors can be added later only when the image declares them
+and measurement justifies the added cross-core traffic.
 
 ### Network Authority
 
@@ -630,7 +700,7 @@ Required support:
   where the protocol permits it
 - bounded endpoint table keyed by local port
 - explicit receive queue per endpoint
-- explicit send API from the networking executor
+- explicit send API from the network reactor
 
 The first endpoint API should be simple and appliance-shaped, not POSIX sockets.
 
@@ -1047,7 +1117,7 @@ long-term modern networking story.
 ## Application API Shape
 
 The first app-facing API should not mimic POSIX sockets. Wrela should expose
-authority-bearing network values:
+authority-bearing network values and typed semantic events:
 
 ```wrela
 data NetworkEndpointAuthority {}
@@ -1058,19 +1128,97 @@ data HttpRequest {}
 data HttpResponse {}
 ```
 
-Applications ask the networking executor to open or serve explicit endpoints.
-The returned authority determines what the app can do.
+For server-side routes, apps should not need to know HTTP exists. The network
+reactor owns Ethernet, IP, TCP or QUIC, TLS, HTTP parsing, routing, and body
+framing. Apps receive typed domain events.
+
+Conceptual source shape:
+
+```wrela
+route POST "/events" body Json<EventAppendRequest>
+    -> EventAppendRequested
+
+route GET "/health"
+    -> HealthCheckRequested
+```
+
+The compiler can then generate route-specialized parsing:
+
+- match only declared methods and paths
+- accept only declared content types
+- parse JSON directly into typed event fields
+- borrow body slices through leases where safe
+- reject missing, extra, or wrong-type fields according to route policy
+- emit semantic app events into declared queues
+
+Example event shape:
+
+```wrela
+data EventAppendRequested {
+    auth: VerifiedAuth
+    stream: StreamId
+    body: HttpBodyLease
+    response: HttpResponseAuthority
+}
+```
+
+The app responds with semantic commands:
+
+```wrela
+data SendJsonResponse<T> {
+    response: HttpResponseAuthority
+    status: HttpStatus
+    body: T
+}
+
+data SendBlobResponse {
+    response: HttpResponseAuthority
+    status: HttpStatus
+    body: BlobReadLease
+}
+```
+
+The network reactor turns response commands back into HTTP, TLS, TCP or QUIC,
+and Ethernet frames. This keeps HTTP as a reactor implementation detail for
+declared routes.
+
+Client-side code similarly asks the network reactor to open or use explicit
+endpoint authorities. The returned authority determines what the app can do.
 
 Examples:
 
 ```text
-HttpClient can issue requests through the network executor.
+HttpClient can issue requests through the network reactor.
 TcpConnection can send and receive bounded byte slices.
 UdpEndpoint can send datagrams from one local port.
 DnsClient can resolve names through configured resolver authority.
 ```
 
 This preserves Wrela's capability model and avoids ambient global networking.
+
+### JSON-To-Event Performance Goal
+
+The heaviest compatibility path is:
+
+```text
+NIC RX
+  -> Ethernet/IP/TCP
+  -> TLS decrypt/authenticate
+  -> HTTP route
+  -> JSON parse
+  -> typed Wrela event
+  -> app queue
+```
+
+For `e1000e` gigabit, the target is line-rate JSON-to-event for bounded request
+schemas. The network reactor should not build a general JSON DOM. It should
+compile each declared route into a schema-specialized parser that scans the body
+once, validates expected fields, and writes or borrows directly into the typed
+event.
+
+For public-web compatibility, full JSON behavior may be required. For
+Wrela-controlled clients, a typed binary frame can avoid JSON entirely and
+promote a verified body lease directly into typed views.
 
 ## Error Handling
 
@@ -1104,16 +1252,20 @@ The image report should include:
 - selected NIC PCI identity
 - BAR ownership
 - interrupt vector and mode
-- network executor slot and CPU placement
+- network reactor executor slot and CPU placement
+- reactor loop budgets for urgent, normal, and expensive lanes
 - network arena size and subdivisions
 - RX/TX descriptor counts
 - packet buffer counts and sizes
 - packet quarantine pool size and verified packet lease budget
 - cross-executor queue producers, consumers, capacities, and wake policies
 - declared remote endpoints and local listening ports
+- dynamic web authorities, if present
 - computed or declared connection budgets
+- typed route-to-event mapping
 - endpoint trust policy and pinned SPKI or certificate identities
 - declared time, clock, and entropy authorities
+- entropy source provenance and CSPRNG policy
 - timer wheel or timer table capacities
 - attack-surface summary and admission policies
 - static or DHCP configuration mode
@@ -1140,6 +1292,7 @@ Runtime diagnostics should include bounded counters:
 - TCP admission drops
 - TLS handshake failures
 - HTTP request count
+- typed semantic events emitted by route
 
 ## Testing Strategy
 
@@ -1152,6 +1305,8 @@ Runtime diagnostics should include bounded counters:
 - reject use of quarantined bytes outside verifier functions
 - reject cross-executor packet borrows without lease transfer
 - reject closed endpoint requests to undeclared hostnames or ports
+- allow dynamic web requests only with explicit dynamic web authority
+- verify declared routes emit typed semantic events with bounded payloads
 - reject TLS endpoints without clock and entropy authority
 - reject TLS endpoints without declared trust material
 - report network arena ownership in the image report
@@ -1171,6 +1326,8 @@ Runtime diagnostics should include bounded counters:
 - build-time endpoint trust validation tests
 - packet quarantine promotion tests
 - packet lease lifetime negative tests
+- typed route-to-event parser tests
+- dynamic web authority negative tests
 - SIMD backend selection tests
 - scalar-versus-AVX2 crypto differential tests
 - AVX2-versus-AVX-512 crypto differential tests when host support exists
@@ -1225,20 +1382,23 @@ The stack should be implemented in small gates:
 9. Add IPv4 parse/emit/checksum.
 10. Add ICMP echo.
 11. Add UDP.
-12. Add time, clock, entropy, and bounded timer authorities.
+12. Add time, clock, entropy, and bounded timer authorities over the existing
+    `TimerAuthority`.
 13. Add DHCP, or keep static config if the next target is DNS/TCP.
 14. Add DNS.
 15. Add TCP.
-16. Add compile-time network shape declarations and reports.
+16. Add compile-time network shape declarations and reports, including dynamic
+    web authority.
 17. Add CPU feature discovery and vector-state policy for networking crypto.
 18. Add AVX2 fallback crypto backends.
 19. Add AVX-512 fast crypto backends.
 20. Add ML-KEM-768 and X25519MLKEM768.
 21. Add TLS 1.3 with Wrela crypto and build-time trust policy.
-22. Add HTTP/1.1.
-23. Add HTTP/2 if the use case requires it.
-24. Add QUIC.
-25. Add HTTP/3.
+22. Add HTTP/1.1 route-specialized semantic events.
+23. Add schema-specialized JSON-to-event parsing.
+24. Add HTTP/2 if the use case requires it.
+25. Add QUIC.
+26. Add HTTP/3.
 
 Every gate must have a QEMU or unit-test success criterion before the next layer
 depends on it.
@@ -1257,8 +1417,11 @@ depends on it.
   real Wrela appliance target.
 - Which closed endpoint policy syntax best expresses static endpoints and
   explicitly dynamic patterns.
+- Which dynamic web authority shape is acceptable for free browsing.
 - Which clock authority is acceptable for the first TLS image.
 - Which entropy source is required before TCP, TLS, and QUIC leave local tests.
+- What reactor loop budgets should be used for urgent, normal, and expensive
+  lanes on the first six-core target.
 - Whether the first TLS verification target is a pinned local test server or a
   known external endpoint.
 - Which real e1000e-family card is the first hardware target after QEMU.
@@ -1268,7 +1431,7 @@ depends on it.
 The design is successful when:
 
 - Wrela can boot under QEMU with `e1000e`.
-- The networking executor owns all NIC and protocol state on its dedicated core.
+- The network reactor owns all baseline networking state on its dedicated core.
 - A host can ping the Wrela image.
 - Wrela can complete a UDP exchange with a controlled host service.
 - Wrela can resolve a hostname through DNS.
@@ -1276,6 +1439,8 @@ The design is successful when:
 - Wrela rejects quarantined packet bytes outside the verifier path.
 - Wrela reports declared endpoints, connection budgets, trust policy, and timer
   budgets.
+- Wrela reports typed route-to-event mappings and dynamic web authority when
+  present.
 - Wrela reports the selected AVX2 or AVX-512 crypto backend.
 - Wrela has passing AES-GCM, SHA, HKDF, ML-KEM, X25519MLKEM768, and TLS
   key-schedule tests for each supported backend.
