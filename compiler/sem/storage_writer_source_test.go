@@ -99,6 +99,7 @@ func parseStorageWriterModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	modules := parseUEFIModuleSet(t)
 	paths := []string{
+		repoPath(t, "wrela/storage/blob.wrela"),
 		repoPath(t, "wrela/storage/format.wrela"),
 		repoPath(t, "wrela/storage/stream.wrela"),
 		repoPath(t, "wrela/storage/writer.wrela"),
