@@ -179,3 +179,62 @@ func TestCompletionQueueAdvanceWrapsHeadAndTogglesPhase(t *testing.T) {
 		t.Fatalf("after second wrap queue = %+v, want head 0 phase true", q)
 	}
 }
+
+func TestCompletionDrainStopsAtPhaseMismatch(t *testing.T) {
+	q := CompletionQueue{QueueID: 7, Depth: 4, Phase: true}
+	entries := []CompletionEntry{
+		{Phase: true},
+		{Phase: true},
+		{Phase: false},
+		{Phase: true},
+	}
+
+	interrupt := DrainCompletions(&q, entries, nil)
+
+	if interrupt.QueueID != 7 || interrupt.CompletedCount != 2 {
+		t.Fatalf("interrupt = %+v, want queue 7 completed count 2", interrupt)
+	}
+	if q.Head != 2 || !q.Phase {
+		t.Fatalf("queue = %+v, want head 2 phase true", q)
+	}
+}
+
+func TestCompletionHeadWrapTogglesPhase(t *testing.T) {
+	q := CompletionQueue{Depth: 2, Head: 1, Phase: true}
+
+	q.Advance(1)
+
+	if q.Head != 0 || q.Phase {
+		t.Fatalf("queue = %+v, want head 0 phase false", q)
+	}
+}
+
+func TestCompletionDrainRingsDoorbellAndReturnsInterrupt(t *testing.T) {
+	q := CompletionQueue{QueueID: 3, Depth: 3, Head: 2, Phase: true}
+	entries := []CompletionEntry{
+		{Phase: false},
+		{Phase: true},
+		{Phase: true},
+	}
+	var doorbells []struct {
+		queueID uint16
+		head    uint16
+	}
+
+	interrupt := DrainCompletions(&q, entries, func(queueID uint16, head uint16) {
+		doorbells = append(doorbells, struct {
+			queueID uint16
+			head    uint16
+		}{queueID: queueID, head: head})
+	})
+
+	if interrupt.QueueID != 3 || interrupt.CompletedCount != 2 {
+		t.Fatalf("interrupt = %+v, want queue 3 completed count 2", interrupt)
+	}
+	if q.Head != 1 || q.Phase {
+		t.Fatalf("queue = %+v, want head 1 phase false", q)
+	}
+	if len(doorbells) != 1 || doorbells[0].queueID != 3 || doorbells[0].head != 1 {
+		t.Fatalf("doorbells = %+v, want one ring for queue 3 head 1", doorbells)
+	}
+}

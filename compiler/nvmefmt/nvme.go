@@ -118,9 +118,10 @@ func PutLE64(dst []byte, off int, value uint64) {
 }
 
 type CompletionQueue struct {
-	Depth uint16
-	Head  uint16
-	Phase bool
+	QueueID uint16
+	Depth   uint16
+	Head    uint16
+	Phase   bool
 }
 
 func (q *CompletionQueue) Advance(count uint16) {
@@ -131,4 +132,29 @@ func (q *CompletionQueue) Advance(count uint16) {
 			q.Phase = !q.Phase
 		}
 	}
+}
+
+type CompletionEntry struct {
+	Phase bool
+}
+
+type CompletionInterrupt struct {
+	QueueID        uint16
+	CompletedCount uint32
+}
+
+func DrainCompletions(q *CompletionQueue, entries []CompletionEntry, ringDoorbell func(queueID uint16, head uint16)) CompletionInterrupt {
+	var completed uint16
+	for completed < q.Depth {
+		entry := entries[q.Head]
+		if entry.Phase != q.Phase {
+			break
+		}
+		completed++
+		q.Advance(1)
+	}
+	if completed > 0 && ringDoorbell != nil {
+		ringDoorbell(q.QueueID, q.Head)
+	}
+	return CompletionInterrupt{QueueID: q.QueueID, CompletedCount: uint32(completed)}
 }

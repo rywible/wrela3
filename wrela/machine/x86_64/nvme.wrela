@@ -86,14 +86,40 @@ data NvmeCompletionQueue {
     head: U32
     depth: U32
     expected_phase: Bool
+    current_entry_phase: Bool
     panic: BootPanic
 
     fn advance(self, count: U32) {
-        self.panic.fail(code = 0xAC080033)
+        let advanced = 0
+        while advanced < count {
+            self.head = self.head + 1
+            if self.head == self.depth {
+                self.head = 0
+                self.expected_phase = self.expected_phase == false
+            }
+            advanced = advanced + 1
+        }
     }
 
     fn drain(self) -> NvmeCompletionInterrupt {
-        self.panic.fail(code = 0xAC080034)
+        let completed = 0
+        let scanned = 0
+        let draining = true
+        while scanned < self.depth {
+            if draining == true {
+                let entry_phase = self.current_entry_phase
+                if entry_phase != self.expected_phase {
+                    draining = false
+                    scanned = self.depth
+                }
+                if draining == true {
+                    self.advance(count = 1)
+                    completed = completed + 1
+                    scanned = scanned + 1
+                }
+            }
+        }
+        return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)
     }
 }
 
@@ -213,7 +239,12 @@ driver path NvmeIoPath {
     }
 
     fn drain_completion_queue(self) -> NvmeCompletionInterrupt {
-        self.registers.panic.fail(code = 0xAC080038)
+        let completion = self.completion_queue.drain()
+        if completion.completed_count > 0 {
+            let completion_doorbell_offset = 0x1000 + ((self.completion_queue.queue_id << 1) << 2)
+            self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)
+        }
+        return completion
     }
 
     fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {

@@ -198,6 +198,54 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 	}
 }
 
+func TestNvmeCompletionMirrorContract(t *testing.T) {
+	modules := parseUEFIModuleSet(t)
+	index, ds := BuildIndex(modules)
+	if len(ds) != 0 {
+		t.Fatalf("build index diagnostics: %#v", ds)
+	}
+	checked, ds := Check(index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	completionQueue := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeCompletionQueue")
+	advanceMethod := methodByName(t, completionQueue, "advance")
+	if len(advanceMethod.Params) != 2 || advanceMethod.Params[1].Name != "count" || advanceMethod.Params[1].Type.Name != "U32" || advanceMethod.Return != nil {
+		t.Fatalf("advance signature = %#v, want count:U32 and no return", advanceMethod)
+	}
+	assertMethodSignature(t, methodByName(t, completionQueue, "drain"), nil, "NvmeCompletionInterrupt")
+
+	path := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeIoPath")
+	assertMethodSignature(t, methodByName(t, path, "drain_completion_queue"), nil, "NvmeCompletionInterrupt")
+	event := checked.Index.InterruptEvent("machine.x86_64.nvme", "NvmeIoPath")
+	if event == nil || event.EventType.Name != "NvmeCompletionInterrupt" {
+		t.Fatalf("NvmeIoPath interrupt event = %#v, want NvmeCompletionInterrupt", event)
+	}
+
+	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
+	advance := sourceBetween(t, source, "fn advance(self, count: U32) {", "\n    fn drain(self) -> NvmeCompletionInterrupt")
+	assertOrderedSubstrings(t, advance, []string{
+		"self.head = self.head + 1",
+		"if self.head == self.depth",
+		"self.head = 0",
+		"self.expected_phase = self.expected_phase == false",
+	})
+	drain := sourceBetween(t, source, "fn drain(self) -> NvmeCompletionInterrupt {", "\n}")
+	assertOrderedSubstrings(t, drain, []string{
+		"while scanned < self.depth",
+		"if entry_phase != self.expected_phase",
+		"return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)",
+	})
+	ioDrain := sourceBetween(t, source, "fn drain_completion_queue(self) -> NvmeCompletionInterrupt {", "\n    fn submit_read")
+	assertOrderedSubstrings(t, ioDrain, []string{
+		"let completion = self.completion_queue.drain()",
+		"if completion.completed_count > 0",
+		"self.registers.write32(offset = completion_doorbell_offset, value = self.completion_queue.head)",
+		"return completion",
+	})
+}
+
 func sourceBetween(t *testing.T, source string, start string, end string) string {
 	t.Helper()
 	startIndex := strings.Index(source, start)
