@@ -177,6 +177,9 @@ projection DirectoryChildren id 12 {}`
 	if toks[12].Kind != KeywordProjection {
 		t.Fatalf("projection token = %#v, want KeywordProjection", toks[12])
 	}
+	if toks[12].Text != "projection" {
+		t.Fatalf("projection text = %q, want projection", toks[12].Text)
+	}
 
 	contextual, ds := All("id layout current upcast")
 	if len(ds) != 0 {

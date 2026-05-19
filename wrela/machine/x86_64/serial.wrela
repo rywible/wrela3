@@ -68,7 +68,7 @@ driver path SerialConsolePath {
         self.registers.write8(offset = 4, value = 0x0B)
     }
 
-    fn ack_receive(self, received: U8) {
+    fn ack_receive(self, event: U8) {
         // COM1 receive is acknowledged by reading offset 0 above; this method exists so all interrupt paths expose an explicit ack hook.
     }
 

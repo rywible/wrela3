@@ -1859,7 +1859,7 @@ func (p *Parser) expectIdentifier(msg string) (lex.Token, []diag.Diagnostic) {
 
 func isNameToken(tok lex.Token) bool {
 	switch tok.Kind {
-	case lex.Identifier, lex.KeywordImage, lex.KeywordPath:
+	case lex.Identifier, lex.KeywordImage, lex.KeywordPath, lex.KeywordEvent, lex.KeywordProjection:
 		return true
 	default:
 		return false
