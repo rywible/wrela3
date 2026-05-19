@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
+	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/parse"
 	"github.com/ryanwible/wrela3/compiler/source"
 	"github.com/ryanwible/wrela3/compiler/storagefmt"
@@ -75,6 +76,28 @@ func TestProjectionSourceMirrorContract(t *testing.T) {
 	source := readRepoFile(t, "wrela/storage/projection.wrela")
 	if !strings.Contains(source, "if advance.through_event_id > self.atomic_group_frontier") {
 		t.Fatal("ProjectionTruth.accept_advance must reject through_event_id past atomic_group_frontier")
+	}
+}
+
+func TestProjectionInvalidWatermarkFails(t *testing.T) {
+	modules := parseProjectionModules(t, `
+module sem.projection_bad_watermark
+
+use { AdvanceProjection, ProjectionTruth } from storage.projections
+
+executor ProjectionWatermarkExecutor {
+    start fn main(self) -> never {
+        let truth = ProjectionTruth(atomic_group_frontier = 10)
+        let advance = AdvanceProjection(projection_id = 12, through_event_id = 11, checkpoint_root_ref = 0)
+        let accepted = truth.accept_advance(advance = advance)
+        while true {}
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0119) {
+		t.Fatalf("diagnostics = %#v, want SEM0119", ds)
 	}
 }
 

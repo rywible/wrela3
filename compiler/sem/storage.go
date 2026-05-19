@@ -124,6 +124,54 @@ func (c *checker) checkBlobCipherPolicy(moduleName string, expr *ast.Constructor
 	c.error(expr.SpanV, diag.SEM0123, "development blob cipher requires explicit opt in")
 }
 
+func (c *checker) checkProjectionAdvanceCall(moduleName string, expr *ast.CallExpr, receiverType *Type, scope *Scope) {
+	if receiverType == nil || receiverType.Name != "ProjectionTruth" || expr.Method != "accept_advance" {
+		return
+	}
+	frontier, ok := c.projectionTruthFrontier(moduleName, expr.Receiver, scope)
+	if !ok {
+		return
+	}
+	advanceExpr := namedArgExpr(expr.Args, "advance")
+	through, ok := c.advanceProjectionThroughEventID(moduleName, advanceExpr, scope)
+	if !ok {
+		return
+	}
+	if through > frontier {
+		c.error(expr.SpanV, diag.SEM0119, "projection root watermark is invalid")
+	}
+}
+
+func (c *checker) projectionTruthFrontier(moduleName string, expr ast.Expr, scope *Scope) (uint64, bool) {
+	cons := c.constructorForExpr(moduleName, expr, scope)
+	return c.constValueOfExpr(moduleName, constructorArg(cons, "atomic_group_frontier"))
+}
+
+func (c *checker) advanceProjectionThroughEventID(moduleName string, expr ast.Expr, scope *Scope) (uint64, bool) {
+	cons := c.constructorForExpr(moduleName, expr, scope)
+	return c.constValueOfExpr(moduleName, constructorArg(cons, "through_event_id"))
+}
+
+func (c *checker) constructorForExpr(moduleName string, expr ast.Expr, scope *Scope) *ast.ConstructorExpr {
+	switch e := expr.(type) {
+	case *ast.ConstructorExpr:
+		return e
+	case *ast.NameExpr:
+		if scope == nil {
+			return nil
+		}
+		origin, ok := scope.LookupOrigin(e.Name)
+		if !ok {
+			return nil
+		}
+		return origin.Constructor
+	default:
+		typ := c.exprStaticType(moduleName, expr, scope)
+		origin := c.originForExprValue(moduleName, expr, typ, scope)
+		return origin.Constructor
+	}
+}
+
 func storageWriterArgMatches(field string, typ *Type) bool {
 	if typ == nil {
 		return false
