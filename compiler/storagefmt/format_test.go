@@ -41,6 +41,14 @@ func TestFiveHundredTwelveByteLBAPacksOneSlotPerBlock(t *testing.T) {
 	}
 }
 
+func TestProjectionCannotAdvancePastFrontier(t *testing.T) {
+	state := ProjectionTruth{AtomicGroupFrontier: 10}
+	ok := state.AcceptAdvance(AdvanceProjection{ProjectionID: 12, ThroughEventID: 11})
+	if ok {
+		t.Fatal("projection advanced past frontier")
+	}
+}
+
 func TestReservedEmptySlotHeader(t *testing.T) {
 	const (
 		eventID             uint64 = 42

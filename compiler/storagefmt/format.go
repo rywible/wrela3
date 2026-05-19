@@ -112,6 +112,34 @@ type StreamDirectoryCache struct {
 	Misses uint64
 }
 
+type ProjectionRootRef struct {
+	ContainerID uint64
+	RootRef     uint64
+}
+
+type ProjectionCheckpoint struct {
+	ProjectionID         uint64
+	LayoutID             uint64
+	LayoutHash           uint64
+	WorkerCodeHash       uint64
+	LastAppendLogEventID uint64
+	RootRefs             []ProjectionRootRef
+}
+
+type AdvanceProjection struct {
+	ProjectionID   uint64
+	ThroughEventID uint64
+	CheckpointRoot uint64
+}
+
+type ProjectionTruth struct {
+	AtomicGroupFrontier uint64
+}
+
+func (p ProjectionTruth) AcceptAdvance(advance AdvanceProjection) bool {
+	return advance.ThroughEventID <= p.AtomicGroupFrontier
+}
+
 type WriterPolicy struct {
 	NextEventID     uint64
 	NextStreamID    uint64
