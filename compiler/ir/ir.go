@@ -685,19 +685,41 @@ type AsmMethod struct {
 }
 
 type Program struct {
-	Functions         []Function
-	AsmMethods        []AsmMethod
-	Data              []DataObject
-	WritableData      []DataObject
-	Entry             EntryAdapter
-	Types             map[string]TypeInfo
-	InterruptEvents   []InterruptEvent
-	OnHandlers        []OnHandler
-	InterruptBindings []InterruptBinding
-	InterruptContexts []InterruptContext
-	Topics            []TopicLayout
-	InterruptQueues   []InterruptQueueLayout
-	VcpuStarts        []VcpuStartPlan
-	Timers            []TimerRoute
-	APICMode          string
+	Functions          []Function
+	AsmMethods         []AsmMethod
+	Data               []DataObject
+	WritableData       []DataObject
+	StorageEvents      []EventLayout
+	StorageProjections []ProjectionLayout
+	Entry              EntryAdapter
+	Types              map[string]TypeInfo
+	InterruptEvents    []InterruptEvent
+	OnHandlers         []OnHandler
+	InterruptBindings  []InterruptBinding
+	InterruptContexts  []InterruptContext
+	Topics             []TopicLayout
+	InterruptQueues    []InterruptQueueLayout
+	VcpuStarts         []VcpuStartPlan
+	Timers             []TimerRoute
+	APICMode           string
+}
+
+type EventLayout struct {
+	Module        string
+	Name          string
+	EventTypeID   uint64
+	LayoutID      uint64
+	Current       bool
+	PayloadSize   uint64
+	PayloadAlign  uint64
+	EncoderSymbol string
+}
+
+type ProjectionLayout struct {
+	Module         string
+	Name           string
+	ProjectionID   uint64
+	LayoutID       uint64
+	Current        bool
+	ContainerKinds []string
 }
