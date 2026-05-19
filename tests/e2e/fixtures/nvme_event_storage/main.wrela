@@ -1,5 +1,6 @@
 module tests.e2e.fixtures.nvme_event_storage.main
 
+use { FirstAppendBuilder } from tests.e2e.fixtures.nvme_event_storage.program
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
@@ -34,6 +35,7 @@ image NvmeEventStorageImage {
     phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
         let root = PlatformDiscoveryRoot(panic = BootPanic())
         let discovery = root.from_uefi(hardware = hardware)
+        let nvme_device = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
         let root_region = discovery.memory.require_usable_region(
             min_base = 0x200000,
             length = 0x400000,
@@ -57,6 +59,8 @@ image NvmeEventStorageImage {
         let serial_irq_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = foreground_slot_seed, slots = serial_irq_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let timer = discovery.timers.require_periodic(period_us = 1000)
         let wake_strategy = discovery.cpus.wake_strategy(features = discovery.cpus.features)
+        let nvme_bar0 = nvme_device.claim_mmio_bar(index = 0)
+        let pci_plan = ClaimedPciPlanBuilder(panic = discovery.panic).empty_with_nvme(nvme_bar0 = nvme_bar0)
         let hardware_plan = HardwarePlan(
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
@@ -65,7 +69,7 @@ image NvmeEventStorageImage {
                 serial_shared_irq4 = shared_serial_route,
                 serial_irq_source = serial_irq_source
             ),
-            pci = ClaimedPciPlanBuilder(panic = discovery.panic).empty(),
+            pci = pci_plan,
             timer = timer,
             serial_irq_queue = serial_irq_queue,
             console_memory = foreground_memory_seed,
@@ -102,7 +106,7 @@ image NvmeEventStorageImage {
         let maintenance_slot = hardware.executors.claim(identity = SlotIdentity(label = "maintenance"))
         let foreground_memory = hardware.hardware_plan.executor_memory(owner = foreground_slot, memory = hardware.hardware_plan.console_memory)
         let maintenance_memory = hardware.hardware_plan.executor_memory(owner = maintenance_slot, memory = hardware.hardware_plan.worker_memory)
-        let nvme_registers = NvmeControllerRegisters(mmio = hardware.hardware_plan.pci.edu_bar0, panic = BootPanic())
+        let nvme_registers = NvmeControllerRegisters(mmio = hardware.hardware_plan.pci.nvme_bar0, panic = BootPanic())
         let nvme_interrupt_topic = Topic<NvmeCompletionInterrupt>(
             identity = TopicIdentity(label = "nvme.completion"),
             id = 4,
@@ -176,6 +180,7 @@ image NvmeEventStorageImage {
             durable_frontier = 0,
             open_batch_slots = 0
         )
+        let first_events = FirstAppendBuilder(marker = 0).events()
         let group = PendingAtomicGroup(semantic_event_count = 2)
         let append = writer.enqueue_atomic_group(group = group)
         if append.accepted == false {

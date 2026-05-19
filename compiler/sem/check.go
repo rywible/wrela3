@@ -2321,6 +2321,20 @@ func pciDeviceKeyFromRequireDevice(call *ast.CallExpr) string {
 	return "vendor=" + vendor + "/device=" + device + "/occurrence=" + occurrence
 }
 
+func pciDeviceKeyFromRequireClass(call *ast.CallExpr) string {
+	classCode := literalArgKey(call, "class_code")
+	subclass := literalArgKey(call, "subclass")
+	progIF := literalArgKey(call, "prog_if")
+	occurrence := literalArgKey(call, "occurrence")
+	if classCode == "<missing>" || subclass == "<missing>" || progIF == "<missing>" || occurrence == "<missing>" {
+		return ""
+	}
+	if classCode == "<nonliteral>" || subclass == "<nonliteral>" || progIF == "<nonliteral>" || occurrence == "<nonliteral>" {
+		return ""
+	}
+	return "class=" + classCode + "/subclass=" + subclass + "/prog_if=" + progIF + "/occurrence=" + occurrence
+}
+
 func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 	switch r := receiver.(type) {
 	case *ast.NameExpr:
@@ -2333,6 +2347,11 @@ func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 	case *ast.CallExpr:
 		if r.Method == "require_device" {
 			if key := pciDeviceKeyFromRequireDevice(r); key != "" {
+				return key, true
+			}
+		}
+		if r.Method == "require_class" {
+			if key := pciDeviceKeyFromRequireClass(r); key != "" {
 				return key, true
 			}
 		}
@@ -2749,6 +2768,10 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		receiverType.Name == "PciDeviceSet" &&
 		expr.Method == "require_device":
 		origin.PciDeviceKey = pciDeviceKeyFromRequireDevice(expr)
+	case receiverType.Module == "machine.x86_64.pci" &&
+		receiverType.Name == "PciDeviceSet" &&
+		expr.Method == "require_class":
+		origin.PciDeviceKey = pciDeviceKeyFromRequireClass(expr)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel

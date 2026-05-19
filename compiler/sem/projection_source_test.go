@@ -73,7 +73,7 @@ func TestProjectionSourceMirrorContract(t *testing.T) {
 		t.Fatal("host ProjectionTruth rejected advance through frontier")
 	}
 
-	source := readRepoFile(t, "wrela/storage/projection.wrela")
+	source := readRepoFile(t, "wrela/storage/projections.wrela")
 	if !strings.Contains(source, "if advance.through_event_id > self.atomic_group_frontier") {
 		t.Fatal("ProjectionTruth.accept_advance must reject through_event_id past atomic_group_frontier")
 	}
@@ -125,7 +125,7 @@ func parseProjectionModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{
 		repoPath(t, "wrela/lang/core.wrela"),
-		repoPath(t, "wrela/storage/projection.wrela"),
+		repoPath(t, "wrela/storage/projections.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)
 	for i, path := range paths {

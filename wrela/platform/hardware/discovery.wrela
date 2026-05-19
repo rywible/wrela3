@@ -31,7 +31,8 @@ data DiscoveredHardware {
             serial_gsi = hardware_plan.interrupts.serial_irq4.gsi,
             pci_device_count = self.pci.count,
             edu_bar0 = hardware_plan.pci.edu_bar0.address,
-            ivshmem_rx_bar0 = hardware_plan.pci.ivshmem_rx_bar0.address
+            ivshmem_rx_bar0 = hardware_plan.pci.ivshmem_rx_bar0.address,
+            nvme_bar0 = hardware_plan.pci.nvme_bar0.address
         )
     }
 }
@@ -47,6 +48,7 @@ data DiscoveryReport {
     pci_device_count: U64
     edu_bar0: PhysicalAddress
     ivshmem_rx_bar0: PhysicalAddress
+    nvme_bar0: PhysicalAddress
 }
 
 data FramebufferInfo {

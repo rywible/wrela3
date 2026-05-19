@@ -1,7 +1,33 @@
 module tests.e2e.fixtures.nvme_event_storage.program
 
 use { BlobRef, PublishedBlobRef } from storage.blob
-use { FileContentCommitted, FileCreated, FileId, FileNameKey, DirectoryProjectionWorker } from storage.file_model
+
+data FileId {
+    value: U64
+}
+
+data FileNameKey {
+    value: U64
+}
+
+data FileCreated {
+    file_id: FileId
+    parent_id: FileId
+    name_ref: FileNameKey
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+}
+
+data FileContentCommitted {
+    file_id: FileId
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+}
+
+data DirectoryProjectionWorker {
+    projection_id: U64
+    watermark: U64
+}
 
 data FirstAppendEvents {
     created: FileCreated

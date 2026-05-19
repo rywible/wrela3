@@ -8,10 +8,16 @@ import (
 func TestPciEcamEnumerationSourceContract(t *testing.T) {
 	source := readRepoFile(t, "wrela/machine/x86_64/pci.wrela")
 	required := []string{
-		"(bus - self.start_bus) << 20",
-		"device << 15",
-		"function << 12",
+		"let bus_index = self.u8_to_u64(value = bus) - self.u8_to_u64(value = self.start_bus)",
+		"device_index * 32768",
+		"function_index * 4096",
 		"offset & 0x0FFC",
+		"fn io_config_address(self, bus: U8, device: U8, function: U8, offset: U16) -> U32",
+		"address = address | (self.u8_to_u32(value = bus) << 16)",
+		"asm fn read_io_config32(self, address: U32) -> U32",
+		"asm fn write_io_config32(self, address: U32, value: U32)",
+		"out dx, eax",
+		"in eax, dx",
 		"while device < 32",
 		"while function < 8",
 		"vendor_device & 0xFFFF",

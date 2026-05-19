@@ -37,6 +37,16 @@ func TestDuplicatePciMsixClaimRejected(t *testing.T) {
 	requireOnlyDiagnostic(t, ds, diag.SEM0050, "duplicate hardware claim pci_msix:vendor=0x1234/device=0x11e8/occurrence=0")
 }
 
+func TestPciClassSelectedDeviceCanClaimBar(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "class-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar(index = 0)
+`))
+	if hasCode(ds, diag.SEM0054) {
+		t.Fatalf("class-selected PCI device lost provenance: %#v", ds)
+	}
+}
+
 func TestDuplicateIsaIrqClaimRejected(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-isa-irq-test.wrela", interruptClaimSource(`
         let first = irq_authority.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))

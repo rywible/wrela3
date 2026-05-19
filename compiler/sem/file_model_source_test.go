@@ -123,7 +123,7 @@ func parseFileModelModules(t *testing.T, consumer string) []*ast.Module {
 	paths := []string{
 		repoPath(t, "wrela/lang/core.wrela"),
 		repoPath(t, "wrela/storage/blob.wrela"),
-		repoPath(t, "wrela/storage/projection.wrela"),
+		repoPath(t, "wrela/storage/projections.wrela"),
 		repoPath(t, "wrela/storage/file_model.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)
