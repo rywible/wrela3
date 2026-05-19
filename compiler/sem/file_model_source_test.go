@@ -68,6 +68,56 @@ data FileModelConsumer {
 	}
 }
 
+func TestDirectoryProjectionWorkerMirrorContract(t *testing.T) {
+	modules := parseFileModelModules(t, `
+module sem.file_model_worker_consumer
+
+use {
+    DirectoryProjectionWorker,
+    FILE_EVENT_CREATED,
+    FILE_EVENT_RENAMED,
+    FILE_EVENT_CONTENT_COMMITTED,
+    FILE_EVENT_DELETED
+} from storage.file_model
+
+const CREATED: U64 = FILE_EVENT_CREATED
+const RENAMED: U64 = FILE_EVENT_RENAMED
+const CONTENT_COMMITTED: U64 = FILE_EVENT_CONTENT_COMMITTED
+const DELETED: U64 = FILE_EVENT_DELETED
+
+data FileModelWorkerConsumer {
+    worker: DirectoryProjectionWorker
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.file_model", "DirectoryProjectionWorker"), "apply_group")
+	for name, want := range map[string]uint64{
+		"FILE_EVENT_CREATED":           1001,
+		"FILE_EVENT_RENAMED":           1002,
+		"FILE_EVENT_CONTENT_COMMITTED": 1003,
+		"FILE_EVENT_DELETED":           1004,
+	} {
+		assertWrelaConstU64(t, checked.Index, "storage.file_model", name, want)
+	}
+
+	sourceText := readRepoFile(t, "wrela/storage/file_model.wrela")
+	for _, want := range []string{
+		"event_type_id == FILE_EVENT_CREATED",
+		"event_type_id == FILE_EVENT_RENAMED",
+		"event_type_id == FILE_EVENT_CONTENT_COMMITTED",
+		"event_type_id == FILE_EVENT_DELETED",
+	} {
+		if !strings.Contains(sourceText, want) {
+			t.Fatalf("DirectoryProjectionWorker.apply_group missing %q", want)
+		}
+	}
+}
+
 func parseFileModelModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{

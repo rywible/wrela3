@@ -327,6 +327,35 @@ func TestRelocateBlobRejectsStaleVersion(t *testing.T) {
 	}
 }
 
+func TestDirectoryProjectionPublishesGroupWatermark(t *testing.T) {
+	p := DirectoryProjection{}
+	p.ApplyGroup(CommittedGroup{LastEventID: 9}, []Event{{TypeID: 1001, FileID: 7}})
+	if p.Watermark != 9 {
+		t.Fatalf("watermark = %d, want 9", p.Watermark)
+	}
+}
+
+func TestDirectoryProjectionAppliesKnownFileEvents(t *testing.T) {
+	p := DirectoryProjection{}
+	p.ApplyGroup(CommittedGroup{LastEventID: 4}, []Event{
+		{TypeID: 1001, FileID: 7, ParentID: 1, NameRef: 11, StreamSequence: 1},
+		{TypeID: 1002, FileID: 7, ParentID: 2, NameRef: 12, StreamSequence: 2},
+		{TypeID: 1003, FileID: 7, BlobRef: BlobRef{BlobID: 99}, StreamSequence: 3},
+		{TypeID: 1004, FileID: 7, StreamSequence: 4},
+		{TypeID: 9999, FileID: 8},
+	})
+	state, ok := p.Files[7]
+	if !ok {
+		t.Fatal("file 7 missing")
+	}
+	if state.ParentID != 2 || state.NameRef != 12 || state.CurrentBlobRef.BlobID != 99 || !state.Deleted || state.StreamSequence != 4 {
+		t.Fatalf("file state = %#v", state)
+	}
+	if _, ok := p.Files[8]; ok {
+		t.Fatalf("unknown event created file 8: %#v", p.Files[8])
+	}
+}
+
 func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	writer := WriterPolicy{}
 	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)

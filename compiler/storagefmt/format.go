@@ -189,6 +189,32 @@ type RelocateBlobProposal struct {
 	ObservedVersion uint64
 }
 
+type CommittedGroup struct {
+	LastEventID uint64
+}
+
+type Event struct {
+	TypeID         uint32
+	FileID         uint64
+	ParentID       uint64
+	NameRef        uint64
+	BlobRef        BlobRef
+	StreamSequence uint64
+}
+
+type FileState struct {
+	CurrentBlobRef BlobRef
+	NameRef        uint64
+	ParentID       uint64
+	Deleted        bool
+	StreamSequence uint64
+}
+
+type DirectoryProjection struct {
+	Files     map[uint64]FileState
+	Watermark uint64
+}
+
 func (t *BlobTruth) AcceptRelocate(proposal RelocateBlobProposal) bool {
 	if proposal.BlobID != t.Ref.BlobID {
 		return false
@@ -202,6 +228,38 @@ func (t *BlobTruth) AcceptRelocate(proposal RelocateBlobProposal) bool {
 	t.Ref = proposal.NewRef
 	t.Version++
 	return true
+}
+
+func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
+	if p.Files == nil {
+		p.Files = map[uint64]FileState{}
+	}
+	for _, event := range events {
+		state := p.Files[event.FileID]
+		switch event.TypeID {
+		case 1001:
+			state.ParentID = event.ParentID
+			state.NameRef = event.NameRef
+			state.CurrentBlobRef = event.BlobRef
+			state.Deleted = false
+			state.StreamSequence = event.StreamSequence
+			p.Files[event.FileID] = state
+		case 1002:
+			state.ParentID = event.ParentID
+			state.NameRef = event.NameRef
+			state.StreamSequence = event.StreamSequence
+			p.Files[event.FileID] = state
+		case 1003:
+			state.CurrentBlobRef = event.BlobRef
+			state.StreamSequence = event.StreamSequence
+			p.Files[event.FileID] = state
+		case 1004:
+			state.Deleted = true
+			state.StreamSequence = event.StreamSequence
+			p.Files[event.FileID] = state
+		}
+	}
+	p.Watermark = group.LastEventID
 }
 
 type OrphanCollector struct {

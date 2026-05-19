@@ -3,6 +3,11 @@ module storage.file_model
 use { PublishedBlobRef } from storage.blob
 use { OrderedPages } from storage.projections
 
+const FILE_EVENT_CREATED: U64 = 1001
+const FILE_EVENT_RENAMED: U64 = 1002
+const FILE_EVENT_CONTENT_COMMITTED: U64 = 1003
+const FILE_EVENT_DELETED: U64 = 1004
+
 data FileId {
     value: U64
 }
@@ -85,4 +90,21 @@ projection DirectoryChildren id 12 {
 
 data DirectoryProjectionWorker {
     projection_id: U64
+    watermark: U64
+
+    fn apply_group(self, last_event_id: U64, event_type_id: U64) -> DirectoryProjectionWorker {
+        if event_type_id == FILE_EVENT_CREATED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_RENAMED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_CONTENT_COMMITTED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_DELETED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+    }
 }
