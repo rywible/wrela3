@@ -773,6 +773,10 @@ func compileFunction(fn ir.Function, ctx compileContext) (compiledUnit, []diag.D
 				emitFrameEnd(e, v, frame)
 			case *ir.Copy:
 				emitCopy(e, v, frame)
+			case *ir.StorageSlotStore:
+				emitStorageSlotStore(e, frame, v)
+			case *ir.StoragePayloadZero:
+				emitStoragePayloadZero(e, frame, v)
 			case *ir.Binary:
 				emitBinary(e, v, frame)
 			case *ir.Call:
@@ -1772,6 +1776,10 @@ func emitOperations(e *Emitter, ops []ir.Operation, frame Frame) {
 			emitFrameEnd(e, v, frame)
 		case *ir.Copy:
 			emitCopy(e, v, frame)
+		case *ir.StorageSlotStore:
+			emitStorageSlotStore(e, frame, v)
+		case *ir.StoragePayloadZero:
+			emitStoragePayloadZero(e, frame, v)
 		case *ir.Binary:
 			emitBinary(e, v, frame)
 		case *ir.Call:
@@ -2601,6 +2609,34 @@ func emitCopy(e *Emitter, op *ir.Copy, frame Frame) {
 		return
 	}
 	emitCopyValueToStackRange(e, frame, op.Source, slot, e.ctx.representationSize(op.Type.Name))
+}
+
+func emitStorageSlotStore(e *Emitter, frame Frame, op *ir.StorageSlotStore) {
+	emitLoadValue(e, frame, op.Value, asm.MustLookup("rax"))
+	emitLoadValue(e, frame, op.Slot, asm.MustLookup("r11"))
+	emitStoreRegAtOffset(e, asm.MustLookup("r11"), int64(op.Offset), asm.MustLookup("rax"), op.Type)
+}
+
+func emitStoreRegAtOffset(e *Emitter, base asm.Reg, offset int64, value asm.Reg, typ ir.Type) {
+	emitStoreMemFromReg(e, base, offset, value, storageSlotStoreWidthBits(e.ctx, typ))
+}
+
+func emitStoragePayloadZero(e *Emitter, frame Frame, op *ir.StoragePayloadZero) {
+	emitLoadValue(e, frame, op.Slot, asm.MustLookup("r11"))
+	emitMovImmToReg(e, asm.MustLookup("rax"), 0)
+	for offset := uint64(0); offset < op.Length; {
+		width := copyWidth(int(op.Length - offset))
+		emitStoreMemFromReg(e, asm.MustLookup("r11"), int64(op.Offset+offset), asm.MustLookup("rax"), width)
+		offset += uint64(width / 8)
+	}
+}
+
+func storageSlotStoreWidthBits(ctx compileContext, typ ir.Type) int {
+	width := ctx.storageSizeForType(typ) * 8
+	if width == 0 {
+		width = valueWidthBitsFromType(typ.Name)
+	}
+	return width
 }
 
 func emitFieldLoad(e *Emitter, op *ir.FieldLoad, frame Frame) {

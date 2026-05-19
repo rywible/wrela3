@@ -3,6 +3,7 @@ package codegen
 import (
 	"testing"
 
+	"github.com/ryanwible/wrela3/compiler/asm"
 	"github.com/ryanwible/wrela3/compiler/ir"
 )
 
@@ -40,4 +41,23 @@ func findTextUnit(t *testing.T, image *Image, symbol string) Section {
 	}
 	text := symbolBytes(t, image, symbol)
 	return Section{Name: ".text." + symbol, Data: text, Characteristics: 0x60000020}
+}
+
+func storageSlotStoreInstructionsForTest(fn ir.Function) []asm.Instruction {
+	ctx := compileContext{types: map[string]ir.TypeInfo{}}
+	var out []asm.Instruction
+	for _, block := range fn.Blocks {
+		for _, op := range block.Ops {
+			store, ok := op.(*ir.StorageSlotStore)
+			if !ok {
+				continue
+			}
+			width := storageSlotStoreWidthBits(ctx, store.Type)
+			out = append(out, asm.Instruction{Mnemonic: "mov", Operands: []asm.Operand{
+				asm.MemOperand{Base: asm.MustLookup("r11"), Disp: int64(store.Offset), Width: width},
+				asm.RegOperand{Reg: registerForWidth(asm.MustLookup("rax"), width)},
+			}})
+		}
+	}
+	return out
 }
