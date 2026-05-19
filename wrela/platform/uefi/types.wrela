@@ -66,6 +66,23 @@ class UefiBootServices {
     exit: VirtualAddress
     unload_image: VirtualAddress
     exit_boot_services: VirtualAddress
+    get_next_monotonic_count: VirtualAddress
+    stall: VirtualAddress
+    set_watchdog_timer: VirtualAddress
+    connect_controller: VirtualAddress
+    disconnect_controller: VirtualAddress
+    open_protocol: VirtualAddress
+    close_protocol: VirtualAddress
+    open_protocol_information: VirtualAddress
+    protocols_per_handle: VirtualAddress
+    locate_handle_buffer: VirtualAddress
+    locate_protocol: VirtualAddress
+    install_multiple_protocol_interfaces: VirtualAddress
+    uninstall_multiple_protocol_interfaces: VirtualAddress
+    calculate_crc32: VirtualAddress
+    copy_mem: VirtualAddress
+    set_mem: VirtualAddress
+    create_event_ex: VirtualAddress
 }
 
 data UefiConfigurationTableEntry {
@@ -157,6 +174,43 @@ data DelegatedBytes {
 data DelegatedMutableBytes {
     address: VirtualAddress
     length: U64
+
+    asm fn read_u64(self, offset: U64) -> U64 {
+        mov r11, self.address
+        add r11, offset
+        mov rax, [r11]
+        ret
+    }
+
+    asm fn write_u64(self, offset: U64, value: U64) {
+        mov r11, self.address
+        add r11, offset
+        mov rax, value
+        mov [r11], rax
+        ret
+    }
+
+    asm fn zero(self) {
+        mov r11, self.address
+        mov rcx, self.length
+        mov rax, 0
+    zero_loop:
+        cmp rcx, 8
+        jl zero_tail
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 8
+        jmp zero_loop
+    zero_tail:
+        cmp rcx, 0
+        je zero_done
+        mov [r11], al
+        add r11, 1
+        sub rcx, 1
+        jmp zero_tail
+    zero_done:
+        ret
+    }
 }
 
 data UefiMemoryMap {

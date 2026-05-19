@@ -91,7 +91,7 @@ executor ProductionSubstrateProgram {
             match self.ivshmem_events.try_next() {
                 Option.Some(value = ivshmem_event) => {
                     self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                    self.ivshmem_rx.ack_doorbell(event = ivshmem_event)
+                    self.ivshmem_rx.ack_doorbell(doorbell = ivshmem_event)
                 }
                 Option.None => {
                     self.ivshmem_events.arm_wait()
@@ -127,7 +127,7 @@ executor ProductionSubstrateProgram {
             if let Option.Some(value = ivshmem_retry) = self.ivshmem_events.try_next() {
                 had_retry_event = true
                 self.serial_path.write(self.memory.bytes(value = "msix interrupt\n"))
-                self.ivshmem_rx.ack_doorbell(event = ivshmem_retry)
+                self.ivshmem_rx.ack_doorbell(doorbell = ivshmem_retry)
             }
             if let Option.Some(value = tick_retry) = self.console_ticks.try_next() {
                 had_retry_event = true

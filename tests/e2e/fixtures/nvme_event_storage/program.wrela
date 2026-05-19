@@ -1,6 +1,8 @@
 module tests.e2e.fixtures.nvme_event_storage.program
 
-use { BlobRef, PublishedBlobRef } from storage.blob
+use { BlobOrphanCollector, BlobRef, BlobTruth, Extent, PublishedBlobRef, RelocateBlobProposal } from storage.blob
+use { EventRecoveryScanner } from storage.event_log
+use { EventSlotHeader } from storage.format
 
 data FileId {
     value: U64
@@ -27,12 +29,28 @@ data FileContentCommitted {
 data DirectoryProjectionWorker {
     projection_id: U64
     watermark: U64
+
+    fn apply_group(self, last_event_id: U64, event_type_id: U64) -> DirectoryProjectionWorker {
+        if event_type_id == 1001 {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == 1003 {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+    }
 }
 
 data FirstAppendEvents {
     created: FileCreated
     committed: FileContentCommitted
     directory_worker: DirectoryProjectionWorker
+}
+
+data ReplayOutcome {
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
 }
 
 data FirstAppendBuilder {
@@ -55,5 +73,81 @@ data FirstAppendBuilder {
             ),
             directory_worker = DirectoryProjectionWorker(projection_id = 12, watermark = 0)
         )
+    }
+
+    fn replay_outcome(
+        self,
+        events: FirstAppendEvents,
+        recovered_last_event_id: U64,
+        recovered_projection_watermark: U64,
+        recovered_orphan_collected: Bool
+    ) -> ReplayOutcome {
+        let first_header = EventSlotHeader(
+            event_id = 0,
+            stream_id = events.created.file_id.value,
+            stream_sequence = events.created.stream_sequence,
+            event_type_id = 1001,
+            payload_layout_id = 1,
+            atomic_group_len = 2,
+            atomic_group_index = 0,
+            payload_length = 0,
+            flags = 0,
+            checksum32 = 0,
+            header_version = 1,
+            reserved16 = 0,
+            reserved64 = 0
+        )
+        let second_header = EventSlotHeader(
+            event_id = 1,
+            stream_id = events.committed.file_id.value,
+            stream_sequence = events.committed.stream_sequence,
+            event_type_id = 1003,
+            payload_layout_id = 1,
+            atomic_group_len = 2,
+            atomic_group_index = 1,
+            payload_length = 0,
+            flags = 0,
+            checksum32 = 0,
+            header_version = 1,
+            reserved16 = 0,
+            reserved64 = 0
+        )
+        let scanner = EventRecoveryScanner()
+        let first_recovery = scanner.validate_group_member(header = first_header)
+        let projected = events.directory_worker.apply_group(last_event_id = second_header.event_id, event_type_id = 1003)
+        let old_ref = BlobRef(blob_id = 10)
+        let new_ref = BlobRef(blob_id = 20)
+        let truth = BlobTruth(blob_id = 1, ref = old_ref, version = 1)
+        let relocation = RelocateBlobProposal(blob_id = 1, old_ref = old_ref, new_ref = new_ref, observed_version = 0)
+        let relocation_accepted = truth.accept_relocate(proposal = relocation)
+        let collector = BlobOrphanCollector(
+            allocated = Extent(start_lba = 20, block_count = 2),
+            acknowledged_refs = old_ref
+        )
+        let reclaimed = collector.reclaimable()
+        let orphan_collected = false
+        if relocation_accepted == false {
+            if first_recovery.visible_events == 1 {
+                if second_header.event_id == 1 {
+                    if reclaimed.start_lba == 20 {
+                        if reclaimed.block_count == 2 {
+                            orphan_collected = true
+                        }
+                    }
+                }
+            }
+        }
+        let last_event_id = 0
+        if second_header.event_id == recovered_last_event_id {
+            last_event_id = recovered_last_event_id
+        }
+        let projection_watermark = 0
+        if projected.watermark == recovered_projection_watermark {
+            projection_watermark = recovered_projection_watermark
+        }
+        if recovered_orphan_collected == false {
+            orphan_collected = false
+        }
+        return ReplayOutcome(last_event_id = last_event_id, projection_watermark = projection_watermark, orphan_collected = orphan_collected)
     }
 }

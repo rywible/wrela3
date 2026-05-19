@@ -1,0 +1,144 @@
+module machine.x86_64.qemu_fw_cfg
+
+use { PortIo } from arch.x86_64.io
+
+class QemuFwCfg {
+    io: PortIo
+
+    fn select(self, selector: U16) {
+        self.io.out16(port = 0x0510, value = selector)
+    }
+
+    fn read_u8(self) -> U8 {
+        return self.io.in8(port = 0x0511)
+    }
+
+    fn byte_matches(self, value: U8, expected: U8) -> Bool {
+        if value < expected {
+            return false
+        }
+        if value > expected {
+            return false
+        }
+        return true
+    }
+
+    fn selector_payload_mode_is_replay(self, selector: U16) -> Bool {
+        self.select(selector = selector)
+        if self.byte_matches(value = self.read_u8(), expected = 0x77) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x6C) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x61) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x3A) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x70) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x6C) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x61) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x79) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0) == false { return false }
+        return true
+    }
+
+    fn selector_payload_mode_is_first(self, selector: U16) -> Bool {
+        self.select(selector = selector)
+        if self.byte_matches(value = self.read_u8(), expected = 0x77) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x6C) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x61) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x3A) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x66) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x69) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x73) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0x74) == false { return false }
+        if self.byte_matches(value = self.read_u8(), expected = 0) == false { return false }
+        return true
+    }
+
+    fn selector_payload_mode_is_invalid(self, selector: U16) -> Bool {
+        if self.selector_payload_mode_is_first(selector = selector) {
+            return false
+        }
+        if self.selector_payload_mode_is_replay(selector = selector) {
+            return false
+        }
+        return true
+    }
+
+    fn signature_present(self) -> Bool {
+        self.select(selector = 0x0000)
+        let byte0 = self.read_u8()
+        let byte1 = self.read_u8()
+        let byte2 = self.read_u8()
+        let byte3 = self.read_u8()
+        if self.byte_matches(value = byte0, expected = 0x51) {
+            if self.byte_matches(value = byte1, expected = 0x45) {
+                if self.byte_matches(value = byte2, expected = 0x4D) {
+                    if self.byte_matches(value = byte3, expected = 0x55) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    fn storage_mode_selector_from_directory(self) -> U16 {
+        self.select(selector = 0x0019)
+        self.read_u8()
+        self.read_u8()
+        self.read_u8()
+        let count = self.read_u8()
+        let index = 0
+        while index < count {
+            self.read_u8()
+            self.read_u8()
+            self.read_u8()
+            self.read_u8()
+            let selector_hi = self.read_u8()
+            let selector_lo = self.read_u8()
+            self.read_u8()
+            self.read_u8()
+            let matches = true
+            if self.byte_matches(value = self.read_u8(), expected = 0x6F) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x70) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x74) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x2F) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x77) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x6C) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x61) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x2E) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x73) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x74) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x6F) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x72) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x61) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x67) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x2E) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x6D) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x6F) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x64) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0x65) == false { matches = false }
+            if self.byte_matches(value = self.read_u8(), expected = 0) == false { matches = false }
+            let skip = 33
+            while skip > 0 {
+                self.read_u8()
+                skip = skip - 1
+            }
+            if matches {
+                if self.byte_matches(value = selector_hi, expected = 0) {
+                    return selector_lo
+                }
+            }
+            index = index + 1
+        }
+        return 0
+    }
+
+}

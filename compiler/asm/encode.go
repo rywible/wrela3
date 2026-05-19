@@ -314,6 +314,9 @@ func encodeOut(ins Instruction) ([]byte, bool) {
 	if strings.ToLower(a.Reg.Name) == "dx" && strings.ToLower(b.Reg.Name) == "al" {
 		return []byte{0xEE}, true
 	}
+	if strings.ToLower(a.Reg.Name) == "dx" && strings.ToLower(b.Reg.Name) == "ax" {
+		return []byte{0x66, 0xEF}, true
+	}
 	if strings.ToLower(a.Reg.Name) == "dx" && strings.ToLower(b.Reg.Name) == "eax" {
 		return []byte{0xEF}, true
 	}

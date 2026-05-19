@@ -134,7 +134,10 @@ image CacheMemorySmoke {
             serial_irq_queue = serial_irq_queue,
             console_memory = console_memory_seed,
             worker_memory = worker_memory_seed,
-            wake_strategy = wake_strategy
+            wake_strategy = wake_strategy,
+            storage_replay_last_event_id = 0,
+            storage_replay_projection_watermark = 0,
+            storage_replay_orphan_collected = 0
         )
         let memory_plan = MemoryPlan(
             owned_memory = OwnedMemory(arena = memory_region),

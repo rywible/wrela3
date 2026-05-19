@@ -99,7 +99,10 @@ image ProductionSubstrate {
             serial_irq_queue = serial_irq_queue,
             console_memory = console_memory_seed,
             worker_memory = worker_memory,
-            wake_strategy = wake_strategy
+            wake_strategy = wake_strategy,
+            storage_replay_last_event_id = 0,
+            storage_replay_projection_watermark = 0,
+            storage_replay_orphan_collected = 0
         )
         let discovery_report = discovery.report(memory = memory_region, hardware_plan = hardware_plan)
         if discovery_report.memory_length < 0x600000 {

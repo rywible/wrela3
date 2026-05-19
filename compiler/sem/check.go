@@ -245,8 +245,8 @@ type checker struct {
 	currentMethodTypeParams map[string]*Type
 	currentMethodWhere      []TraitBound
 	seenSharedIRQSource     map[string]bool
-	// TODO: scope these discovered plan facts to constructor expression IDs if
-	// images ever allow multiple CPU or hardware plan builders.
+	// Current images use one CPU and hardware plan builder, so these plan facts
+	// are tracked at checker scope.
 	cpuFeatureLoopStrategy   string
 	cpuFeatureLoopFallback   string
 	hardwarePlanWakeStrategy string

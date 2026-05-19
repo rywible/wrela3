@@ -119,7 +119,7 @@ image BadDuplicatePciClaim {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
@@ -190,7 +190,7 @@ image BadInterruptClaim {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
@@ -260,7 +260,7 @@ image BadDuplicateBar {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
@@ -329,7 +329,7 @@ image BadDuplicateVector {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = plan_interrupts.local_apic,

@@ -272,7 +272,7 @@ image InterruptQueueTest {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
@@ -343,7 +343,7 @@ image SharedIrqTest {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,

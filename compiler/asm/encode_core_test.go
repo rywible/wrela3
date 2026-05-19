@@ -9,6 +9,7 @@ func TestEncodeExactInstructions(t *testing.T) {
 	r := must(Lookup("rax"))
 	dx := must(Lookup("dx"))
 	al := must(Lookup("al"))
+	ax := must(Lookup("ax"))
 	eax := must(Lookup("eax"))
 	r11 := must(Lookup("r11"))
 
@@ -51,6 +52,11 @@ func TestEncodeExactInstructions(t *testing.T) {
 			name: "in al, dx",
 			code: []Instruction{{Mnemonic: "in", Operands: []Operand{RegOperand{al}, RegOperand{dx}}}},
 			want: []byte{0xEC},
+		},
+		{
+			name: "out dx, ax",
+			code: []Instruction{{Mnemonic: "out", Operands: []Operand{RegOperand{dx}, RegOperand{ax}}}},
+			want: []byte{0x66, 0xEF},
 		},
 		{
 			name: "out dx, eax",

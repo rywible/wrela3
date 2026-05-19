@@ -1,0 +1,371 @@
+module platform.uefi.block_io
+
+use { BootPanic } from platform.hardware.panic
+use { DelegatedMutableBytes, UefiBootServices, UefiHandle, UefiStatus } from platform.uefi.types
+
+const WRELA_STORAGE_SENTINEL_MAGIC: U64 = 0x3152564E41455257
+const WRELA_STORAGE_SENTINEL_LBA: U64 = 4096
+const WRELA_STORAGE_MIN_LAST_BLOCK: U64 = 8000000
+
+data BlockIoHandleBufferResult {
+    status: UefiStatus
+    count: U64
+    buffer: VirtualAddress
+}
+
+data BlockIoProtocolResult {
+    status: UefiStatus
+    interface: VirtualAddress
+}
+
+data StorageReplayState {
+    recovered: Bool
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
+}
+
+class UefiBlockIoBootServices {
+    boot_services: UefiBootServices
+
+    asm fn locate_block_io_handles(self) -> BlockIoHandleBufferResult {
+        push rbp
+        mov rbp, rsp
+        sub rsp, 160
+
+        mov [rbp - 8], r10
+        mov [rbp - 56], rbx
+        mov [rbp - 64], rsi
+        mov [rbp - 72], rdi
+        mov [rbp - 80], r12
+        mov [rbp - 88], r13
+        mov [rbp - 96], r14
+        mov [rbp - 104], r15
+        mov rax, 0x11D26459964E5B21
+        mov [rbp - 32], rax
+        mov rax, 0x3B7269C9A000398E
+        mov [rbp - 24], rax
+        mov rax, 0
+        mov [rbp - 40], rax
+        mov [rbp - 48], rax
+
+        mov rcx, 2
+        mov rdx, rbp
+        sub rdx, 32
+        mov r8, 0
+        mov r9, rbp
+        sub r9, 40
+        mov r11, rbp
+        sub r11, 48
+        mov [rsp + 32], r11
+        mov rax, self.boot_services
+        mov rax, [rax + UefiBootServices.locate_handle_buffer]
+        call rax
+
+        mov rbx, [rbp - 56]
+        mov rsi, [rbp - 64]
+        mov rdi, [rbp - 72]
+        mov r12, [rbp - 80]
+        mov r13, [rbp - 88]
+        mov r14, [rbp - 96]
+        mov r15, [rbp - 104]
+
+        mov r11, [rbp - 8]
+        mov [r11 + 0], rax
+        mov rax, [rbp - 40]
+        mov [r11 + 8], rax
+        mov rax, [rbp - 48]
+        mov [r11 + 16], rax
+        mov rax, r11
+
+        add rsp, 160
+        pop rbp
+        ret
+    }
+
+    asm fn handle_block_io(self, handle: UefiHandle) -> BlockIoProtocolResult {
+        push rbp
+        mov rbp, rsp
+        sub rsp, 144
+
+        mov [rbp - 8], r10
+        mov [rbp - 48], rbx
+        mov [rbp - 56], rsi
+        mov [rbp - 64], rdi
+        mov [rbp - 72], r12
+        mov [rbp - 80], r13
+        mov [rbp - 88], r14
+        mov [rbp - 96], r15
+        mov rax, 0x11D26459964E5B21
+        mov [rbp - 32], rax
+        mov rax, 0x3B7269C9A000398E
+        mov [rbp - 24], rax
+        mov rax, 0
+        mov [rbp - 40], rax
+
+        mov rcx, [rsi]
+        mov rdx, rbp
+        sub rdx, 32
+        mov r8, rbp
+        sub r8, 40
+        mov rax, self.boot_services
+        mov rax, [rax + UefiBootServices.handle_protocol]
+        call rax
+
+        mov rbx, [rbp - 48]
+        mov rsi, [rbp - 56]
+        mov rdi, [rbp - 64]
+        mov r12, [rbp - 72]
+        mov r13, [rbp - 80]
+        mov r14, [rbp - 88]
+        mov r15, [rbp - 96]
+
+        mov r11, [rbp - 8]
+        mov [r11 + 0], rax
+        mov rax, [rbp - 40]
+        mov [r11 + 8], rax
+        mov rax, r11
+
+        add rsp, 144
+        pop rbp
+        ret
+    }
+}
+
+data BlockIoHandleBuffer {
+    address: VirtualAddress
+    count: U64
+
+    asm fn handle_at(self, index: U64) -> UefiHandle {
+        mov r8, r10
+        mov r11, self.address
+        mov r10, index
+        mov r9, 0
+    handle_offset_loop:
+        cmp r10, 0
+        je handle_offset_done
+        add r9, 8
+        sub r10, 1
+        jmp handle_offset_loop
+    handle_offset_done:
+        mov r10, r9
+        add r11, r10
+        mov r10, [r11]
+        mov [r8], r10
+        mov rax, r8
+        ret
+    }
+}
+
+data UefiBlockIoProtocol {
+    address: VirtualAddress
+
+    asm fn media_id(self) -> U32 {
+        mov r11, self.address
+        mov r11, [r11 + 8]
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn block_size(self) -> U32 {
+        mov r11, self.address
+        mov r11, [r11 + 8]
+        mov eax, [r11 + 12]
+        ret
+    }
+
+    asm fn last_block(self) -> U64 {
+        mov r11, self.address
+        mov r11, [r11 + 8]
+        mov rax, [r11 + 24]
+        ret
+    }
+
+    asm fn read_blocks(self, lba: U64, buffer: DelegatedMutableBytes, byte_count: U64) -> UefiStatus {
+        push rbp
+        mov rbp, rsp
+        sub rsp, 128
+
+        mov [rbp - 8], r10
+        mov [rbp - 16], rdx
+        mov [rbp - 24], rcx
+        mov [rbp - 32], rbx
+        mov [rbp - 40], rsi
+        mov [rbp - 48], rdi
+        mov [rbp - 56], r12
+        mov [rbp - 64], r13
+        mov [rbp - 72], r14
+        mov [rbp - 80], r15
+        mov rcx, self.address
+        mov r11, [rcx + 8]
+        mov edx, [r11]
+        mov r8, lba
+        mov r9, [rbp - 24]
+        mov r11, [rbp - 16]
+        mov r11, [r11 + DelegatedMutableBytes.address]
+        mov [rsp + 32], r11
+        mov r11, self.address
+        mov rax, [r11 + 24]
+        call rax
+
+        mov rbx, [rbp - 32]
+        mov rsi, [rbp - 40]
+        mov rdi, [rbp - 48]
+        mov r12, [rbp - 56]
+        mov r13, [rbp - 64]
+        mov r14, [rbp - 72]
+        mov r15, [rbp - 80]
+
+        mov r11, [rbp - 8]
+        mov [r11], rax
+        mov rax, r11
+        add rsp, 128
+        pop rbp
+        ret
+    }
+
+    asm fn write_blocks(self, lba: U64, buffer: DelegatedMutableBytes, byte_count: U64) -> UefiStatus {
+        push rbp
+        mov rbp, rsp
+        sub rsp, 128
+
+        mov [rbp - 8], r10
+        mov [rbp - 16], rdx
+        mov [rbp - 24], rcx
+        mov [rbp - 32], rbx
+        mov [rbp - 40], rsi
+        mov [rbp - 48], rdi
+        mov [rbp - 56], r12
+        mov [rbp - 64], r13
+        mov [rbp - 72], r14
+        mov [rbp - 80], r15
+        mov rcx, self.address
+        mov r11, [rcx + 8]
+        mov edx, [r11]
+        mov r8, lba
+        mov r9, [rbp - 24]
+        mov r11, [rbp - 16]
+        mov r11, [r11 + DelegatedMutableBytes.address]
+        mov [rsp + 32], r11
+        mov r11, self.address
+        mov rax, [r11 + 32]
+        call rax
+
+        mov rbx, [rbp - 32]
+        mov rsi, [rbp - 40]
+        mov rdi, [rbp - 48]
+        mov r12, [rbp - 56]
+        mov r13, [rbp - 64]
+        mov r14, [rbp - 72]
+        mov r15, [rbp - 80]
+
+        mov r11, [rbp - 8]
+        mov [r11], rax
+        mov rax, r11
+        add rsp, 128
+        pop rbp
+        ret
+    }
+
+}
+
+class UefiStorageSentinel {
+    services: UefiBlockIoBootServices
+    scratch: DelegatedMutableBytes
+    panic: BootPanic
+
+    fn candidate_handles(self) -> BlockIoHandleBuffer {
+        let handles = self.services.locate_block_io_handles()
+        if handles.status.value != 0 {
+            self.panic.fail(code = 0xAC080149)
+        }
+        return BlockIoHandleBuffer(address = handles.buffer, count = handles.count)
+    }
+
+    fn is_candidate(self, protocol: UefiBlockIoProtocol) -> Bool {
+        if protocol.block_size() == 512 {
+            if protocol.last_block() > WRELA_STORAGE_MIN_LAST_BLOCK {
+                return true
+            }
+        }
+        return false
+    }
+
+    fn prepare_first_append_block(self) -> DelegatedMutableBytes {
+        let block = DelegatedMutableBytes(address = (self.scratch.address + 4095) & (0 - 4096), length = 512)
+        block.zero()
+        block.write_u64(offset = 0, value = WRELA_STORAGE_SENTINEL_MAGIC)
+        block.write_u64(offset = 8, value = 1)
+        block.write_u64(offset = 16, value = 1)
+        block.write_u64(offset = 24, value = 1)
+        return block
+    }
+
+    fn prepare_empty_block(self) -> DelegatedMutableBytes {
+        let block = DelegatedMutableBytes(address = (self.scratch.address + 4095) & (0 - 4096), length = 512)
+        block.zero()
+        return block
+    }
+
+    fn write_first_append(self) {
+        let buffer = self.candidate_handles()
+        let block = self.prepare_first_append_block()
+        let index = 0
+        let last_status = 0
+        while index < buffer.count {
+            let protocol_result = self.services.handle_block_io(handle = buffer.handle_at(index = index))
+            if protocol_result.status.value == 0 {
+                let protocol = UefiBlockIoProtocol(address = protocol_result.interface)
+                if self.is_candidate(protocol = protocol) {
+                    let write_status = protocol.write_blocks(lba = WRELA_STORAGE_SENTINEL_LBA, buffer = block, byte_count = 512)
+                    last_status = write_status.value & 0xFFFF
+                    if write_status.value == 0 {
+                        block.zero()
+                        let read_status = protocol.read_blocks(lba = WRELA_STORAGE_SENTINEL_LBA, buffer = block, byte_count = 512)
+                        last_status = read_status.value & 0xFFFF
+                        if read_status.value == 0 {
+                            if block.read_u64(offset = 0) == WRELA_STORAGE_SENTINEL_MAGIC {
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+            index = index + 1
+        }
+        self.panic.fail(code = 0xAC080000 + last_status)
+    }
+
+    fn read_replay_state(self) -> StorageReplayState {
+        let buffer = self.candidate_handles()
+        let block = self.prepare_empty_block()
+        let index = 0
+        while index < buffer.count {
+            let protocol_result = self.services.handle_block_io(handle = buffer.handle_at(index = index))
+            if protocol_result.status.value == 0 {
+                let protocol = UefiBlockIoProtocol(address = protocol_result.interface)
+                if self.is_candidate(protocol = protocol) {
+                    block.zero()
+                    let status = protocol.read_blocks(lba = WRELA_STORAGE_SENTINEL_LBA, buffer = block, byte_count = 512)
+                    if status.value == 0 {
+                        if block.read_u64(offset = 0) == WRELA_STORAGE_SENTINEL_MAGIC {
+                            return StorageReplayState(
+                                recovered = true,
+                                last_event_id = block.read_u64(offset = 8),
+                                projection_watermark = block.read_u64(offset = 16),
+                                orphan_collected = block.read_u64(offset = 24) > 0
+                            )
+                        }
+                    }
+                }
+            }
+            index = index + 1
+        }
+        return StorageReplayState(
+            recovered = false,
+            last_event_id = 0,
+            projection_watermark = 0,
+            orphan_collected = false
+        )
+    }
+}

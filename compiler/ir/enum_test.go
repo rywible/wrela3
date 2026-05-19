@@ -10,7 +10,7 @@ data Event { kind: U64 }
 executor Worker {
     start fn run(self, next: Option<Event>) -> never {
         match next {
-            Option.Some(value = event) => { let k = event.kind }
+            Option.Some(value = next_event) => { let k = next_event.kind }
             Option.None => { let z = 0 }
         }
         while true {}
@@ -36,7 +36,7 @@ class Worker {
     fn consume(self, event: Event) {}
     start fn run(self, next: Option<Event>) -> never {
         match next {
-            Option.Some(value = event) => { self.consume(event = event) }
+            Option.Some(value = next_event) => { self.consume(event = next_event) }
             Option.None => {}
         }
         while true {}

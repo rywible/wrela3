@@ -237,7 +237,7 @@ image DiscoveryFactsImage {
         let queue_slots = console_memory.reserve_array(U8, count = 64)
         let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let arena = MutableBytes(address = 0, length = 0)
-        let hardware_plan = HardwarePlan(
+        let hardware_plan = HardwarePlan(storage_replay_last_event_id = 0, storage_replay_projection_watermark = 0, storage_replay_orphan_collected = 0,
             cpus = discovery.cpus.require_min_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = local_apic,

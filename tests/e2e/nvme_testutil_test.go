@@ -25,6 +25,15 @@ func createSparseRawDisk(t *testing.T, path string, bytes int64) {
 
 func runStorageQEMU(t *testing.T, disk, mode string) string {
 	t.Helper()
+	out, err := runStorageQEMUResult(t, disk, mode)
+	if err != nil {
+		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
+	}
+	return out
+}
+
+func runStorageQEMUResult(t *testing.T, disk, mode string) (string, error) {
+	t.Helper()
 	deps := requireQEMUDeps(t, false)
 
 	tmp := t.TempDir()
@@ -53,11 +62,8 @@ func runStorageQEMU(t *testing.T, disk, mode string) string {
 		ExtraArgs: []string{
 			"-drive", "file=" + disk + ",if=none,id=nvme0,format=raw",
 			"-device", "nvme,drive=nvme0,serial=wrela-storage-0",
-			"-fw_cfg", "name=wrela.storage.mode,string=" + mode,
+			"-fw_cfg", "name=opt/wrela.storage.mode,string=wrela:" + mode,
 		},
 	})
-	if err != nil {
-		t.Fatalf("qemu failed: %v\nserial output:\n%s", err, out)
-	}
-	return out
+	return out, err
 }

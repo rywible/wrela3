@@ -1542,6 +1542,15 @@ func emitBinary(e *Emitter, op *ir.Binary, frame Frame) {
 		emitLoadValue(e, frame, op.Right, scratchRegs[1])
 		emitRegRegOp(e, 0x31, asm.MustLookup("rdx"), asm.MustLookup("rdx"))
 		emitUnsignedDivReg(e, scratchRegs[1])
+	case "%":
+		if op.Type.Name != "U64" {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "unsupported binary op: %"})
+			return
+		}
+		emitLoadValue(e, frame, op.Right, scratchRegs[1])
+		emitRegRegOp(e, 0x31, asm.MustLookup("rdx"), asm.MustLookup("rdx"))
+		emitUnsignedDivReg(e, scratchRegs[1])
+		emitRegRegMove(e, scratchRegs[0], asm.MustLookup("rdx"))
 	case "shl", "shr":
 		constValue, ok := op.Right.(*ir.ConstInt)
 		if !ok || constValue.Value > 63 {
