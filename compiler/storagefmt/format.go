@@ -167,6 +167,47 @@ type Extent struct {
 	BlockCount uint64
 }
 
+type BlobRef struct {
+	StartLBA   uint64
+	BlockCount uint64
+}
+
+func BlobRefForExtent(startLBA, blockCount uint64) BlobRef {
+	return BlobRef{StartLBA: startLBA, BlockCount: blockCount}
+}
+
+type OrphanCollector struct {
+	allocated        []Extent
+	acknowledgedRefs map[BlobRef]struct{}
+}
+
+func NewOrphanCollector(allocated []Extent) *OrphanCollector {
+	extents := make([]Extent, len(allocated))
+	copy(extents, allocated)
+	return &OrphanCollector{
+		allocated:        extents,
+		acknowledgedRefs: make(map[BlobRef]struct{}),
+	}
+}
+
+func (c *OrphanCollector) MarkAcknowledged(ref BlobRef) {
+	c.acknowledgedRefs[ref] = struct{}{}
+}
+
+func (c *OrphanCollector) MarkUnacknowledged(ref BlobRef) {
+}
+
+func (c *OrphanCollector) Reclaimable() []Extent {
+	var reclaimable []Extent
+	for _, extent := range c.allocated {
+		if _, ok := c.acknowledgedRefs[BlobRefForExtent(extent.StartLBA, extent.BlockCount)]; ok {
+			continue
+		}
+		reclaimable = append(reclaimable, extent)
+	}
+	return reclaimable
+}
+
 type FreeExtentList struct {
 	capacity uint64
 	extents  []Extent

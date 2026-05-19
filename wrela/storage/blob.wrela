@@ -66,3 +66,19 @@ data BlobExtentAllocator {
         return UnpublishedBlobRef(ref = BlobRef(blob_id = blob_id), manifest_lba = extent.start_lba)
     }
 }
+
+data BlobOrphanCollector {
+    allocated: Extent
+    acknowledged_refs: BlobRef
+
+    fn mark_acknowledged(self, ref: BlobRef) -> BlobOrphanCollector {
+        return BlobOrphanCollector(allocated = self.allocated, acknowledged_refs = ref)
+    }
+
+    fn reclaimable(self) -> Extent {
+        if self.acknowledged_refs.blob_id == self.allocated.start_lba {
+            return Extent(start_lba = 0, block_count = 0)
+        }
+        return self.allocated
+    }
+}

@@ -295,6 +295,30 @@ func TestBlobAllocatorSplitsAndCoalesces(t *testing.T) {
 	}
 }
 
+func TestOrphanCollectorUsesAcknowledgedBlobRefs(t *testing.T) {
+	collector := NewOrphanCollector([]Extent{
+		{StartLBA: 10, BlockCount: 2},
+		{StartLBA: 20, BlockCount: 2},
+		{StartLBA: 30, BlockCount: 2},
+	})
+	collector.MarkAcknowledged(BlobRefForExtent(10, 2))
+	collector.MarkUnacknowledged(BlobRefForExtent(30, 2))
+
+	got := collector.Reclaimable()
+	want := []Extent{
+		{StartLBA: 20, BlockCount: 2},
+		{StartLBA: 30, BlockCount: 2},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("reclaimable = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("reclaimable[%d] = %#v, want %#v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	writer := WriterPolicy{}
 	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)
