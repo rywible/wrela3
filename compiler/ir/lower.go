@@ -150,6 +150,7 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	}
 	ctx.program.APICMode = ctx.apicMode()
 
+	ctx.lowerStorageMetadata()
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
@@ -198,6 +199,74 @@ func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 		ctx.ensureTypeInfo(typ, map[string]bool{})
 	}
 	return ctx
+}
+
+func (ctx *lowerContext) lowerStorageMetadata() {
+	for _, event := range sortedStorageEvents(ctx.checked.Storage) {
+		layouts := append([]sem.EventLayoutInfo(nil), event.Layouts...)
+		sort.Slice(layouts, func(i, j int) bool {
+			return layouts[i].ID < layouts[j].ID
+		})
+		for _, layout := range layouts {
+			ctx.program.StorageEvents = append(ctx.program.StorageEvents, EventLayout{
+				Module:        event.Module,
+				Name:          event.Name,
+				EventTypeID:   event.EventTypeID,
+				LayoutID:      layout.ID,
+				Current:       layout.Current,
+				PayloadSize:   layout.PayloadSize,
+				PayloadAlign:  layout.PayloadAlign,
+				EncoderSymbol: symbolName("storage_event", event.Module, event.Name, "layout_"+strconv.FormatUint(layout.ID, 10), "encode"),
+			})
+		}
+	}
+
+	for _, projection := range sortedStorageProjections(ctx.checked.Storage) {
+		layouts := append([]sem.ProjectionLayoutInfo(nil), projection.Layouts...)
+		sort.Slice(layouts, func(i, j int) bool {
+			return layouts[i].ID < layouts[j].ID
+		})
+		for _, layout := range layouts {
+			containerKinds := make([]string, 0, len(layout.Fields))
+			for _, field := range layout.Fields {
+				containerKinds = append(containerKinds, field.ContainerKind)
+			}
+			ctx.program.StorageProjections = append(ctx.program.StorageProjections, ProjectionLayout{
+				Module:         projection.Module,
+				Name:           projection.Name,
+				ProjectionID:   projection.ProjectionID,
+				LayoutID:       layout.ID,
+				Current:        layout.Current,
+				ContainerKinds: containerKinds,
+			})
+		}
+	}
+}
+
+func sortedStorageEvents(storage sem.StorageIndex) []sem.EventInfo {
+	keys := make([]string, 0, len(storage.EventsByKey))
+	for key := range storage.EventsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]sem.EventInfo, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, storage.EventsByKey[key])
+	}
+	return out
+}
+
+func sortedStorageProjections(storage sem.StorageIndex) []sem.ProjectionInfo {
+	keys := make([]string, 0, len(storage.ProjectionsByKey))
+	for key := range storage.ProjectionsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]sem.ProjectionInfo, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, storage.ProjectionsByKey[key])
+	}
+	return out
 }
 
 func (ctx *lowerContext) addPrimitiveTypes() {

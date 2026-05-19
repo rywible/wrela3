@@ -41,3 +41,34 @@ func TestCheckedStorageProgramForTestHasCurrentLayouts(t *testing.T) {
 		t.Fatalf("projection storage metadata = %#v", projection)
 	}
 }
+
+func TestLowerStorageEventMetadata(t *testing.T) {
+	checked := checkedStorageProgramForTest(t)
+	program, ds := Lower(checked)
+	if len(ds) != 0 {
+		t.Fatalf("lower diagnostics: %#v", ds)
+	}
+	if len(program.StorageEvents) != 1 {
+		t.Fatalf("storage events = %d, want 1", len(program.StorageEvents))
+	}
+	event := program.StorageEvents[0]
+	if event.Module != "app" || event.Name != "FileCreated" || event.EventTypeID != 1001 || event.LayoutID != 1 || !event.Current {
+		t.Fatalf("event metadata = %#v", event)
+	}
+	if event.EncoderSymbol != "_wrela_storage_event_app_FileCreated_layout_1_encode" {
+		t.Fatalf("encoder symbol = %q", event.EncoderSymbol)
+	}
+	if event.PayloadSize == 0 || event.PayloadAlign == 0 {
+		t.Fatalf("payload layout not populated: %#v", event)
+	}
+	if len(program.StorageProjections) != 1 {
+		t.Fatalf("storage projections = %d, want 1", len(program.StorageProjections))
+	}
+	projection := program.StorageProjections[0]
+	if projection.Module != "app" || projection.Name != "DirectoryChildren" || projection.ProjectionID != 12 || projection.LayoutID != 1 || !projection.Current {
+		t.Fatalf("projection metadata = %#v", projection)
+	}
+	if len(projection.ContainerKinds) != 1 || projection.ContainerKinds[0] != "OrderedPages" {
+		t.Fatalf("projection container kinds = %#v", projection.ContainerKinds)
+	}
+}
