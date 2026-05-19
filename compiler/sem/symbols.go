@@ -581,6 +581,10 @@ func typeKind(decl ast.Decl) Kind {
 		return KindEnum
 	case *ast.TraitDecl:
 		return KindTrait
+	case *ast.EventDecl:
+		return KindEvent
+	case *ast.ProjectionDecl:
+		return KindProjection
 	case *ast.ExecutorDecl:
 		return KindExecutor
 	case *ast.ImageDecl:
@@ -605,6 +609,10 @@ func declarationName(decl ast.Decl) string {
 	case *ast.EnumDecl:
 		return d.Name
 	case *ast.TraitDecl:
+		return d.Name
+	case *ast.EventDecl:
+		return d.Name
+	case *ast.ProjectionDecl:
 		return d.Name
 	case *ast.ExecutorDecl:
 		return d.Name

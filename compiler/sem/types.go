@@ -20,6 +20,8 @@ const (
 	KindEnum
 	KindTrait
 	KindTypeParam
+	KindEvent
+	KindProjection
 )
 
 func (k Kind) String() string {
@@ -44,6 +46,10 @@ func (k Kind) String() string {
 		return "trait"
 	case KindTypeParam:
 		return "type param"
+	case KindEvent:
+		return "event"
+	case KindProjection:
+		return "projection"
 	default:
 		return "type"
 	}
@@ -176,4 +182,5 @@ type CheckedProgram struct {
 	Index      *Index
 	ImageGraph ImageGraph
 	OwnedRoot  *Type
+	Storage    StorageIndex
 }

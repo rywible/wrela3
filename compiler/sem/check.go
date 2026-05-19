@@ -291,12 +291,14 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkExecutorTopicGraph()
 	c.checkHardwareClaims()
 	c.validateArenaGraph()
+	storage := c.checkStorageDecls()
 
 	return &CheckedProgram{
 		Modules:    modules,
 		Index:      index,
 		ImageGraph: c.graph,
 		OwnedRoot:  c.ownedRoot,
+		Storage:    storage,
 	}, c.diags
 }
 
