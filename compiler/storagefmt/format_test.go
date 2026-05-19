@@ -24,6 +24,20 @@ func TestFourKiBUnderfillConsumesEmptySlots(t *testing.T) {
 	}
 }
 
+func TestFiveHundredTwelveByteLBAPacksOneSlotPerBlock(t *testing.T) {
+	got := FinishBatch(512, 3)
+
+	if got.SemanticSlots != 3 {
+		t.Fatalf("SemanticSlots = %d, want 3", got.SemanticSlots)
+	}
+	if got.ReservedEmptySlots != 0 {
+		t.Fatalf("ReservedEmptySlots = %d, want 0", got.ReservedEmptySlots)
+	}
+	if got.TotalSlotPositions != 3 {
+		t.Fatalf("TotalSlotPositions = %d, want 3", got.TotalSlotPositions)
+	}
+}
+
 func TestRegionLayoutFitsSparse4GiBDisk(t *testing.T) {
 	if EventSlotSize != 512 {
 		t.Fatalf("EventSlotSize = %d, want 512", EventSlotSize)
