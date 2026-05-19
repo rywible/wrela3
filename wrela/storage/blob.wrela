@@ -24,6 +24,29 @@ data PublishedBlobRef {
     ref: BlobRef
 }
 
+data RelocateBlobProposal {
+    blob_id: U64
+    old_ref: BlobRef
+    new_ref: BlobRef
+    observed_version: U64
+}
+
+data BlobTruth {
+    blob_id: U64
+    ref: BlobRef
+    version: U64
+
+    fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+        if proposal.blob_id != self.blob_id {
+            return false
+        }
+        if proposal.observed_version != self.version {
+            return false
+        }
+        return true
+    }
+}
+
 data Extent {
     start_lba: U64
     block_count: U64

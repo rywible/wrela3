@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/ast"
+	"github.com/ryanwible/wrela3/compiler/diag"
 	"github.com/ryanwible/wrela3/compiler/parse"
 	"github.com/ryanwible/wrela3/compiler/source"
 )
@@ -74,6 +75,50 @@ data BlobMirror {
 	assertMethodExists(t, allocator, "allocate")
 	assertMethodExists(t, allocator, "free")
 	assertMethodExists(t, allocator, "extents")
+}
+
+func TestBlobRelocationMirrorContract(t *testing.T) {
+	modules := parseBlobModules(t, `
+module sem.blob_relocation_mirror
+
+use { BlobRef, RelocateBlobProposal } from storage.blob
+
+data BlobRelocationMirror {
+    ref: BlobRef
+    proposal: RelocateBlobProposal
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	checked, ds := checkAllowingMissingImage(t, index, modules)
+	if len(ds) != 0 {
+		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "RelocateBlobProposal"), map[string]string{
+		"blob_id":          "U64",
+		"old_ref":          "BlobRef",
+		"new_ref":          "BlobRef",
+		"observed_version": "U64",
+	})
+}
+
+func TestMaintenanceMutatesBlobTruthFails(t *testing.T) {
+	modules := parseBlobModules(t, `
+module sem.maintenance_mutates_blob_truth
+
+use { BlobTruth, RelocateBlobProposal } from storage.blob
+
+class MaintenanceWorker {
+    fn run(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> Bool {
+        return truth.accept_relocate(proposal = proposal)
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0118) {
+		t.Fatalf("diagnostics = %#v, want SEM0118", ds)
+	}
 }
 
 func parseBlobModules(t *testing.T, consumer string) []*ast.Module {

@@ -142,6 +142,16 @@ func (c *checker) checkProjectionAdvanceCall(moduleName string, expr *ast.CallEx
 	}
 }
 
+func (c *checker) checkBlobTruthMutation(expr *ast.CallExpr, receiverType *Type) {
+	if c.currentType == nil || c.currentType.Name != "MaintenanceWorker" {
+		return
+	}
+	if qualifiedTypeName(receiverType) != "storage.blob.BlobTruth" || expr.Method != "accept_relocate" {
+		return
+	}
+	c.error(expr.SpanV, diag.SEM0118, "maintenance proposal mutates truth directly")
+}
+
 func (c *checker) projectionTruthFrontier(moduleName string, expr ast.Expr, scope *Scope) (uint64, bool) {
 	cons := c.constructorForExpr(moduleName, expr, scope)
 	return c.constValueOfExpr(moduleName, constructorArg(cons, "atomic_group_frontier"))

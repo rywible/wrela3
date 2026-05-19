@@ -168,12 +168,40 @@ type Extent struct {
 }
 
 type BlobRef struct {
+	BlobID     uint64
 	StartLBA   uint64
 	BlockCount uint64
 }
 
 func BlobRefForExtent(startLBA, blockCount uint64) BlobRef {
 	return BlobRef{StartLBA: startLBA, BlockCount: blockCount}
+}
+
+type BlobTruth struct {
+	Version uint64
+	Ref     BlobRef
+}
+
+type RelocateBlobProposal struct {
+	BlobID          uint64
+	OldRef          BlobRef
+	NewRef          BlobRef
+	ObservedVersion uint64
+}
+
+func (t *BlobTruth) AcceptRelocate(proposal RelocateBlobProposal) bool {
+	if proposal.BlobID != t.Ref.BlobID {
+		return false
+	}
+	if proposal.OldRef != t.Ref {
+		return false
+	}
+	if proposal.ObservedVersion != t.Version {
+		return false
+	}
+	t.Ref = proposal.NewRef
+	t.Version++
+	return true
 }
 
 type OrphanCollector struct {

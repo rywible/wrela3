@@ -319,6 +319,14 @@ func TestOrphanCollectorUsesAcknowledgedBlobRefs(t *testing.T) {
 	}
 }
 
+func TestRelocateBlobRejectsStaleVersion(t *testing.T) {
+	writer := BlobTruth{Version: 4, Ref: BlobRef{BlobID: 9}}
+	ok := writer.AcceptRelocate(RelocateBlobProposal{BlobID: 9, OldRef: writer.Ref, NewRef: BlobRef{BlobID: 9}, ObservedVersion: 3})
+	if ok {
+		t.Fatal("stale relocation must be rejected")
+	}
+}
+
 func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	writer := WriterPolicy{}
 	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)
