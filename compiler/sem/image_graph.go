@@ -279,6 +279,11 @@ type ImageGraph struct {
 	DMABuffers              []DMABufferNode
 	InterruptQueues         []InterruptQueueNode
 	SharedInterruptSources  []SharedInterruptSourceNode
+	StoragePaths            []StoragePathNode
+	CoreLinkEndpoints       []CoreLinkEndpointNode
+	ProjectionFeeds         []ProjectionFeedNode
+	StorageWriters          []StorageWriterNode
+	StorageAppendCalls      []StorageAppendCallNode
 }
 
 func sharedIRQRouteKey(irq uint64, vector uint64) string {

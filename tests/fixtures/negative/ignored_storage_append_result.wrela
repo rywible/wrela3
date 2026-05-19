@@ -1,0 +1,16 @@
+// expect: SEM0116: storage append result must be observed
+module negative.ignored_storage_append_result
+
+data PendingAtomicGroup {}
+data StorageAppendResult { ok: Bool }
+data StorageWriter {
+    fn enqueue_atomic_group(self, group: PendingAtomicGroup) -> StorageAppendResult {
+        return StorageAppendResult(ok = true)
+    }
+}
+
+class Worker {
+    fn run(self, writer: StorageWriter) {
+        writer.enqueue_atomic_group(group = PendingAtomicGroup())
+    }
+}

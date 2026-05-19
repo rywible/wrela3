@@ -291,6 +291,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkExecutorTopicGraph()
 	c.checkHardwareClaims()
 	c.validateArenaGraph()
+	c.checkStorageAuthority()
 	storage := c.checkStorageDecls()
 
 	return &CheckedProgram{
@@ -1319,6 +1320,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		return true
 	case *ast.ExprStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		c.recordStorageAppendCall(moduleName, s.Expr, scope, false)
 		if ctx == ContextImagePhaseDirect {
 			c.recordGraphFromExprStmt(moduleName, s.Expr, scope)
 		} else {
@@ -3687,6 +3689,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			c.graph.DriverPaths = append(c.graph.DriverPaths, DriverPathNode{Type: constructed, Span: expr.SpanV, FieldUses: pathUses})
 		}
 	}
+	c.recordStorageWriterConstructor(moduleName, expr, constructed, scope)
 	if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
 		c.rememberLifetime(expr, constructorLifetime)
 	} else {

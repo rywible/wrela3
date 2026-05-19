@@ -75,6 +75,95 @@ func (c *checker) checkStorageDecls() StorageIndex {
 	return storage
 }
 
+func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
+	if !isStorageWriterType(typ) {
+		return
+	}
+	fields := map[string]string{}
+	for _, name := range []string{"foreground", "background", "stream_directory", "metrics"} {
+		arg := namedArgExpr(expr.Args, name)
+		named, ok := arg.(*ast.NameExpr)
+		if !ok {
+			continue
+		}
+		if scope == nil {
+			continue
+		}
+		origin, ok := scope.LookupOrigin(named.Name)
+		if !ok || origin.Constructor == nil || !storageWriterArgMatches(name, origin.Type) {
+			continue
+		}
+		fields[name] = named.Name
+	}
+	_ = moduleName
+	c.graph.StorageWriters = append(c.graph.StorageWriters, StorageWriterNode{
+		Phase:        c.currentPhase,
+		DirectFields: fields,
+		Span:         expr.SpanV,
+	})
+}
+
+func storageWriterArgMatches(field string, typ *Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch field {
+	case "foreground":
+		return typ.Name == "ForegroundStoragePath"
+	case "background":
+		return typ.Name == "BackgroundStoragePath"
+	case "stream_directory":
+		return typ.Name == "StreamDirectory"
+	case "metrics":
+		return typ.Name == "StorageMetrics"
+	default:
+		return false
+	}
+}
+
+func (c *checker) recordStorageAppendCall(moduleName string, expr ast.Expr, scope *Scope, observed bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.Method != "enqueue_atomic_group" {
+		return
+	}
+	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	if !isStorageWriterType(receiverType) {
+		return
+	}
+	c.graph.StorageAppendCalls = append(c.graph.StorageAppendCalls, StorageAppendCallNode{
+		ResultObserved: observed,
+		Span:           call.SpanV,
+	})
+}
+
+func (c *checker) checkStorageAuthority() {
+	for _, writer := range c.graph.StorageWriters {
+		if writer.Phase == "owned_hardware" && storageWriterHasRequiredFields(writer.DirectFields) {
+			continue
+		}
+		c.error(writer.Span, diag.SEM0113, "StorageWriter authority cannot be forged or shared")
+	}
+	for _, call := range c.graph.StorageAppendCalls {
+		if call.ResultObserved {
+			continue
+		}
+		c.error(call.Span, diag.SEM0116, "storage append result must be observed")
+	}
+}
+
+func storageWriterHasRequiredFields(fields map[string]string) bool {
+	for _, name := range []string{"foreground", "background", "stream_directory", "metrics"} {
+		if fields[name] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func isStorageWriterType(typ *Type) bool {
+	return typ != nil && typ.Name == "StorageWriter"
+}
+
 func (c *checker) recordStorageEvent(storage StorageIndex, moduleName string, decl *ast.EventDecl) {
 	id, err := strconv.ParseUint(decl.ID, 10, 64)
 	if err != nil || id == 0 {
