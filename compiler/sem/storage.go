@@ -80,6 +80,7 @@ func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.Co
 		return
 	}
 	fields := map[string]string{}
+	pathRoles := map[string]string{}
 	for _, name := range []string{"foreground", "background", "stream_directory", "metrics"} {
 		arg := namedArgExpr(expr.Args, name)
 		named, ok := arg.(*ast.NameExpr)
@@ -94,11 +95,15 @@ func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.Co
 			continue
 		}
 		fields[name] = named.Name
+		if name == "foreground" || name == "background" {
+			pathRoles[name] = c.storageWrapperPathRole(origin.Constructor, scope)
+		}
 	}
 	_ = moduleName
 	c.graph.StorageWriters = append(c.graph.StorageWriters, StorageWriterNode{
 		Phase:        c.currentPhase,
 		DirectFields: fields,
+		PathRoles:    pathRoles,
 		Span:         expr.SpanV,
 	})
 }
@@ -137,6 +142,7 @@ func (c *checker) recordStorageAppendCall(moduleName string, expr ast.Expr, scop
 }
 
 func (c *checker) checkStorageAuthority() {
+	c.checkStoragePathOwnership()
 	for _, writer := range c.graph.StorageWriters {
 		if writer.Phase == "owned_hardware" && storageWriterHasRequiredFields(writer.DirectFields) {
 			continue

@@ -3,6 +3,7 @@ module machine.x86_64.nvme
 use { MmioRegion } from platform.hardware.bytes
 use { BootPanic } from platform.hardware.panic
 use { PathIdentity } from machine.x86_64.cpu_state
+use { ExecutorSlot } from machine.x86_64.executor_slot
 use { PciDevice, PciDeviceSet } from machine.x86_64.pci
 use { TopicPublisher } from machine.x86_64.topic
 
@@ -37,6 +38,12 @@ const NVME_OPCODE_WRITE: U64 = 0x01
 const NVME_OPCODE_READ: U64 = 0x02
 const NVME_OPCODE_ZONE_APPEND: U64 = 0x7D
 const NVME_COMMAND_FUA_BIT: U64 = 30
+const NVME_PATH_FOREGROUND: U32 = 1
+const NVME_PATH_BACKGROUND: U32 = 2
+
+data NvmePathRole {
+    role: U32
+}
 
 data NvmeNamespace {
     namespace_id: U32
@@ -121,6 +128,14 @@ data NvmeCompletionQueue {
         }
         return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed)
     }
+}
+
+data ForegroundStoragePath {
+    nvme_path: NvmeIoPath
+}
+
+data BackgroundStoragePath {
+    nvme_path: NvmeIoPath
 }
 
 data NvmeControllerRegisters {
@@ -226,10 +241,28 @@ unique driver NvmeDriver {
         let command_dword10 = namespace_cns
         return NvmeNamespace(namespace_id = command_namespace_id, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false)
     }
+
+    fn foreground_storage_path(self, nvme_path: NvmeIoPath) -> ForegroundStoragePath {
+        if nvme_path.role.role != NVME_PATH_FOREGROUND {
+            nvme_path.registers.panic.fail(code = 0xAC080111)
+        }
+        return ForegroundStoragePath(nvme_path = nvme_path)
+    }
+
+    fn background_storage_path(self, nvme_path: NvmeIoPath) -> BackgroundStoragePath {
+        if nvme_path.role.role != NVME_PATH_BACKGROUND {
+            nvme_path.registers.panic.fail(code = 0xAC080111)
+        }
+        return BackgroundStoragePath(nvme_path = nvme_path)
+    }
 }
 
 driver path NvmeIoPath {
     identity: PathIdentity
+    role: NvmePathRole
+    owner: ExecutorSlot
+    queue_id: U16
+    vector: U8
     registers: NvmeControllerRegisters
     completion_queue: NvmeCompletionQueue
     irq: TopicPublisher<NvmeCompletionInterrupt>

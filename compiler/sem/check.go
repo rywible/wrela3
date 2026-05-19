@@ -3690,6 +3690,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 		}
 	}
 	c.recordStorageWriterConstructor(moduleName, expr, constructed, scope)
+	c.recordStoragePathConstructor(moduleName, expr, constructed, scope)
 	if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
 		c.rememberLifetime(expr, constructorLifetime)
 	} else {
@@ -4093,6 +4094,7 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
 	c.recordArenaGraphCall(moduleName, expr, recvType, scope, ctx)
 	c.recordPlacementGraphCall(moduleName, expr, recvType, scope)
+	c.checkStoragePathSubmitCall(moduleName, expr, recvType, scope)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}
