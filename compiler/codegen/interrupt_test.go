@@ -354,6 +354,26 @@ func TestInterruptContextSymbolStoresActiveExecutor(t *testing.T) {
 	}
 }
 
+func TestInterruptRuntimeDataUsesBindingContextSize(t *testing.T) {
+	program := &ir.Program{InterruptBindings: []ir.InterruptBinding{{
+		ContextSymbol:      "_wrela_interrupt_context_console_com1",
+		PathFieldOffset:    16,
+		ContextSize:        80,
+		EventStorageSize:   16,
+		EventStorageSymbol: "_wrela_interrupt_event_40",
+	}}}
+
+	var contextSize int
+	for _, obj := range interruptRuntimeData(program) {
+		if obj.Symbol == "_wrela_interrupt_context_console_com1" {
+			contextSize = len(obj.Bytes)
+		}
+	}
+	if contextSize != 80 {
+		t.Fatalf("interrupt context bytes = %d, want binding context size 80", contextSize)
+	}
+}
+
 func TestInterruptDispatchUsesContextRelocation(t *testing.T) {
 	img, diags := Compile(interruptTopicProgramForCodegenTest(t))
 	if len(diags) != 0 {

@@ -634,6 +634,12 @@ reformatted. In QEMU tests, the namespace may be configured with a 512-byte LBA
 to exercise the ideal path. On real hardware, the driver uses the active LBA
 format reported by Identify Namespace.
 
+Design update 2026-05-19: v1 Identify Namespace parsing uses the NVMe-defined
+FLBAS field at byte offset 26. The active LBA format is the low nibble of that
+byte. Byte 24 is not an Identify Namespace FLBAS offset and must not be used for
+logical block size selection. The LBAF table remains at bytes 128..191, with
+each 4-byte entry's byte 2 containing LBADS.
+
 On a 4 KiB namespace, an acknowledged LBA is immutable. If the writer commits
 one event in a 4 KiB block, the other seven 512-byte slots are sealed empty and
 may be reclaimed only after cold compression rewrites the sealed segment.

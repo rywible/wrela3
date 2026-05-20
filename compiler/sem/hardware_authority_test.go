@@ -69,8 +69,7 @@ image BadForgedMmio {
         )
         let discovery = PlatformDiscoveryRoot(panic = panic).from_uefi(hardware = hardware)
         let interrupts = discovery.interrupts
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = interrupts.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))

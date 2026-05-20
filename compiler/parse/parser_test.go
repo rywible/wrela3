@@ -84,6 +84,85 @@ image Boot {
 	}
 }
 
+func TestParseEventDeclaration(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module storage.test
+event FileRenamed id 17 {
+    file_id: FileId
+    layout 1 {
+        old_name_ref: BlobRefPayload
+    }
+    layout 2 current {
+        file_id: U64 = self.file_id.value
+    }
+    upcast 1 -> 2 {
+        old_name_ref -> name_ref
+    }
+}
+`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if len(mod.Decls) != 1 {
+		t.Fatalf("decls = %d, want 1", len(mod.Decls))
+	}
+	ev, ok := mod.Decls[0].(*ast.EventDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want *ast.EventDecl", mod.Decls[0])
+	}
+	if ev.ID != "17" {
+		t.Fatalf("event id = %q, want 17", ev.ID)
+	}
+	if len(ev.Fields) != 1 {
+		t.Fatalf("event fields = %d, want 1", len(ev.Fields))
+	}
+	if len(ev.Layouts) != 2 {
+		t.Fatalf("event layouts = %d, want 2", len(ev.Layouts))
+	}
+	if !ev.Layouts[1].Current {
+		t.Fatalf("layout 2 current = false, want true")
+	}
+	if len(ev.Upcasts) != 1 {
+		t.Fatalf("event upcasts = %d, want 1", len(ev.Upcasts))
+	}
+	if len(ev.Layouts[1].Fields) != 1 || ev.Layouts[1].Fields[0].Encode == nil {
+		t.Fatalf("layout 2 fields = %#v, want field with encode", ev.Layouts[1].Fields)
+	}
+	if len(ev.Upcasts[0].Mappings) != 1 {
+		t.Fatalf("upcast mappings = %d, want 1", len(ev.Upcasts[0].Mappings))
+	}
+	mapping := ev.Upcasts[0].Mappings[0]
+	if mapping.From != "old_name_ref" || mapping.To != "name_ref" {
+		t.Fatalf("mapping = %#v, want old_name_ref -> name_ref", mapping)
+	}
+}
+
+func TestParseProjectionDeclaration(t *testing.T) {
+	mod, ds := parseModuleForTest(t, `
+module storage.test
+projection DirectoryChildren id 12 {
+    layout 1 current {
+        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
+    }
+}`)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics = %#v", ds)
+	}
+	if len(mod.Decls) != 1 {
+		t.Fatalf("decls = %d, want 1", len(mod.Decls))
+	}
+	proj, ok := mod.Decls[0].(*ast.ProjectionDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want *ast.ProjectionDecl", mod.Decls[0])
+	}
+	if proj.ID != "12" || len(proj.Layouts) != 1 || !proj.Layouts[0].Current {
+		t.Fatalf("projection parsed incorrectly: %#v", proj)
+	}
+	if got := proj.Layouts[0].Fields[0].Type.String(); got != "OrderedPages<FileId, FileNameKey, DirectoryChild>" {
+		t.Fatalf("projection field type = %q", got)
+	}
+}
+
 func TestParseStatements(t *testing.T) {
 	mod, ds := parseModuleForTest(t, `
 module m
@@ -146,12 +225,12 @@ data Event { kind: U64 }
 class Worker {
     rx: Subscription<Event>
     fn run(self) {
-        if let Option.Some(value = event) = self.rx.try_next() {
-            let next = Option.Some(value = event)
+        if let Option.Some(value = rx_event) = self.rx.try_next() {
+            let next = Option.Some(value = rx_event)
             self.rx.arm_wait()
         }
         match self.rx.try_next() {
-            Option.Some(value = event) => {
+            Option.Some(value = rx_event) => {
                 self.rx.arm_wait()
             }
             Option.None => {
@@ -212,7 +291,7 @@ class Worker {
 	if !ok {
 		t.Fatalf("if-let pattern = %#v", ifStmt.Pattern)
 	}
-	if varPat.Enum != "Option" || varPat.Variant != "Some" || len(varPat.Bindings) != 1 || varPat.Bindings[0].Name != "value" || varPat.Bindings[0].Bind != "event" {
+	if varPat.Enum != "Option" || varPat.Variant != "Some" || len(varPat.Bindings) != 1 || varPat.Bindings[0].Name != "value" || varPat.Bindings[0].Bind != "rx_event" {
 		t.Fatalf("if-let pattern = %#v", varPat)
 	}
 	assign, ok := ifStmt.Body[0].(*ast.LetStmt)
@@ -396,8 +475,8 @@ func TestParseExecutorOnHandler(t *testing.T) {
 module test.on_handler
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.interrupt(event: Option<U8>) {
-        self.serial_path.ack_receive(event = event)
+    on serial_path.interrupt(serial_event: Option<U8>) {
+        self.serial_path.ack_receive(received = serial_event)
     }
 }`)
 	if len(ds) != 0 {
@@ -408,7 +487,7 @@ executor HelloWorld {
 		t.Fatalf("on handlers = %d, want 1", len(exec.OnHandlers))
 	}
 	got := exec.OnHandlers[0]
-	if got.PathField != "serial_path" || got.ParamName != "event" || got.ParamType.String() != "Option<U8>" {
+	if got.PathField != "serial_path" || got.ParamName != "serial_event" || got.ParamType.String() != "Option<U8>" {
 		t.Fatalf("on handler = %#v", got)
 	}
 }
@@ -418,7 +497,7 @@ func TestOnHandlerRejectsMissingParamType(t *testing.T) {
 module test.bad_on
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.interrupt(event) {
+    on serial_path.interrupt(serial_event) {
     }
 }`)
 	if len(ds) == 0 {
@@ -431,7 +510,7 @@ func TestOnHandlerRejectsNonInterruptSelector(t *testing.T) {
 module test.bad_on_selector
 executor HelloWorld {
     serial_path: SerialConsolePath
-    on serial_path.receive(event: Option<U8>) {
+    on serial_path.receive(serial_event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {
@@ -443,7 +522,7 @@ func TestOnHandlerRejectedOutsideExecutor(t *testing.T) {
 	_, ds := parseModuleForTest(t, `
 module test.bad_on_placement
 class C {
-    on serial_path.interrupt(event: Option<U8>) {
+    on serial_path.interrupt(serial_event: Option<U8>) {
     }
 }`)
 	if len(ds) == 0 {

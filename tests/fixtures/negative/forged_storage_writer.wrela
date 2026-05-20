@@ -1,0 +1,23 @@
+// expect: SEM0113: StorageWriter authority cannot be forged or shared
+module negative.forged_storage_writer
+
+data ForegroundStoragePath { value: U64 }
+data BackgroundStoragePath { value: U64 }
+data StreamDirectory { next_stream_id: U64 }
+data StorageMetrics {}
+data StorageWriter {
+    foreground: ForegroundStoragePath
+    background: BackgroundStoragePath
+    stream_directory: StreamDirectory
+    metrics: StorageMetrics
+}
+
+class Maker {
+    fn make(self) -> StorageWriter {
+        let foreground = ForegroundStoragePath(value = 1)
+        let background = BackgroundStoragePath(value = 2)
+        let stream_directory = StreamDirectory(next_stream_id = 0)
+        let metrics = StorageMetrics()
+        return StorageWriter(foreground = foreground, background = background, stream_directory = stream_directory, metrics = metrics)
+    }
+}

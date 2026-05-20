@@ -1,0 +1,6 @@
+// expect: SEM0102: layout id 0 is reserved
+module negative.event_payload_layout_zero
+
+event A id 1 {
+    layout 0 current {}
+}

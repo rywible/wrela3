@@ -148,7 +148,7 @@ driver path SerialConsolePath {
 executor ConsoleExec {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {}
+    on serial.interrupt(serial_payload: SerialInterrupt) {}
 }
 `)
 	idx, ds := BuildIndex(modules)
@@ -183,8 +183,8 @@ driver path SerialConsolePath {
 executor ConsoleExec {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {}
-    on serial.interrupt(event: SerialInterrupt) {}
+    on serial.interrupt(serial_payload: SerialInterrupt) {}
+    on serial.interrupt(serial_payload: SerialInterrupt) {}
 }
 `)
 	_, ds := BuildIndex(modules)

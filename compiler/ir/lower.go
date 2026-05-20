@@ -26,6 +26,20 @@ type concreteMethodRef struct {
 	Key        string
 }
 
+type topicValueOrigin struct {
+	TopicLabel     string
+	SubscriberSlot string
+}
+
+type topicMethodSpecializationRef struct {
+	Owner               *sem.Type
+	MethodName          string
+	Symbol              string
+	Key                 string
+	ParamOrigins        map[string]topicValueOrigin
+	CurrentExecutorSlot string
+}
+
 type concreteMethodHeap []concreteMethodRef
 
 func (h concreteMethodHeap) Len() int           { return len(h) }
@@ -98,10 +112,16 @@ type lowerContext struct {
 	queuedConcreteMethod  map[string]bool
 	emittedConcreteMethod map[string]bool
 
-	valueBindings   map[Value]string
-	currentExecutor *sem.ExecutorNode
-	currentReceiver *sem.Type
-	currentReturn   *sem.Type
+	topicMethodQueue   []topicMethodSpecializationRef
+	queuedTopicMethod  map[string]bool
+	emittedTopicMethod map[string]bool
+
+	valueBindings     map[Value]string
+	topicValueOrigins map[Value]topicValueOrigin
+	topicParamOrigins map[string]topicValueOrigin
+	currentExecutor   *sem.ExecutorNode
+	currentReceiver   *sem.Type
+	currentReturn     *sem.Type
 
 	stringSeq int
 	tempSeq   int
@@ -119,6 +139,61 @@ func (ctx *lowerContext) enqueueConcreteMethod(owner *sem.Type, methodName strin
 	}
 	ctx.queuedConcreteMethod[key] = true
 	heap.Push((*concreteMethodHeap)(&ctx.concreteMethodQueue), concreteMethodRef{Owner: owner, MethodName: methodName, Key: key})
+}
+
+func (ctx *lowerContext) enqueueTopicMethodSpecialization(owner *sem.Type, method *sem.Method, methodName string, paramOrigins map[string]topicValueOrigin) (string, bool) {
+	if ctx == nil || owner == nil || owner.GenericOrigin != nil || method == nil || method.IsAsm || len(method.Body) == 0 {
+		return "", false
+	}
+	cleaned := map[string]topicValueOrigin{}
+	for name, origin := range paramOrigins {
+		if name == "" || origin.TopicLabel == "" {
+			continue
+		}
+		cleaned[name] = origin
+	}
+	if len(cleaned) == 0 {
+		return "", false
+	}
+	slotLabel := ""
+	if ctx.currentExecutor != nil {
+		slotLabel = ctx.currentExecutor.SlotLabel
+	}
+	suffix := topicMethodSpecializationSuffix(cleaned, slotLabel)
+	symbol := symbolName("method", owner.Module, owner.Name, methodName, suffix)
+	key := owner.Key() + "." + methodName + "." + suffix
+	if !ctx.queuedTopicMethod[key] && !ctx.emittedTopicMethod[key] {
+		ctx.queuedTopicMethod[key] = true
+		ctx.topicMethodQueue = append(ctx.topicMethodQueue, topicMethodSpecializationRef{
+			Owner:               owner,
+			MethodName:          methodName,
+			Symbol:              symbol,
+			Key:                 key,
+			ParamOrigins:        cleaned,
+			CurrentExecutorSlot: slotLabel,
+		})
+	}
+	return symbol, true
+}
+
+func topicMethodSpecializationSuffix(origins map[string]topicValueOrigin, currentExecutorSlot string) string {
+	keys := make([]string, 0, len(origins))
+	for key := range origins {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := []string{"topic"}
+	if currentExecutorSlot != "" {
+		parts = append(parts, "slot", currentExecutorSlot)
+	}
+	for _, key := range keys {
+		origin := origins[key]
+		parts = append(parts, key, origin.TopicLabel)
+		if origin.SubscriberSlot != "" {
+			parts = append(parts, origin.SubscriberSlot)
+		}
+	}
+	return strings.Join(parts, "_")
 }
 
 func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
@@ -150,6 +225,8 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	}
 	ctx.program.APICMode = ctx.apicMode()
 
+	ctx.lowerStorageMetadata()
+	ctx.lowerEventEncoders()
 	ctx.lowerInterruptEventsAndHandlers()
 	ctx.lowerInterruptContexts()
 	ctx.lowerTopicLayouts()
@@ -157,9 +234,9 @@ func Lower(checked *sem.CheckedProgram) (*Program, []diag.Diagnostic) {
 	ctx.lowerInterruptQueueLayouts()
 	ctx.lowerVcpuStartPlans()
 	ctx.lowerSourceMethods()
-	ctx.lowerConcreteMethodQueue()
+	ctx.lowerPendingMethodQueues()
 	ctx.lowerImagePhases(imageModule, imageName, imageDecl, delegatedSymbol, ownedSymbol)
-	ctx.lowerConcreteMethodQueue()
+	ctx.lowerPendingMethodQueues()
 	ctx.program.AsmMethods = append(ctx.program.AsmMethods, ctx.lowerAsmMethods()...)
 	if len(ctx.diags) != 0 {
 		return nil, ctx.diags
@@ -176,7 +253,10 @@ func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 		pseudo:                map[string]*sem.Type{},
 		queuedConcreteMethod:  map[string]bool{},
 		emittedConcreteMethod: map[string]bool{},
+		queuedTopicMethod:     map[string]bool{},
+		emittedTopicMethod:    map[string]bool{},
 		valueBindings:         map[Value]string{},
+		topicValueOrigins:     map[Value]topicValueOrigin{},
 		typeParamMaps:         map[*sem.Type]map[string]*sem.Type{},
 	}
 	for _, mod := range checked.Modules {
@@ -198,6 +278,180 @@ func newLowerContext(checked *sem.CheckedProgram) *lowerContext {
 		ctx.ensureTypeInfo(typ, map[string]bool{})
 	}
 	return ctx
+}
+
+func (ctx *lowerContext) lowerStorageMetadata() {
+	for _, event := range sortedStorageEvents(ctx.checked.Storage) {
+		layouts := append([]sem.EventLayoutInfo(nil), event.Layouts...)
+		sort.Slice(layouts, func(i, j int) bool {
+			return layouts[i].ID < layouts[j].ID
+		})
+		for _, layout := range layouts {
+			fields := make([]EventPayloadField, 0, len(layout.Fields))
+			for _, field := range layout.Fields {
+				ctx.ensureTypeInfo(field.Type, map[string]bool{})
+				fields = append(fields, EventPayloadField{
+					Name:        field.Name,
+					Type:        ctx.irType(field.Type),
+					Offset:      field.PayloadOffset,
+					StorageSize: field.StorageSize,
+					Align:       field.Align,
+				})
+			}
+			ctx.program.StorageEvents = append(ctx.program.StorageEvents, EventLayout{
+				Module:        event.Module,
+				Name:          event.Name,
+				EventTypeID:   event.EventTypeID,
+				LayoutID:      layout.ID,
+				Current:       layout.Current,
+				PayloadSize:   layout.PayloadSize,
+				PayloadAlign:  layout.PayloadAlign,
+				PayloadFields: fields,
+				EncoderSymbol: symbolName("storage_event", event.Module, event.Name, "layout_"+strconv.FormatUint(layout.ID, 10), "encode"),
+			})
+		}
+	}
+
+	for _, projection := range sortedStorageProjections(ctx.checked.Storage) {
+		layouts := append([]sem.ProjectionLayoutInfo(nil), projection.Layouts...)
+		sort.Slice(layouts, func(i, j int) bool {
+			return layouts[i].ID < layouts[j].ID
+		})
+		for _, layout := range layouts {
+			containerKinds := make([]string, 0, len(layout.Fields))
+			for _, field := range layout.Fields {
+				containerKinds = append(containerKinds, field.ContainerKind)
+			}
+			ctx.program.StorageProjections = append(ctx.program.StorageProjections, ProjectionLayout{
+				Module:         projection.Module,
+				Name:           projection.Name,
+				ProjectionID:   projection.ProjectionID,
+				LayoutID:       layout.ID,
+				Current:        layout.Current,
+				ContainerKinds: containerKinds,
+			})
+		}
+	}
+}
+
+func sortedStorageEvents(storage sem.StorageIndex) []sem.EventInfo {
+	keys := make([]string, 0, len(storage.EventsByKey))
+	for key := range storage.EventsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]sem.EventInfo, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, storage.EventsByKey[key])
+	}
+	return out
+}
+
+func sortedStorageProjections(storage sem.StorageIndex) []sem.ProjectionInfo {
+	keys := make([]string, 0, len(storage.ProjectionsByKey))
+	for key := range storage.ProjectionsByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]sem.ProjectionInfo, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, storage.ProjectionsByKey[key])
+	}
+	return out
+}
+
+func (ctx *lowerContext) lowerEventEncoders() {
+	for _, layout := range ctx.program.StorageEvents {
+		if !layout.Current {
+			continue
+		}
+		ctx.program.Functions = append(ctx.program.Functions, ctx.lowerEventEncoder(layout))
+	}
+}
+
+func (ctx *lowerContext) lowerEventEncoder(layout EventLayout) Function {
+	slot := &Param{Symbol: "slot", Type: Type{Name: "StorageEventSlot", Module: "storage.format", Kind: TypeKindData}}
+	eventID := &Param{Symbol: "event_id", Type: storageIRType("U64")}
+	streamID := &Param{Symbol: "stream_id", Type: storageIRType("U64")}
+	streamSequence := &Param{Symbol: "stream_sequence", Type: storageIRType("U64")}
+	atomicGroupLen := &Param{Symbol: "atomic_group_len", Type: storageIRType("U32")}
+	atomicGroupIndex := &Param{Symbol: "atomic_group_index", Type: storageIRType("U32")}
+	payloadLength := &Param{Symbol: "payload_length", Type: storageIRType("U32")}
+	flags := &Param{Symbol: "flags", Type: storageIRType("U32")}
+	checksum := &StorageCRC32C{Slot: slot, Length: 512, Type: storageIRType("U32")}
+	payloadParams := make([]Value, 0, len(layout.PayloadFields))
+	payloadParamByName := map[string]*Param{}
+	for _, field := range layout.PayloadFields {
+		param := &Param{Symbol: field.Name, Type: field.Type}
+		payloadParams = append(payloadParams, param)
+		payloadParamByName[field.Name] = param
+	}
+
+	u16 := storageIRType("U16")
+	u32 := storageIRType("U32")
+	u64 := storageIRType("U64")
+	ops := []Operation{
+		storageSlotStore(slot, 0, eventID, u64),
+		storageSlotStore(slot, 8, streamID, u64),
+		storageSlotStore(slot, 16, streamSequence, u64),
+		storageSlotStore(slot, 24, storageConst(layout.EventTypeID, u32), u32),
+		storageSlotStore(slot, 28, storageConst(layout.LayoutID, u32), u32),
+		storageSlotStore(slot, 32, atomicGroupLen, u32),
+		storageSlotStore(slot, 36, atomicGroupIndex, u32),
+		storageSlotStore(slot, 40, payloadLength, u32),
+		storageSlotStore(slot, 44, flags, u32),
+		storageSlotStore(slot, 52, storageConst(1, u16), u16),
+		storageSlotStore(slot, 54, storageConst(0, u16), u16),
+		storageSlotStore(slot, 56, storageConst(0, u64), u64),
+	}
+	payloadCursor := uint64(0)
+	for _, field := range layout.PayloadFields {
+		if field.Offset > payloadCursor {
+			ops = append(ops, &StoragePayloadZero{Slot: slot, Offset: 64 + payloadCursor, Length: field.Offset - payloadCursor})
+		}
+		ops = append(ops, storageSlotStore(slot, 64+field.Offset, payloadParamByName[field.Name], field.Type))
+		payloadCursor = field.Offset + field.StorageSize
+	}
+	if payloadCursor < 448 {
+		ops = append(ops, &StoragePayloadZero{Slot: slot, Offset: 64 + payloadCursor, Length: 448 - payloadCursor})
+	}
+	ops = append(ops,
+		storageSlotStore(slot, 48, storageConst(0, u32), u32),
+		checksum,
+		storageSlotStore(slot, 48, checksum, u32),
+		&Return{},
+	)
+
+	params := []Value{
+		slot,
+		eventID,
+		streamID,
+		streamSequence,
+		atomicGroupLen,
+		atomicGroupIndex,
+		payloadLength,
+		flags,
+	}
+	params = append(params, payloadParams...)
+
+	return Function{
+		Symbol: layout.EncoderSymbol,
+		Return: Type{Name: "void", Module: "builtin", Kind: TypeKindPrimitive},
+		Params: params,
+		Blocks: []Block{{Label: "entry", Ops: ops}},
+	}
+}
+
+func storageSlotStore(slot Value, offset uint64, value Value, typ Type) *StorageSlotStore {
+	return &StorageSlotStore{Slot: slot, Offset: offset, Value: value, Type: typ}
+}
+
+func storageConst(value uint64, typ Type) *ConstInt {
+	return &ConstInt{Symbol: "storage_const", Value: value, Type: typ}
+}
+
+func storageIRType(name string) Type {
+	return Type{Name: name, Module: "builtin", Kind: TypeKindPrimitive}
 }
 
 func (ctx *lowerContext) addPrimitiveTypes() {
@@ -556,6 +810,30 @@ func (ctx *lowerContext) lowerConcreteMethodQueue() {
 	}
 }
 
+func (ctx *lowerContext) lowerTopicMethodSpecializationQueue() {
+	for len(ctx.topicMethodQueue) != 0 {
+		ref := ctx.topicMethodQueue[0]
+		ctx.topicMethodQueue = ctx.topicMethodQueue[1:]
+		if ctx.emittedTopicMethod[ref.Key] {
+			continue
+		}
+		method := semMethodByName(ref.Owner, ref.MethodName)
+		if method == nil {
+			ctx.errorf("missing topic-specialized method %s.%s", ref.Owner.Display(), ref.MethodName)
+			continue
+		}
+		ctx.program.Functions = append(ctx.program.Functions, ctx.lowerSemanticMethodWithTopicOrigins(ref.Owner.Module, ref.Owner, method, ref.Symbol, ref.ParamOrigins, ref.CurrentExecutorSlot))
+		ctx.emittedTopicMethod[ref.Key] = true
+	}
+}
+
+func (ctx *lowerContext) lowerPendingMethodQueues() {
+	for len(ctx.concreteMethodQueue) != 0 || len(ctx.topicMethodQueue) != 0 {
+		ctx.lowerConcreteMethodQueue()
+		ctx.lowerTopicMethodSpecializationQueue()
+	}
+}
+
 func semMethodByName(owner *sem.Type, name string) *sem.Method {
 	if owner == nil {
 		return nil
@@ -692,12 +970,16 @@ func (ctx *lowerContext) lowerInterruptBindings() {
 			ctx.errorf("missing type info for interrupt event %s.%s", eventType.Module, eventType.Name)
 			continue
 		}
+		pathFieldOffset := ctx.interruptRoutePathFieldOffset(route, route.PathFieldOffset)
+		contextSize := ctx.interruptRouteContextSize(route, pathFieldOffset)
 		ctx.program.InterruptBindings = append(ctx.program.InterruptBindings, InterruptBinding{
 			EventSymbol:         logicalSymbol("interrupt_event", pathModule(route.EventType), pathName(route.EventType), "interrupt"),
 			EventFunctionSymbol: route.EventFunctionSymbol,
 			EventType:           eventType,
-			PathFieldOffset:     route.PathFieldOffset,
+			PathField:           route.PathField,
+			PathFieldOffset:     pathFieldOffset,
 			ContextSymbol:       route.ContextSymbol,
+			ContextSize:         contextSize,
 			EventStorageSymbol:  fmt.Sprintf("_wrela_interrupt_event_%02x", route.Vector),
 			EventStorageSize:    storageSizeOrEight(eventInfo),
 			Vector:              uint8(route.Vector),
@@ -758,6 +1040,55 @@ func (ctx *lowerContext) lowerInterruptContexts() {
 	}
 }
 
+func (ctx *lowerContext) interruptRoutePathFieldOffset(route sem.InterruptTopicRouteNode, fallback int) int {
+	if route.PathField == "" || route.PathBindingType == nil {
+		return fallback
+	}
+	field := ctx.lookupField(route.PathBindingType, route.PathField)
+	if field == nil {
+		return fallback
+	}
+	return ctx.irFieldOffset(route.PathBindingType, route.PathField, field.Offset)
+}
+
+func (ctx *lowerContext) interruptRouteContextSize(route sem.InterruptTopicRouteNode, pathFieldOffset int) int {
+	size := pathFieldOffset + 8
+	pathType := ctx.interruptRoutePathType(route)
+	if pathType == nil {
+		return size
+	}
+	info, ok := typeInfoFor(ctx.program.Types, ctx.irType(pathType))
+	if !ok {
+		return size
+	}
+	storageOffset := interruptPathContextStorageOffset(pathFieldOffset, info)
+	if contextSize := storageOffset + storageSizeOrEight(info); contextSize > size {
+		size = contextSize
+	}
+	return size
+}
+
+func (ctx *lowerContext) interruptRoutePathType(route sem.InterruptTopicRouteNode) *sem.Type {
+	if route.PathBindingType == nil {
+		return nil
+	}
+	if route.PathField == "" {
+		if route.PathBindingType.Kind == sem.KindDriverPath {
+			return route.PathBindingType
+		}
+		return nil
+	}
+	return ctx.fieldType(route.PathBindingType, route.PathField)
+}
+
+func interruptPathContextStorageOffset(pathFieldOffset int, info TypeInfo) int {
+	align := info.Align
+	if align == 0 {
+		align = 8
+	}
+	return layout.AlignUp(pathFieldOffset+8, align)
+}
+
 func (ctx *lowerContext) lowerMethod(moduleName string, receiverType *sem.Type, method *ast.MethodDecl) Function {
 	return ctx.lowerMethodWithSymbol(moduleName, receiverType, method, symbolName("method", moduleName, receiverType.Name, method.Name))
 }
@@ -786,6 +1117,7 @@ func (ctx *lowerContext) lowerMethodWithSymbol(moduleName string, receiverType *
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: typ})
 		ctx.rememberValueBinding(p, param.Name)
+		ctx.rememberTopicParamOrigin(p, param.Name)
 	}
 
 	assigned := assignedNames(method.Body)
@@ -826,6 +1158,7 @@ func (ctx *lowerContext) lowerSemanticMethodWithSymbol(moduleName string, receiv
 		params = append(params, p)
 		scope.define(param.Name, lowerBinding{value: p, typ: param.Type})
 		ctx.rememberValueBinding(p, param.Name)
+		ctx.rememberTopicParamOrigin(p, param.Name)
 	}
 
 	assigned := assignedNames(method.Body)
@@ -839,6 +1172,19 @@ func (ctx *lowerContext) lowerSemanticMethodWithSymbol(moduleName string, receiv
 		Params: params,
 		Blocks: []Block{{Label: "entry", Ops: ops}},
 	}
+}
+
+func (ctx *lowerContext) lowerSemanticMethodWithTopicOrigins(moduleName string, receiverType *sem.Type, method *sem.Method, symbol string, origins map[string]topicValueOrigin, executorSlot string) Function {
+	prevOrigins := ctx.topicParamOrigins
+	prevExecutor := ctx.currentExecutor
+	ctx.topicParamOrigins = origins
+	if executorSlot != "" {
+		ctx.currentExecutor = ctx.executorBySlot(executorSlot)
+	}
+	fn := ctx.lowerSemanticMethodWithSymbol(moduleName, receiverType, method, symbol)
+	ctx.topicParamOrigins = prevOrigins
+	ctx.currentExecutor = prevExecutor
+	return fn
 }
 
 func (ctx *lowerContext) isOwnershipTransferMethod(receiverType *sem.Type, method *ast.MethodDecl) bool {
@@ -872,11 +1218,13 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 			ops = append(ops, &Copy{Target: local, Source: value, Type: local.Type})
 			scope.define(s.Name, lowerBinding{value: local, typ: typ})
 			ctx.rememberValueBinding(local, s.Name)
+			ctx.rememberTopicValueOrigin(local, ctx.topicOriginForValue(value, receiverType))
 			ops = append(ops, ctx.interruptContextStoresForPathBinding(s.Name, local, typ)...)
 			return ops
 		}
 		scope.define(s.Name, lowerBinding{value: value, typ: typ})
 		ctx.rememberValueBinding(value, s.Name)
+		ctx.rememberTopicValueOrigin(value, ctx.topicOriginForValue(value, receiverType))
 		ops = append(ops, ctx.interruptContextStoresForPathBinding(s.Name, value, typ)...)
 		return ops
 	case *ast.AssignStmt:
@@ -890,6 +1238,7 @@ func (ctx *lowerContext) lowerStmt(moduleName string, receiverType *sem.Type, sc
 			value, valueOps, _ := ctx.lowerExprExpected(moduleName, receiverType, scope, s.Value, binding.typ)
 			ops := append([]Operation{}, valueOps...)
 			ops = append(ops, &Copy{Target: binding.value, Source: value, Type: ctx.irType(binding.typ)})
+			ctx.rememberTopicValueOrigin(binding.value, ctx.topicOriginForValue(value, receiverType))
 			return ops
 		case *ast.FieldExpr:
 			object, objectOps, objectType := ctx.lowerExpr(moduleName, receiverType, scope, target.Base)
@@ -1242,6 +1591,20 @@ func (ctx *lowerContext) rememberValueBinding(value Value, name string) {
 	ctx.valueBindings[value] = name
 }
 
+func (ctx *lowerContext) rememberTopicParamOrigin(value Value, name string) {
+	if ctx == nil || value == nil || name == "" {
+		return
+	}
+	ctx.rememberTopicValueOrigin(value, ctx.topicParamOrigins[name])
+}
+
+func (ctx *lowerContext) rememberTopicValueOrigin(value Value, origin topicValueOrigin) {
+	if ctx == nil || value == nil || origin.TopicLabel == "" {
+		return
+	}
+	ctx.topicValueOrigins[value] = origin
+}
+
 func (ctx *lowerContext) lowerTopicLayouts() {
 	if ctx == nil || ctx.checked == nil {
 		return
@@ -1544,9 +1907,82 @@ func (ctx *lowerContext) executorForValue(value Value) *sem.ExecutorNode {
 	return nil
 }
 
+func (ctx *lowerContext) executorBySlot(slotLabel string) *sem.ExecutorNode {
+	if ctx == nil || ctx.checked == nil || slotLabel == "" {
+		return nil
+	}
+	for i := range ctx.checked.ImageGraph.Executors {
+		if ctx.checked.ImageGraph.Executors[i].SlotLabel == slotLabel {
+			return &ctx.checked.ImageGraph.Executors[i]
+		}
+	}
+	return nil
+}
+
+func (ctx *lowerContext) topicOriginForValue(value Value, currentExecutor *sem.Type) topicValueOrigin {
+	if ctx == nil || ctx.checked == nil || value == nil {
+		return topicValueOrigin{}
+	}
+	if origin, ok := ctx.topicValueOrigins[value]; ok && origin.TopicLabel != "" {
+		return origin
+	}
+	if binding := ctx.bindingNameForValue(value); binding != "" {
+		if origin := ctx.topicOriginForBinding(binding); origin.TopicLabel != "" {
+			return origin
+		}
+	}
+	switch v := value.(type) {
+	case *FieldLoad:
+		if self, ok := v.Object.(*Param); ok && self.Symbol == "self" {
+			if binding := ctx.fieldBindingForLoad(v, currentExecutor); binding != "" {
+				return ctx.topicOriginForBinding(binding)
+			}
+		}
+	case *Call:
+		if strings.HasSuffix(v.Symbol, "_publisher") {
+			return ctx.topicOriginForValue(v.Receiver, currentExecutor)
+		}
+	case *Construct:
+		for _, field := range v.Fields {
+			if field.Name == "topic" {
+				origin := ctx.topicOriginForValue(field.Value, currentExecutor)
+				if origin.TopicLabel != "" {
+					return origin
+				}
+			}
+		}
+	}
+	return topicValueOrigin{}
+}
+
+func (ctx *lowerContext) topicOriginForBinding(binding string) topicValueOrigin {
+	if ctx == nil || ctx.checked == nil || binding == "" {
+		return topicValueOrigin{}
+	}
+	for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
+		if sub.Binding == binding {
+			return topicValueOrigin{TopicLabel: sub.TopicLabel, SubscriberSlot: sub.SubscriberLabel}
+		}
+	}
+	for _, publisher := range ctx.checked.ImageGraph.TopicPublishers {
+		if publisher.Binding == binding {
+			return topicValueOrigin{TopicLabel: publisher.TopicLabel}
+		}
+	}
+	for _, topic := range ctx.checked.ImageGraph.Topics {
+		if topic.Binding == binding {
+			return topicValueOrigin{TopicLabel: topic.Label}
+		}
+	}
+	return topicValueOrigin{}
+}
+
 func (ctx *lowerContext) subscriberSlotForValue(value Value, currentExecutor *sem.Type) string {
 	if ctx == nil || ctx.checked == nil {
 		return ""
+	}
+	if origin := ctx.topicOriginForValue(value, currentExecutor); origin.SubscriberSlot != "" {
+		return origin.SubscriberSlot
 	}
 	if binding := ctx.bindingNameForValue(value); binding != "" {
 		for _, sub := range ctx.checked.ImageGraph.TopicSubscriptions {
@@ -1588,6 +2024,9 @@ func (ctx *lowerContext) fieldBindingForLoad(load *FieldLoad, currentExecutor *s
 func (ctx *lowerContext) topicLabelForValue(value Value) string {
 	if ctx == nil || ctx.checked == nil || value == nil {
 		return ""
+	}
+	if origin := ctx.topicOriginForValue(value, ctx.currentReceiver); origin.TopicLabel != "" {
+		return origin.TopicLabel
 	}
 	if binding := ctx.bindingNameForValue(value); binding != "" {
 		for _, topic := range ctx.checked.ImageGraph.Topics {
@@ -1657,7 +2096,7 @@ func (ctx *lowerContext) topicLabelForBinding(binding string) string {
 }
 
 func (ctx *lowerContext) interruptContextStoresForPathBinding(binding string, value Value, typ *sem.Type) []Operation {
-	if ctx == nil || ctx.checked == nil || binding == "" || typ == nil || typ.Kind != sem.KindDriverPath {
+	if ctx == nil || ctx.checked == nil || binding == "" || typ == nil {
 		return nil
 	}
 	var ops []Operation
@@ -1665,12 +2104,46 @@ func (ctx *lowerContext) interruptContextStoresForPathBinding(binding string, va
 		if route.PathBinding != binding || route.ContextSymbol == "" {
 			continue
 		}
+		source := value
+		sourceType := typ
+		contextOffset := route.PathFieldOffset
+		if route.PathField != "" {
+			field := ctx.lookupField(typ, route.PathField)
+			fieldType := ctx.fieldType(typ, route.PathField)
+			if field == nil || fieldType == nil || fieldType.Kind != sem.KindDriverPath {
+				continue
+			}
+			fieldOffset := ctx.irFieldOffset(typ, route.PathField, field.Offset)
+			load := &FieldLoad{
+				Object:     value,
+				ObjectType: typ.Name,
+				Field:      route.PathField,
+				Type:       field.Type,
+				Offset:     fieldOffset,
+			}
+			ops = append(ops, load)
+			source = load
+			sourceType = fieldType
+			contextOffset = fieldOffset
+		} else if typ.Kind != sem.KindDriverPath {
+			continue
+		}
+		sourceIRType := ctx.irType(sourceType)
+		size := 8
+		storageOffset := 0
+		if sourceType.Kind == sem.KindDriverPath {
+			if info, ok := typeInfoFor(ctx.program.Types, sourceIRType); ok {
+				size = storageSizeOrEight(info)
+				storageOffset = interruptPathContextStorageOffset(contextOffset, info)
+			}
+		}
 		ops = append(ops, &InterruptContextStore{
 			ContextSymbol: route.ContextSymbol,
-			ContextOffset: route.PathFieldOffset,
-			Source:        value,
-			SourceType:    ctx.irType(typ),
-			Size:          8,
+			ContextOffset: contextOffset,
+			Source:        source,
+			SourceType:    sourceIRType,
+			StorageOffset: storageOffset,
+			Size:          size,
 		})
 	}
 	return ops
@@ -2256,6 +2729,9 @@ func (ctx *lowerContext) lowerExprExpected(moduleName string, receiverType *sem.
 				symbol = executorMethodSymbolForSlot(recvType, e.Method, exec.SlotLabel)
 			}
 		}
+		if specializedSymbol, ok := ctx.enqueueTopicMethodSpecialization(recvType, method, e.Method, ctx.topicParamOriginsForCall(method, args, receiverType)); ok {
+			symbol = specializedSymbol
+		}
 		call := &Call{
 			Symbol:   symbol,
 			Receiver: receiver,
@@ -2530,6 +3006,33 @@ func (ctx *lowerContext) lowerCallArgs(moduleName string, receiverType *sem.Type
 		values = append(values, value)
 	}
 	return values, ops
+}
+
+func (ctx *lowerContext) topicParamOriginsForCall(method *sem.Method, args []Value, currentReceiver *sem.Type) map[string]topicValueOrigin {
+	if ctx == nil || method == nil || len(args) == 0 {
+		return nil
+	}
+	params := method.Params
+	if len(params) > 0 && params[0].Name == "self" {
+		params = params[1:]
+	}
+	out := map[string]topicValueOrigin{}
+	for i, param := range params {
+		if i >= len(args) {
+			break
+		}
+		if !sem.IsTopicSubscriptionType(param.Type) && !sem.IsTopicPublisherType(param.Type) {
+			continue
+		}
+		origin := ctx.topicOriginForValue(args[i], currentReceiver)
+		if origin.TopicLabel != "" {
+			out[param.Name] = origin
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (ctx *lowerContext) lookupField(typ *sem.Type, fieldName string) *FieldInfo {

@@ -140,6 +140,14 @@ func valuesDefinedBy(op Operation) []Value {
 		return []Value{v}
 	case *Copy:
 		return valuesFromValue(v.Target)
+	case *StorageSlotStore:
+		values := valuesFromValue(v.Slot)
+		values = append(values, valuesFromValue(v.Value)...)
+		return values
+	case *StoragePayloadZero:
+		return valuesFromValue(v.Slot)
+	case *StorageCRC32C:
+		return []Value{v}
 	case *ForBytes:
 		values := valuesFromOps(v.IterableOps)
 		values = append(values, valuesFromValue(v.Index)...)
@@ -257,6 +265,32 @@ type Copy struct {
 }
 
 func (Copy) isOperation() {}
+
+type StorageSlotStore struct {
+	Slot   Value
+	Offset uint64
+	Value  Value
+	Type   Type
+}
+
+func (*StorageSlotStore) isOperation() {}
+
+type StoragePayloadZero struct {
+	Slot   Value
+	Offset uint64
+	Length uint64
+}
+
+func (*StoragePayloadZero) isOperation() {}
+
+type StorageCRC32C struct {
+	Slot   Value
+	Length uint64
+	Type   Type
+}
+
+func (*StorageCRC32C) isValue()     {}
+func (*StorageCRC32C) isOperation() {}
 
 type FieldValue struct {
 	Name  string
@@ -579,6 +613,7 @@ type InterruptContext struct {
 type InterruptContextStore struct {
 	ContextSymbol string
 	ContextOffset int
+	StorageOffset int
 	Source        Value
 	SourceType    Type
 	Size          int
@@ -619,6 +654,7 @@ type InterruptBinding struct {
 	EventType             Type
 	PathFieldOffset       int
 	ContextSymbol         string
+	ContextSize           int
 	EventStorageSymbol    string
 	EventStorageSize      int
 	Vector                uint8
@@ -685,19 +721,50 @@ type AsmMethod struct {
 }
 
 type Program struct {
-	Functions         []Function
-	AsmMethods        []AsmMethod
-	Data              []DataObject
-	WritableData      []DataObject
-	Entry             EntryAdapter
-	Types             map[string]TypeInfo
-	InterruptEvents   []InterruptEvent
-	OnHandlers        []OnHandler
-	InterruptBindings []InterruptBinding
-	InterruptContexts []InterruptContext
-	Topics            []TopicLayout
-	InterruptQueues   []InterruptQueueLayout
-	VcpuStarts        []VcpuStartPlan
-	Timers            []TimerRoute
-	APICMode          string
+	Functions          []Function
+	AsmMethods         []AsmMethod
+	Data               []DataObject
+	WritableData       []DataObject
+	StorageEvents      []EventLayout
+	StorageProjections []ProjectionLayout
+	Entry              EntryAdapter
+	Types              map[string]TypeInfo
+	InterruptEvents    []InterruptEvent
+	OnHandlers         []OnHandler
+	InterruptBindings  []InterruptBinding
+	InterruptContexts  []InterruptContext
+	Topics             []TopicLayout
+	InterruptQueues    []InterruptQueueLayout
+	VcpuStarts         []VcpuStartPlan
+	Timers             []TimerRoute
+	APICMode           string
+}
+
+type EventLayout struct {
+	Module        string
+	Name          string
+	EventTypeID   uint64
+	LayoutID      uint64
+	Current       bool
+	PayloadSize   uint64
+	PayloadAlign  uint64
+	PayloadFields []EventPayloadField
+	EncoderSymbol string
+}
+
+type EventPayloadField struct {
+	Name        string
+	Type        Type
+	Offset      uint64
+	StorageSize uint64
+	Align       uint64
+}
+
+type ProjectionLayout struct {
+	Module         string
+	Name           string
+	ProjectionID   uint64
+	LayoutID       uint64
+	Current        bool
+	ContainerKinds []string
 }

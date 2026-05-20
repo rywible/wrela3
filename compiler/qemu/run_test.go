@@ -71,6 +71,17 @@ func TestArgsIncludesSMPWhenRequested(t *testing.T) {
 	}
 }
 
+func TestArgsAppendsExtraArgs(t *testing.T) {
+	args := Args(Options{
+		ImagePath: "boot.efi",
+		ExtraArgs: []string{"-device", "nvme,serial=test"},
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-device nvme,serial=test") {
+		t.Fatalf("QEMU args missing extra args:\n%s", joined)
+	}
+}
+
 func TestArgsUsesSerialPipeWhenRequested(t *testing.T) {
 	args := strings.Join(Args(Options{
 		ImagePath:      "x.efi",
@@ -354,6 +365,35 @@ func TestRunReturnsSuccessWhenExpectedOutputAppearsBeforeProcessExit(t *testing.
 	}
 	if !strings.Contains(out, "hello from wrela") {
 		t.Fatalf("Run() output missing success text: %q", out)
+	}
+}
+
+func TestRunStopsWhenExpectedOutputAppearsBeforeTimeout(t *testing.T) {
+	tmp := t.TempDir()
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	if err := os.WriteFile(fakeQEMU, []byte("#!/usr/bin/env sh\necho 'hello from wrela'\nwhile :; do :; done\n"), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	start := time.Now()
+	out, err := Run(Options{
+		QEMUBinary:  fakeQEMU,
+		OVMFCode:    filepath.Join(tmp, "code.fd"),
+		OVMFVars:    filepath.Join(tmp, "vars.fd"),
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		SuccessText: "hello from wrela",
+		Timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v, output:\n%s", err, out)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run() waited %s after success text", elapsed)
 	}
 }
 

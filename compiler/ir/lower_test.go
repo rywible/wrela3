@@ -385,6 +385,7 @@ driver path SerialConsolePath {
 		Vector:              0x40,
 		PathLabel:           "console.com1",
 		PathBinding:         "serial_path",
+		PathBindingType:     checked.Index.ByModule["machine.x86_64.serial"]["SerialConsolePath"],
 		ContextSymbol:       "_wrela_interrupt_context_console_com1",
 		PathFieldOffset:     24,
 		TopicLabel:          "console.com1.rx",
@@ -453,6 +454,9 @@ driver path SerialConsolePath {
 	}
 	if binding.ContextSymbol != "_wrela_interrupt_context_console_com1" {
 		t.Fatalf("binding context = %q", binding.ContextSymbol)
+	}
+	if binding.ContextSize <= binding.PathFieldOffset+8 {
+		t.Fatalf("binding context size = %d, want room for stable copied path after field offset %d", binding.ContextSize, binding.PathFieldOffset)
 	}
 }
 

@@ -12,7 +12,7 @@ driver path SerialConsolePath {
 executor BadCall {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {
+    on serial.interrupt(serial_payload: SerialInterrupt) {
         self.serial.interrupt()
     }
 }

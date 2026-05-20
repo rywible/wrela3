@@ -37,6 +37,65 @@ func TestDuplicatePciMsixClaimRejected(t *testing.T) {
 	requireOnlyDiagnostic(t, ds, diag.SEM0050, "duplicate hardware claim pci_msix:vendor=0x1234/device=0x11e8/occurrence=0")
 }
 
+func TestPciClassSelectedDeviceCanClaimBar(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "class-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar(index = 0)
+`))
+	if hasCode(ds, diag.SEM0054) {
+		t.Fatalf("class-selected PCI device lost provenance: %#v", ds)
+	}
+}
+
+func TestPciClassSelectedDeviceCanClaimRelocatedBar(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "class-relocated-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+`))
+	if hasCode(ds, diag.SEM0054) {
+		t.Fatalf("class-selected PCI device lost provenance for relocated BAR: %#v", ds)
+	}
+}
+
+func TestNvmeInterruptRoutingClaimRecordsWrapperVectors(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "nvme-interrupt-routing-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+        let routes = nvme.route_nvme_io_completion_interrupts(
+            table_bar_index = 0,
+            table = nvme_bar0,
+            foreground_vector = InterruptVector(value = 0x50),
+            background_vector = InterruptVector(value = 0x51),
+            target = discovery.interrupts.local_apic
+        )
+`))
+	if len(ds) != 0 {
+		t.Fatalf("NVMe interrupt routing diagnostics: %#v", ds)
+	}
+	claimCounts := map[string]int{}
+	for _, claim := range checked.ImageGraph.HardwareClaims {
+		claimCounts[claim.Kind+":"+claim.Key]++
+	}
+	for _, want := range []string{
+		"pci_bar:class=0x01/subclass=0x08/prog_if=0x02/occurrence=0.0",
+		"pci_nvme_interrupts:class=0x01/subclass=0x08/prog_if=0x02/occurrence=0",
+		"interrupt_vector:0x50",
+		"interrupt_vector:0x51",
+	} {
+		if claimCounts[want] != 1 {
+			t.Fatalf("hardware claim %s count = %d, claims = %#v", want, claimCounts[want], checked.ImageGraph.HardwareClaims)
+		}
+	}
+}
+
+func TestDuplicateRelocatedPciBarClaimRejected(t *testing.T) {
+	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-relocated-bar-test.wrela", duplicatePciClaimSource(`
+        let first = edu.claim_mmio_bar(index = 0)
+        let second = edu.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+`))
+	requireOnlyDiagnostic(t, ds, diag.SEM0050, "duplicate hardware claim pci_bar:vendor=0x1234/device=0x11e8/occurrence=0.0")
+}
+
 func TestDuplicateIsaIrqClaimRejected(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-isa-irq-test.wrela", interruptClaimSource(`
         let first = irq_authority.route_isa_irq(irq = 4, vector = InterruptVector(value = 0x40))
@@ -109,8 +168,7 @@ image BadDuplicatePciClaim {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = serial_route.route,
@@ -180,8 +238,7 @@ image BadInterruptClaim {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = ` + serialRoute + `,
@@ -250,8 +307,7 @@ image BadDuplicateBar {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = serial_route.route,
@@ -319,8 +375,7 @@ image BadDuplicateVector {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = plan_interrupts.local_apic,
                 serial_irq4 = first,

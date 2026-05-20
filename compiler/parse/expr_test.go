@@ -149,3 +149,28 @@ func TestKeywordSelectorAndNamedArgInExpression(t *testing.T) {
 		t.Fatalf("call = %#v", call)
 	}
 }
+
+func TestStorageKeywordsCanNameArguments(t *testing.T) {
+	for _, src := range []string{
+		"self.serial_path.ack_receive(event = serial_event)",
+		"ProjectionCursor(projection = DirectoryChildren)",
+	} {
+		p := newParser("test", src)
+		expr, ds := p.parseExpr(0)
+		if len(ds) != 0 {
+			t.Fatalf("%s diagnostics = %#v", src, ds)
+		}
+		switch got := expr.(type) {
+		case *ast.CallExpr:
+			if len(got.Args) != 1 || got.Args[0].Name == "" {
+				t.Fatalf("%s call args = %#v, want named argument", src, got.Args)
+			}
+		case *ast.ConstructorExpr:
+			if len(got.Args) != 1 || got.Args[0].Name == "" {
+				t.Fatalf("%s constructor args = %#v, want named argument", src, got.Args)
+			}
+		default:
+			t.Fatalf("%s expr = %#v, want call or constructor", src, expr)
+		}
+	}
+}

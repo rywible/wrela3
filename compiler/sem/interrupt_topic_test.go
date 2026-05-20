@@ -21,7 +21,7 @@ driver path P {
 executor E {
     p: P
 
-    on p.interrupt(event: Event) {}
+    on p.interrupt(interrupt_payload: Event) {}
 }
 `)
 	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {

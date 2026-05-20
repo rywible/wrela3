@@ -1,0 +1,60 @@
+module storage.stream
+
+data StreamDirectory {
+    next_stream_id: U64
+
+    fn entry_byte_offset(self, stream_id: U64) -> U64 {
+        return stream_id * 32
+    }
+
+    fn exists(self, stream_id: U64) -> Bool {
+        return stream_id < self.next_stream_id
+    }
+
+    fn allocate_stream_id(self) -> U64 {
+        let stream_id = self.next_stream_id
+        self.next_stream_id = self.next_stream_id + 1
+        return stream_id
+    }
+}
+
+data StreamDirectoryEntry {
+    latest_sequence: U64
+    latest_event_id: U64
+    latest_checkpoint_ref: U64
+    flags: U64
+
+    fn expects_sequence(self, sequence: U64) -> Bool {
+        return sequence == self.latest_sequence + 1
+    }
+}
+
+data StreamCheckpoint {
+    current_layout_id: U64
+    state_layout_id: U64
+
+    fn applies(self) -> Bool {
+        return self.state_layout_id == self.current_layout_id
+    }
+}
+
+data StreamDirectoryCache {
+    hits: U64
+    misses: U64
+
+    fn record_hit(self) -> StreamDirectoryCache {
+        return StreamDirectoryCache(hits = self.hits + 1, misses = self.misses)
+    }
+
+    fn record_miss(self) -> StreamDirectoryCache {
+        return StreamDirectoryCache(hits = self.hits, misses = self.misses + 1)
+    }
+
+    fn hit_rate_x1000(self) -> U64 {
+        let total = self.hits + self.misses
+        if total == 0 {
+            return 0
+        }
+        return self.hits * 1000 / total
+    }
+}

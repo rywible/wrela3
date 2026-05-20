@@ -1,0 +1,293 @@
+module storage.blob
+
+use { MutableSlice } from machine.x86_64.executor_memory
+
+const BLOB_ALLOCATOR_FREE_EXTENT_LIMIT: U64 = 1024
+const BLOB_CIPHER_DEVELOPMENT_PASSTHROUGH: U64 = 1
+
+data BlobRef {
+    blob_id: U64
+    start_lba: U64
+    block_count: U64
+}
+
+data BlobCipherPolicy {
+    mode: U64
+    key_id: U64
+    nonce_low: U64
+    nonce_high: U64
+    development_opt_in: Bool
+}
+
+data UnpublishedBlobRef {
+    ref: BlobRef
+    manifest_lba: U64
+}
+
+data PublishedBlobRef {
+    ref: BlobRef
+}
+
+data RelocateBlobProposal {
+    blob_id: U64
+    old_ref: BlobRef
+    new_ref: BlobRef
+    observed_version: U64
+}
+
+data BlobTruth {
+    blob_id: U64
+    ref: BlobRef
+    version: U64
+
+    fn can_accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+        if proposal.blob_id != self.blob_id {
+            return false
+        }
+        if proposal.old_ref != self.ref {
+            return false
+        }
+        if proposal.observed_version != self.version {
+            return false
+        }
+        return true
+    }
+
+    fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+        if self.can_accept_relocate(proposal = proposal) == false {
+            return false
+        }
+        self.ref = proposal.new_ref
+        self.version = self.version + 1
+        return true
+    }
+}
+
+data Extent {
+    start_lba: U64
+    block_count: U64
+}
+
+data BlobReclaimableExtents {
+    extent_count: U64
+    extents: MutableSlice<Extent>
+}
+
+data BlobManifest {
+    blob_id: U64
+    key_metadata_ref: U64
+    extent_count: U64
+    logical_bytes: U64
+}
+
+data BlobExtentAllocator {
+    free_extent_count: U64
+    free_extents: MutableSlice<Extent>
+
+    fn allocate(self, block_count: U64) -> Extent {
+        if block_count == 0 {
+            return Extent(start_lba = 0, block_count = 0)
+        }
+        let index = 0
+        while index < self.free_extent_count {
+            let current = self.free_extents.get(index = index)
+            if current.block_count >= block_count {
+                let allocated = Extent(start_lba = current.start_lba, block_count = block_count)
+                if current.block_count == block_count {
+                    self.remove_extent(index = index)
+                } else {
+                    self.free_extents.set(
+                        index = index,
+                        value = Extent(start_lba = current.start_lba + block_count, block_count = current.block_count - block_count)
+                    )
+                }
+                return allocated
+            }
+            index = index + 1
+        }
+        return Extent(start_lba = 0, block_count = 0)
+    }
+
+    fn free(self, extent: Extent) -> BlobExtentAllocator {
+        if extent.block_count == 0 {
+            return self
+        }
+        if self.merge_with_existing(extent = extent) {
+            self.coalesce_sorted()
+            return self
+        }
+        if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT {
+            return self
+        }
+        let insert_index = self.free_extent_count
+        let scan = 0
+        while scan < self.free_extent_count {
+            let current = self.free_extents.get(index = scan)
+            if extent.start_lba < current.start_lba {
+                insert_index = scan
+                scan = self.free_extent_count
+            } else {
+                scan = scan + 1
+            }
+        }
+        let shift = self.free_extent_count
+        while shift > insert_index {
+            let previous_index = shift - 1
+            let previous = self.free_extents.get(index = previous_index)
+            self.free_extents.set(index = shift, value = previous)
+            shift = previous_index
+        }
+        self.free_extents.set(index = insert_index, value = extent)
+        self.free_extent_count = self.free_extent_count + 1
+        self.coalesce_sorted()
+        return self
+    }
+
+    fn extents(self) -> MutableSlice<Extent> {
+        return self.free_extents
+    }
+
+    fn write_blob(self, blob_id: U64, logical_bytes: U64, policy: BlobCipherPolicy) -> UnpublishedBlobRef {
+        let extent = self.allocate(block_count = logical_bytes)
+        return UnpublishedBlobRef(ref = BlobRef(blob_id = blob_id, start_lba = extent.start_lba, block_count = extent.block_count), manifest_lba = extent.start_lba)
+    }
+
+    fn remove_extent(self, index: U64) {
+        let read = index + 1
+        let write = index
+        while read < self.free_extent_count {
+            let current = self.free_extents.get(index = read)
+            self.free_extents.set(index = write, value = current)
+            read = read + 1
+            write = write + 1
+        }
+        if self.free_extent_count > 0 {
+            self.free_extent_count = self.free_extent_count - 1
+        }
+    }
+
+    fn merge_with_existing(self, extent: Extent) -> Bool {
+        let index = 0
+        let extent_end = extent.start_lba + extent.block_count
+        while index < self.free_extent_count {
+            let current = self.free_extents.get(index = index)
+            let current_end = current.start_lba + current.block_count
+            if extent_end == current.start_lba {
+                self.free_extents.set(
+                    index = index,
+                    value = Extent(start_lba = extent.start_lba, block_count = extent.block_count + current.block_count)
+                )
+                return true
+            }
+            if current_end == extent.start_lba {
+                self.free_extents.set(
+                    index = index,
+                    value = Extent(start_lba = current.start_lba, block_count = current.block_count + extent.block_count)
+                )
+                return true
+            }
+            index = index + 1
+        }
+        return false
+    }
+
+    fn coalesce_sorted(self) {
+        let read = 0
+        let write = 0
+        while read < self.free_extent_count {
+            let current = self.free_extents.get(index = read)
+            if current.block_count != 0 {
+                if write == 0 {
+                    self.free_extents.set(index = 0, value = current)
+                    write = 1
+                } else {
+                    let last_index = write - 1
+                    let last = self.free_extents.get(index = last_index)
+                    if last.start_lba + last.block_count == current.start_lba {
+                        self.free_extents.set(
+                            index = last_index,
+                            value = Extent(start_lba = last.start_lba, block_count = last.block_count + current.block_count)
+                        )
+                    } else {
+                        self.free_extents.set(index = write, value = current)
+                        write = write + 1
+                    }
+                }
+            }
+            read = read + 1
+        }
+        self.free_extent_count = write
+    }
+}
+
+data BlobOrphanCollector {
+    allocated_extent_count: U64
+    allocated_extents: MutableSlice<Extent>
+    acknowledged_ref_count: U64
+    acknowledged_refs: MutableSlice<BlobRef>
+
+    fn mark_acknowledged(self, ref: BlobRef) -> BlobOrphanCollector {
+        if self.acknowledged_ref_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT {
+            return self
+        }
+        if self.acknowledged_ref_count >= self.acknowledged_refs.length {
+            return self
+        }
+        self.acknowledged_refs.set(index = self.acknowledged_ref_count, value = ref)
+        self.acknowledged_ref_count = self.acknowledged_ref_count + 1
+        return self
+    }
+
+    fn mark_unacknowledged(self, ref: BlobRef) -> BlobOrphanCollector {
+        let read = 0
+        let write = 0
+        while read < self.acknowledged_ref_count {
+            let current = self.acknowledged_refs.get(index = read)
+            if current.start_lba == ref.start_lba {
+                if current.block_count == ref.block_count {
+                    read = read + 1
+                } else {
+                    self.acknowledged_refs.set(index = write, value = current)
+                    read = read + 1
+                    write = write + 1
+                }
+            } else {
+                self.acknowledged_refs.set(index = write, value = current)
+                read = read + 1
+                write = write + 1
+            }
+        }
+        self.acknowledged_ref_count = write
+        return self
+    }
+
+    fn reclaimable(self, scratch: MutableSlice<Extent>) -> BlobReclaimableExtents {
+        let index = 0
+        let written = 0
+        while index < self.allocated_extent_count {
+            let allocated = self.allocated_extents.get(index = index)
+            if self.extent_acknowledged(extent = allocated) == false {
+                if written < scratch.length {
+                    scratch.set(index = written, value = allocated)
+                    written = written + 1
+                }
+            }
+            index = index + 1
+        }
+        return BlobReclaimableExtents(extent_count = written, extents = scratch)
+    }
+
+    fn extent_acknowledged(self, extent: Extent) -> Bool {
+        let index = 0
+        while index < self.acknowledged_ref_count {
+            let ref = self.acknowledged_refs.get(index = index)
+            if ref.start_lba == extent.start_lba {
+                if ref.block_count == extent.block_count {
+                    return true
+                }
+            }
+            index = index + 1
+        }
+        return false
+    }
+}

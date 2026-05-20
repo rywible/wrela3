@@ -62,6 +62,7 @@ type localOrigin struct {
 	TimerPeriodUS             uint64
 	IsTimerRoute              bool
 	PathLabel                 string
+	PathVector                int
 	PublishesInterrupts       bool
 	EventType                 string
 	EventFunctionSymbol       string
@@ -245,8 +246,8 @@ type checker struct {
 	currentMethodTypeParams map[string]*Type
 	currentMethodWhere      []TraitBound
 	seenSharedIRQSource     map[string]bool
-	// TODO: scope these discovered plan facts to constructor expression IDs if
-	// images ever allow multiple CPU or hardware plan builders.
+	// Current images use one CPU and hardware plan builder, so these plan facts
+	// are tracked at checker scope.
 	cpuFeatureLoopStrategy   string
 	cpuFeatureLoopFallback   string
 	hardwarePlanWakeStrategy string
@@ -291,12 +292,16 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkExecutorTopicGraph()
 	c.checkHardwareClaims()
 	c.validateArenaGraph()
+	c.checkCoreLinkEndpointOwnership()
+	c.checkStorageAuthority()
+	storage := c.checkStorageDecls()
 
 	return &CheckedProgram{
 		Modules:    modules,
 		Index:      index,
 		ImageGraph: c.graph,
 		OwnedRoot:  c.ownedRoot,
+		Storage:    storage,
 	}, c.diags
 }
 
@@ -1175,6 +1180,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 			c.recordReliableTryPublishCall(moduleName, s.Expr, scope, true)
 			c.recordSubscriptionMethodCall(moduleName, s.Expr, scope)
 		}
+		c.recordStorageAppendCall(moduleName, s.Expr, scope, true)
 		valueLifetime := c.lifetimeOfExpr(s.Expr, scope)
 		scope.Define(s.Name, valueType)
 		origin := c.originForLetValue(moduleName, s.Expr, valueType, scope)
@@ -1317,6 +1323,7 @@ func (c *checker) checkStmt(moduleName string, stmt ast.Stmt, scope *Scope, expe
 		return true
 	case *ast.ExprStmt:
 		valueType := c.typeExpr(moduleName, s.Expr, scope, ctx)
+		c.recordStorageAppendCall(moduleName, s.Expr, scope, false)
 		if ctx == ContextImagePhaseDirect {
 			c.recordGraphFromExprStmt(moduleName, s.Expr, scope)
 		} else {
@@ -2317,6 +2324,20 @@ func pciDeviceKeyFromRequireDevice(call *ast.CallExpr) string {
 	return "vendor=" + vendor + "/device=" + device + "/occurrence=" + occurrence
 }
 
+func pciDeviceKeyFromRequireClass(call *ast.CallExpr) string {
+	classCode := literalArgKey(call, "class_code")
+	subclass := literalArgKey(call, "subclass")
+	progIF := literalArgKey(call, "prog_if")
+	occurrence := literalArgKey(call, "occurrence")
+	if classCode == "<missing>" || subclass == "<missing>" || progIF == "<missing>" || occurrence == "<missing>" {
+		return ""
+	}
+	if classCode == "<nonliteral>" || subclass == "<nonliteral>" || progIF == "<nonliteral>" || occurrence == "<nonliteral>" {
+		return ""
+	}
+	return "class=" + classCode + "/subclass=" + subclass + "/prog_if=" + progIF + "/occurrence=" + occurrence
+}
+
 func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 	switch r := receiver.(type) {
 	case *ast.NameExpr:
@@ -2332,12 +2353,21 @@ func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 				return key, true
 			}
 		}
+		if r.Method == "require_class" {
+			if key := pciDeviceKeyFromRequireClass(r); key != "" {
+				return key, true
+			}
+		}
 	}
 	return "", false
 }
 
 func interruptVectorArgKey(expr *ast.CallExpr) string {
-	arg := namedArgExpr(expr.Args, "vector")
+	return interruptVectorNamedArgKey(expr, "vector")
+}
+
+func interruptVectorNamedArgKey(expr *ast.CallExpr, name string) string {
+	arg := namedArgExpr(expr.Args, name)
 	cons, ok := arg.(*ast.ConstructorExpr)
 	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return "<nonliteral>"
@@ -2540,6 +2570,9 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
 				origin.PathLabel, _ = stringLiteralArg(identityConstructor, "label")
 			}
+		}
+		if vector, ok := storagePathVectorValue(constructorArg(expr, "vector")); ok {
+			origin.PathVector = int(vector)
 		}
 		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(typ)
 		if publisher := c.pathPublisherOrigin(moduleName, expr, scope); publisher.Type != nil {
@@ -2745,6 +2778,10 @@ func (c *checker) originForCall(moduleName string, expr *ast.CallExpr, valueType
 		receiverType.Name == "PciDeviceSet" &&
 		expr.Method == "require_device":
 		origin.PciDeviceKey = pciDeviceKeyFromRequireDevice(expr)
+	case receiverType.Module == "machine.x86_64.pci" &&
+		receiverType.Name == "PciDeviceSet" &&
+		expr.Method == "require_class":
+		origin.PciDeviceKey = pciDeviceKeyFromRequireClass(expr)
 	case IsTopicType(receiverType) && expr.Method == "subscribe":
 		receiverOrigin := c.originForExprValue(moduleName, expr.Receiver, receiverType, scope)
 		origin.TopicLabel = receiverOrigin.TopicLabel
@@ -2950,9 +2987,11 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 		publishes := origin.PublishesInterrupts || origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
 		if origin.EventType != "" && origin.TopicLabel != "" {
-			c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, InterruptTopicRouteNode{
+			c.recordInterruptTopicRoute(InterruptTopicRouteNode{
+				Vector:              origin.PathVector,
 				PathLabel:           origin.PathLabel,
 				PathBinding:         name,
+				PathBindingType:     origin.Type,
 				ContextSymbol:       interruptContextSymbol(origin.PathLabel),
 				TopicLabel:          origin.TopicLabel,
 				TopicKind:           origin.TopicKind,
@@ -2964,6 +3003,34 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case origin.Type.Kind == KindExecutor:
 		c.updateExecutorGraphNode(origin, span)
 	}
+	c.recordNestedInterruptPathRoutes(name, origin, span)
+}
+
+func (c *checker) recordInterruptTopicRoute(route InterruptTopicRouteNode) {
+	for i := range c.graph.InterruptTopicRoutes {
+		existing := &c.graph.InterruptTopicRoutes[i]
+		if existing.PathLabel == route.PathLabel &&
+			existing.TopicLabel == route.TopicLabel &&
+			existing.EventType == route.EventType {
+			if existing.Vector != 0 && route.Vector != 0 && existing.Vector != route.Vector {
+				continue
+			}
+			if route.Vector == 0 {
+				route.Vector = existing.Vector
+			}
+			if existing.PathBinding == "" && route.PathBinding != "" {
+				*existing = route
+			}
+			if existing.PathField == "" && route.PathField != "" && existing.PathBinding == route.PathBinding {
+				*existing = route
+			}
+			if existing.Vector == 0 && route.Vector != 0 {
+				existing.Vector = route.Vector
+			}
+			return
+		}
+	}
+	c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, route)
 }
 
 func (c *checker) recordTimerRoute(route TimerRouteNode) {
@@ -3035,7 +3102,7 @@ func (c *checker) finalizeInterruptTopicRoutes() {
 		route := &c.graph.InterruptTopicRoutes[i]
 		route.SubscriberSlots = subscriberSlotsForTopic(c.graph.TopicSubscriptions, route.TopicLabel)
 		for _, configurator := range c.graph.InterruptConfigurators {
-			if configurator.TopicKind == route.TopicKind {
+			if route.Vector == 0 && configurator.TopicKind == route.TopicKind {
 				route.Vector = configurator.Vector
 			}
 		}
@@ -3066,6 +3133,20 @@ func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.C
 		return
 	}
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	if qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "route_nvme_io_completion_interrupts" {
+		for _, name := range []string{"foreground_vector", "background_vector"} {
+			vector, ok := interruptVectorValueNamedArg(call, name)
+			if !ok {
+				continue
+			}
+			c.graph.InterruptConfigurators = append(c.graph.InterruptConfigurators, InterruptConfiguratorNode{
+				TopicKind: "nvme_completion",
+				Vector:    vector,
+				Span:      call.SpanV,
+			})
+		}
+		return
+	}
 	topicKind, vector, ok := interruptConfiguratorVector(receiverType, call)
 	if !ok {
 		return
@@ -3078,7 +3159,7 @@ func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.C
 }
 
 func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr, scope *Scope, ctx ContextKind) {
-	if call == nil || (ctx != ContextImagePhaseDirect && isTrustedHardwareAuthorityModule(moduleName)) {
+	if call == nil || isTrustedHardwareAuthorityModule(moduleName) {
 		return
 	}
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
@@ -3099,7 +3180,7 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 			return
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: vectorKey, Span: call.SpanV})
-	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && (call.Method == "claim_mmio_bar" || call.Method == "claim_io_bar"):
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && (call.Method == "claim_mmio_bar" || call.Method == "claim_mmio_bar_at32" || call.Method == "claim_io_bar"):
 		key, ok := pciOriginKey(call.Receiver, scope)
 		if !ok {
 			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
@@ -3121,6 +3202,30 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_bar", Key: key + "." + literalArgKey(call, "table_bar_index"), Span: call.SpanV})
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "claim_msix_in_bar":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "route_nvme_io_completion_interrupts":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		foregroundVectorKey := interruptVectorNamedArgKey(call, "foreground_vector")
+		backgroundVectorKey := interruptVectorNamedArgKey(call, "background_vector")
+		if strings.HasPrefix(foregroundVectorKey, "<") || strings.HasPrefix(backgroundVectorKey, "<") {
+			c.error(call.SpanV, diag.SEM0055, "interrupt vectors in hardware claims must be source literals")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_nvme_interrupts", Key: key, Span: call.SpanV})
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: foregroundVectorKey, Span: call.SpanV})
+		if backgroundVectorKey != foregroundVectorKey {
+			c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: backgroundVectorKey, Span: call.SpanV})
+		}
 	case (qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsiCapability" && call.Method == "route") ||
 		(qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsixCapability" && call.Method == "route_entry"):
 		vectorKey := interruptVectorArgKey(call)
@@ -3202,6 +3307,11 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 	switch qualifiedTypeName(receiverType) + "::" + call.Method {
 	case "machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive":
 		return "serial_rx", 0x40, true
+	case "machine.x86_64.pci.PciDevice::route_nvme_io_completion_interrupts":
+		if vector, ok := interruptVectorValueNamedArg(call, "foreground_vector"); ok {
+			return "nvme_completion", vector, true
+		}
+		return "nvme_completion", 0, true
 	case "machine.x86_64.pci.MsiCapability::route":
 		if vector, ok := interruptVectorValueArg(call); ok {
 			return "edu_interrupt", vector, true
@@ -3209,6 +3319,9 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 		return "edu_interrupt", 0, true
 	case "machine.x86_64.pci.MsixCapability::route_entry":
 		if vector, ok := interruptVectorValueArg(call); ok {
+			if vector == 0x50 || vector == 0x51 {
+				return "nvme_completion", vector, true
+			}
 			return "ivshmem_doorbell", vector, true
 		}
 		return "ivshmem_doorbell", 0, true
@@ -3218,7 +3331,11 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 }
 
 func interruptVectorValueArg(call *ast.CallExpr) (int, bool) {
-	arg := namedArgExpr(call.Args, "vector")
+	return interruptVectorValueNamedArg(call, "vector")
+}
+
+func interruptVectorValueNamedArg(call *ast.CallExpr, name string) (int, bool) {
+	arg := namedArgExpr(call.Args, name)
 	cons, ok := arg.(*ast.ConstructorExpr)
 	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return 0, false
@@ -3291,6 +3408,7 @@ func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) 
 		Type:             origin.Type,
 		Span:             span,
 		FieldBindings:    origin.FieldBindings,
+		fieldOrigins:     origin.FieldOrigins,
 		SlotLabel:        origin.SlotLabel,
 		LoopPolicy:       origin.LoopPolicy,
 		LoopStrategy:     origin.LoopStrategy,
@@ -3304,6 +3422,18 @@ func syntheticExecutorFieldBinding(expr *ast.ConstructorExpr, field string, span
 		return fmt.Sprintf("__executor_field_%d_%d_%s", expr.SpanV.Start, span.Start, field)
 	}
 	return fmt.Sprintf("__executor_field_%d_%s", span.Start, field)
+}
+
+func (c *checker) constructorFieldOrigins(moduleName string, expr *ast.ConstructorExpr, scope *Scope) map[string]localOrigin {
+	origins := map[string]localOrigin{}
+	if expr == nil {
+		return origins
+	}
+	for _, arg := range expr.Args {
+		argType := c.exprStaticType(moduleName, arg.Value, scope)
+		origins[arg.Name] = c.originForExprValue(moduleName, arg.Value, argType, scope)
+	}
+	return origins
 }
 
 func (c *checker) typeVcpuIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) {
@@ -3433,6 +3563,8 @@ func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) 
 		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_fn_machine_x86_64_edu_EduMsiPath_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
 		return "ivshmem_doorbell", "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt", "_wrela_event_fn_machine_x86_64_ivshmem_IvshmemDoorbellPath_interrupt"
+	case "machine.x86_64.nvme.NvmeIoPath":
+		return "nvme_completion", "machine.x86_64.nvme.NvmeCompletionInterrupt", "_wrela_event_fn_machine_x86_64_nvme_NvmeIoPath_interrupt"
 	default:
 		return "", "", ""
 	}
@@ -3663,6 +3795,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			Type:          constructed,
 			Span:          expr.SpanV,
 			FieldBindings: fieldBindings,
+			fieldOrigins:  c.constructorFieldOrigins(moduleName, expr, scope),
 			FieldSpans:    fieldSpans,
 			BoundTypes:    boundTypes,
 			PathUses:      pathUses,
@@ -3685,6 +3818,8 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			c.graph.DriverPaths = append(c.graph.DriverPaths, DriverPathNode{Type: constructed, Span: expr.SpanV, FieldUses: pathUses})
 		}
 	}
+	c.recordStorageWriterConstructor(moduleName, expr, constructed, scope)
+	c.recordStoragePathConstructor(moduleName, expr, constructed, scope)
 	if constructed.Kind == KindData || (c.allowPlaceConstructor != nil && c.allowPlaceConstructor.expr == expr && constructed.Kind == KindClass) {
 		c.rememberLifetime(expr, constructorLifetime)
 	} else {
@@ -4088,6 +4223,9 @@ func (c *checker) typeCallExpr(moduleName string, expr *ast.CallExpr, scope *Sco
 	c.recordHardwareClaimCall(moduleName, expr, scope, ctx)
 	c.recordArenaGraphCall(moduleName, expr, recvType, scope, ctx)
 	c.recordPlacementGraphCall(moduleName, expr, recvType, scope)
+	c.checkStoragePathSubmitCall(moduleName, expr, recvType, scope)
+	c.checkProjectionAdvanceCall(moduleName, expr, recvType, scope)
+	c.checkBlobTruthMutation(moduleName, expr, recvType)
 	if c.ownedRoot != nil && method.Return == c.ownedRoot && !(c.currentPhase == "delegated_hardware" && c.isOwnershipTransferAuthority(recvType)) {
 		c.error(expr.SpanV, diag.SEM0008, c.ownedRoot.Name+" can only be minted through ownership-transfer authority in phase delegated_hardware")
 	}
@@ -4177,6 +4315,7 @@ func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
 		"machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive",
 		"machine.x86_64.interrupts.LocalApic::enable",
 		"machine.x86_64.interrupts.IoApic::route_gsi4_to_vector40",
+		"machine.x86_64.pci.PciDevice::route_nvme_io_completion_interrupts",
 		"machine.x86_64.pci.PciDevice::write_config32",
 		"machine.x86_64.pci.MsiCapability::route",
 		"machine.x86_64.pci.MsixCapability::route_entry",

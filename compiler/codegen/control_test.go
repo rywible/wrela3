@@ -445,6 +445,34 @@ func TestCompileShiftAndBitOrOpcodes(t *testing.T) {
 	}
 }
 
+func TestCompileVariableShiftUsesCL(t *testing.T) {
+	value := &ir.Param{Symbol: "value", Type: ir.Type{Name: "U64"}}
+	shiftBy := &ir.Param{Symbol: "shift_by", Type: ir.Type{Name: "U64"}}
+	shift := &ir.Binary{
+		Op:    "shl",
+		Left:  value,
+		Right: shiftBy,
+		Type:  ir.Type{Name: "U64"},
+	}
+	fn := ir.Function{
+		Symbol: "variable_shift",
+		Params: []ir.Value{value, shiftBy},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{shift, &ir.Return{Value: shift}},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+	code := image.Sections[0].Data
+	if !bytes.Contains(code, []byte{0x48, 0xD3, 0xE0}) {
+		t.Fatalf("expected shl rax, cl encoding, got %#x", code)
+	}
+}
+
 func TestCompileBinaryUnsignedDiv(t *testing.T) {
 	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
 	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}
@@ -469,6 +497,36 @@ func TestCompileBinaryUnsignedDiv(t *testing.T) {
 	}
 	if !bytes.Contains(code, []byte{0x49, 0xF7, 0xF2}) {
 		t.Fatalf("expected div r10 encoding, got %#x", code)
+	}
+}
+
+func TestCompileBinaryUnsignedMod(t *testing.T) {
+	left := &ir.Param{Symbol: "left", Type: ir.Type{Name: "U64"}}
+	right := &ir.Param{Symbol: "right", Type: ir.Type{Name: "U64"}}
+	remainder := &ir.Binary{Op: "%", Left: left, Right: right, Type: ir.Type{Name: "U64"}}
+	fn := ir.Function{
+		Symbol: "unsigned_mod",
+		Params: []ir.Value{left, right},
+		Blocks: []ir.Block{{
+			Label: "entry",
+			Ops:   []ir.Operation{remainder, &ir.Return{Value: remainder}},
+		}},
+	}
+
+	image, diags := Compile(&ir.Program{Functions: []ir.Function{fn}})
+	if len(diags) != 0 {
+		t.Fatalf("Compile() diagnostics = %#v", diags)
+	}
+
+	code := image.Sections[0].Data
+	if !bytes.Contains(code, []byte{0x48, 0x31, 0xD2}) {
+		t.Fatalf("expected xor rdx, rdx before div, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x49, 0xF7, 0xF2}) {
+		t.Fatalf("expected div r10 encoding, got %#x", code)
+	}
+	if !bytes.Contains(code, []byte{0x48, 0x8B, 0xC2}) {
+		t.Fatalf("expected mov rax, rdx remainder move, got %#x", code)
 	}
 }
 

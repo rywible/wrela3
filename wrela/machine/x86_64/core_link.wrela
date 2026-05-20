@@ -1,0 +1,81 @@
+module machine.x86_64.core_link
+
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { MutableSlice } from machine.x86_64.executor_memory
+use { WakeStrategy } from machine.x86_64.executor_loop
+use { Option, Result, Unit } from wrela.lang.core
+
+data CoreLinkFull {}
+
+data CoreLinkEmpty {}
+
+class CoreSpscProducer<T> {
+    owner: ExecutorSlot
+    peer: ExecutorSlot
+    slots: MutableSlice<T>
+    control: MutableSlice<U64>
+    capacity: U64
+    head: U64
+    tail: U64
+    credits: U64
+    wake_strategy: WakeStrategy
+
+    fn try_send(self, value: T) -> Result<Unit, CoreLinkFull> {
+        if self.capacity == 0 {
+            return Result.Err(error = CoreLinkFull())
+        }
+        let observed_head = self.control.get(index = 0)
+        let observed_tail = self.control.get(index = 1)
+        let occupied = self.control.get(index = 2)
+        if occupied >= self.capacity {
+            return Result.Err(error = CoreLinkFull())
+        }
+        self.slots.set(index = observed_tail, value = value)
+        let next_tail = observed_tail + 1
+        if next_tail == self.capacity {
+            next_tail = 0
+        }
+        self.control.set(index = 1, value = next_tail)
+        self.control.set(index = 2, value = occupied + 1)
+        self.head = observed_head
+        self.tail = next_tail
+        self.credits = self.capacity - occupied - 1
+        return Result.Ok(value = Unit())
+    }
+}
+
+class CoreSpscConsumer<T> {
+    owner: ExecutorSlot
+    peer: ExecutorSlot
+    slots: MutableSlice<T>
+    control: MutableSlice<U64>
+    capacity: U64
+    head: U64
+    tail: U64
+    wait_armed: Bool
+    wake_strategy: WakeStrategy
+
+    fn try_next(self) -> Option<T> {
+        if self.capacity == 0 {
+            return Option.None()
+        }
+        let occupied = self.control.get(index = 2)
+        if occupied == 0 {
+            return Option.None()
+        }
+        let observed_head = self.control.get(index = 0)
+        let value = self.slots.get(index = observed_head)
+        let next_head = observed_head + 1
+        if next_head == self.capacity {
+            next_head = 0
+        }
+        self.control.set(index = 0, value = next_head)
+        self.control.set(index = 2, value = occupied - 1)
+        self.head = next_head
+        return Option.Some(value = value)
+    }
+
+    fn arm_wait(self) {
+        self.wait_armed = true
+    }
+}

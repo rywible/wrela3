@@ -272,8 +272,7 @@ image InterruptQueueTest {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        let hardware_plan = HardwarePlan(
-            cpus = cpus,
+        let hardware_plan = HardwarePlan(cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = serial_route.route,
@@ -343,8 +342,7 @@ image SharedIrqTest {
             idt_descriptor = Bytes(address = 0, length = 0),
             cr3 = 0
         )
-        let hardware_plan = HardwarePlan(
-            cpus = cpus,
+        let hardware_plan = HardwarePlan(cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = ` + serialRoute + `,

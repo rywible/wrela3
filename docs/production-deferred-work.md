@@ -61,3 +61,12 @@
 - This is required for production and not optional because iterative builds, caching, and inspection tooling are what keep the compiler usable day-to-day.
 - v0 exclusion reason: this milestone prioritizes correctness over productivity niceties so the first end-to-end artifact can be proven.
 - v0 must not block: cache/incremental mode, compiler daemon, and image-inspection tooling should consume the current command and result contracts.
+
+## Storage beyond the first NVMe event-store milestone
+- POSIX filesystem compatibility remains out of scope. The first storage surface is events, blobs, checkpoints, projections, and file-like entity streams.
+- SQL, relational query planning, general secondary indexes, multi-writer event-log sharding, and network replication remain out of scope.
+- Production command inboxes, idempotency records, full-disk encryption, IOMMU-backed DMA isolation, SGL-heavy NVMe transfers, tuned compression codec selection, and destructive retention policies remain deferred.
+- Broader NVMe interrupt policy work remains deferred: interrupt moderation tuning and multi-namespace/vector scaling. The milestone-1 direct path selects MSI-X entries when present, falls back to two-message MSI routing when needed, and uses bounded interrupt-enabled completion windows so firmware handoff cannot hang on a missed or coalesced interrupt.
+- Real hot-slot replay across the whole hot window remains deferred beyond the current first-group proof.
+- Large-scale blob allocator stress, manifest compaction, and cold orphan sweep scheduling remain deferred; the v1 Wrela mirror now uses bounded 1024-entry mutable extent/ref tables for allocator and orphan liveness operations.
+- The first blob cipher used by QEMU tests is a named development passthrough mode behind the final blob manifest API. Production images must not construct it without explicit development-storage opt in.

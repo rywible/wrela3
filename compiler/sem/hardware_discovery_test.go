@@ -62,6 +62,7 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 		"pci_device_count",
 		"edu_bar0",
 		"ivshmem_rx_bar0",
+		"nvme_bar0",
 	} {
 		_ = fieldTypeName(t, report, field)
 	}
@@ -102,6 +103,7 @@ func TestHardwareDiscoverySourceShape(t *testing.T) {
 	assertMethodExists(t, windows, "enumerate")
 	pci := moduleType(t, index, "machine.x86_64.pci", "PciDeviceSet")
 	assertMethodExists(t, pci, "require_device")
+	assertMethodExists(t, pci, "require_class")
 	assertMethodExists(t, moduleType(t, index, "machine.x86_64.pci", "PcieEcamWindow"), "read_config32")
 	dev := moduleType(t, index, "machine.x86_64.pci", "PciDevice")
 	assertMethodExists(t, dev, "claim_mmio_bar")
@@ -235,8 +237,7 @@ image DiscoveryFactsImage {
         let queue_slots = console_memory.reserve_array(U8, count = 64)
         let queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_seed, slots = queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
         let arena = MutableBytes(address = 0, length = 0)
-        let hardware_plan = HardwarePlan(
-            cpus = discovery.cpus.require_min_count(count = 2),
+        let hardware_plan = HardwarePlan(cpus = discovery.cpus.require_min_count(count = 2),
             interrupts = InterruptRoutingPlan(
                 local_apic = local_apic,
                 serial_irq4 = shared.route,

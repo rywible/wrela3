@@ -22,6 +22,7 @@ type InterruptBinding struct {
 	HandlerFunctionSymbol string
 	PathFieldOffset       int
 	ContextSymbol         string
+	ContextSize           int
 	EventStorageSymbol    string
 	EventStorageSize      int
 	Vector                uint8

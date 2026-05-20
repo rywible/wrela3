@@ -155,6 +155,43 @@ func TestLanguageExpressivenessKeywords(t *testing.T) {
 	}
 }
 
+func TestStorageDeclarationKeywords(t *testing.T) {
+	src := `event FileCreated id 1001 { layout 1 current {} }
+projection DirectoryChildren id 12 {}`
+	toks, ds := All(src)
+	if len(ds) != 0 {
+		t.Fatalf("diagnostics: %#v", ds)
+	}
+	if toks[0].Kind != KeywordEvent {
+		t.Fatalf("token 0 = %#v, want KeywordEvent", toks[0])
+	}
+	if toks[2].Kind != Identifier || toks[2].Text != "id" {
+		t.Fatalf("id token = %#v, want Identifier", toks[2])
+	}
+	if toks[5].Kind != Identifier || toks[5].Text != "layout" {
+		t.Fatalf("layout token = %#v, want Identifier", toks[5])
+	}
+	if toks[7].Kind != Identifier || toks[7].Text != "current" {
+		t.Fatalf("current token = %#v, want Identifier", toks[7])
+	}
+	if toks[12].Kind != KeywordProjection {
+		t.Fatalf("projection token = %#v, want KeywordProjection", toks[12])
+	}
+	if toks[12].Text != "projection" {
+		t.Fatalf("projection text = %q, want projection", toks[12].Text)
+	}
+
+	contextual, ds := All("id layout current upcast")
+	if len(ds) != 0 {
+		t.Fatalf("contextual diagnostics: %#v", ds)
+	}
+	for i, tok := range contextual[:4] {
+		if tok.Kind != Identifier {
+			t.Fatalf("contextual token %d = %#v, want Identifier", i, tok)
+		}
+	}
+}
+
 func TestFatArrowToken(t *testing.T) {
 	toks, ds := All("Option.None => { }")
 	if len(ds) != 0 {

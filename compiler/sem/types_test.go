@@ -654,7 +654,7 @@ module index.interrupt_bad_on_field
 executor BadField {
     serial: SerialConsolePath
 
-    on missing.interrupt(event: SerialInterrupt) {}
+    on missing.interrupt(serial_payload: SerialInterrupt) {}
 }
 `)
 	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
@@ -670,7 +670,7 @@ module index.interrupt_param_type
 executor BadParam {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: OtherInterrupt) {}
+    on serial.interrupt(serial_payload: OtherInterrupt) {}
 }
 `)
 	if !hasMessage(diags, diag.SEM0042, "executor on interrupt handlers are no longer supported; use path-owned interrupt topics") {
@@ -688,9 +688,9 @@ class RuntimeThing {}
 executor BadBody {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {
+    on serial.interrupt(serial_payload: SerialInterrupt) {
         while true {}
-        return event
+        return serial_payload
         let thing = RuntimeThing()
     }
 }
@@ -757,7 +757,7 @@ executor BadHandler {
     memory: ExecutorMemory
     interrupts: ApicInterruptController
 
-    on serial.interrupt(event: SerialInterrupt) {
+    on serial.interrupt(serial_payload: SerialInterrupt) {
         with self.memory.frame(length = 64) as tick {
             let raw = tick.reserve(length = 8, align = 8)
         }
@@ -786,7 +786,7 @@ module index.interrupt_call
 executor BadCall {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {
+    on serial.interrupt(serial_payload: SerialInterrupt) {
         self.serial.interrupt()
     }
 }
@@ -809,7 +809,7 @@ executor BadBind {
     serial: SerialConsolePath
     interrupts: Interrupts
 
-    on serial.interrupt(event: SerialInterrupt) {
+    on serial.interrupt(serial_payload: SerialInterrupt) {
         self.interrupts.bind()
     }
 }
@@ -830,7 +830,7 @@ module machine.x86_64.serial
 executor ConsoleExec {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {}
+    on serial.interrupt(serial_payload: SerialInterrupt) {}
 }
 
 image Good {
@@ -860,7 +860,7 @@ module index.interrupt_unsupported_reachable
 executor ConsoleExec {
     serial: SerialConsolePath
 
-    on serial.interrupt(event: SerialInterrupt) {}
+    on serial.interrupt(serial_payload: SerialInterrupt) {}
 }
 
 image Bad {
@@ -913,8 +913,8 @@ executor DuplicateSerial {
     first: SerialConsolePath
     second: SerialConsolePath
 
-    on first.interrupt(event: SerialInterrupt) {}
-    on second.interrupt(event: SerialInterrupt) {}
+    on first.interrupt(serial_payload: SerialInterrupt) {}
+    on second.interrupt(serial_payload: SerialInterrupt) {}
 }
 
 image Bad {

@@ -251,6 +251,21 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	if fatalHandler.AsmBody == nil {
 		t.Fatalf("missing fatal_idt_handler asm method")
 	}
+	nvmeIDT := methodByName(t, memory, "install_nvme_interrupt_idt_gates")
+	if !nvmeIDT.IsAsm || nvmeIDT.AsmBody == nil {
+		t.Fatalf("install_nvme_interrupt_idt_gates must be asm and non-empty")
+	}
+	for _, want := range []string{
+		"vector50_handler",
+		"vector51_handler",
+		"1296",
+		"1312",
+		"write_idt_gate",
+	} {
+		if !strings.Contains(nvmeIDT.AsmBody.Source, want) {
+			t.Fatalf("install_nvme_interrupt_idt_gates asm body missing %q in:\n%s", want, nvmeIDT.AsmBody.Source)
+		}
+	}
 	if !strings.Contains(fatalHandler.AsmBody.Source, "hlt") {
 		t.Fatalf("fatal_idt_handler must include hlt: %s", fatalHandler.AsmBody.Source)
 	}
@@ -353,6 +368,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 	repoRoot := filepath.Clean(filepath.Join(workdir, "..", ".."))
 	paths := []string{
 		filepath.Join(repoRoot, "wrela/lang/core.wrela"),
+		filepath.Join(repoRoot, "wrela/arch/x86_64/io.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/boot_services.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
@@ -369,6 +385,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_loop.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_slot.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/executor_memory.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/core_link.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_u64.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/topic_payload.wrela"),
@@ -378,6 +395,10 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupt_queue.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/timer.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/qemu_fw_cfg.wrela"),
+		filepath.Join(repoRoot, "wrela/storage/format.wrela"),
+		filepath.Join(repoRoot, "wrela/storage/event_log.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/nvme.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/edu.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/ivshmem.wrela"),
 	}
@@ -434,8 +455,7 @@ image UefiSourceHarness {
         let serial_source = serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
         let serial_queue_slots = console_memory.reserve_array(U8, count = 64)
         let serial_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = console_slot_seed, slots = serial_queue_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
-        let hardware_plan = HardwarePlan(
-            cpus = cpus,
+        let hardware_plan = HardwarePlan(cpus = cpus,
             interrupts = InterruptRoutingPlan(
                 local_apic = interrupts.local_apic,
                 serial_irq4 = serial_route.route,

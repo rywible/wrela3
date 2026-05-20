@@ -1,0 +1,110 @@
+module storage.file_model
+
+use { PublishedBlobRef } from storage.blob
+use { OrderedPages } from storage.projections
+
+const FILE_EVENT_CREATED: U64 = 1001
+const FILE_EVENT_RENAMED: U64 = 1002
+const FILE_EVENT_CONTENT_COMMITTED: U64 = 1003
+const FILE_EVENT_DELETED: U64 = 1004
+
+data FileId {
+    value: U64
+}
+
+data FileNameKey {
+    value: U64
+}
+
+data DirectoryChild {
+    file_id: FileId
+    name_ref: FileNameKey
+    deleted: Bool
+}
+
+data FileState {
+    current_blob_ref: PublishedBlobRef
+    name_ref: FileNameKey
+    parent_id: FileId
+    deleted: Bool
+    stream_sequence: U64
+}
+
+event FileCreated id 1001 {
+    file_id: FileId
+    parent_id: FileId
+    name_ref: FileNameKey
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+
+    layout 1 current {
+        file_id: U64 = self.file_id.value
+        parent_id: U64 = self.parent_id.value
+        name_ref: U64 = self.name_ref.value
+        blob_ref: PublishedBlobRef = self.blob_ref
+        stream_sequence: U64 = self.stream_sequence
+    }
+}
+
+event FileRenamed id 1002 {
+    file_id: FileId
+    parent_id: FileId
+    name_ref: FileNameKey
+    stream_sequence: U64
+
+    layout 1 current {
+        file_id: U64 = self.file_id.value
+        parent_id: U64 = self.parent_id.value
+        name_ref: U64 = self.name_ref.value
+        stream_sequence: U64 = self.stream_sequence
+    }
+}
+
+event FileContentCommitted id 1003 {
+    file_id: FileId
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+
+    layout 1 current {
+        file_id: U64 = self.file_id.value
+        blob_ref: PublishedBlobRef = self.blob_ref
+        stream_sequence: U64 = self.stream_sequence
+    }
+}
+
+event FileDeleted id 1004 {
+    file_id: FileId
+    stream_sequence: U64
+
+    layout 1 current {
+        file_id: U64 = self.file_id.value
+        stream_sequence: U64 = self.stream_sequence
+    }
+}
+
+projection DirectoryChildren id 12 {
+    layout 1 current {
+        children: OrderedPages<FileId, FileNameKey, DirectoryChild>
+    }
+}
+
+data DirectoryProjectionWorker {
+    projection_id: U64
+    watermark: U64
+
+    fn apply_group(self, last_event_id: U64, event_type_id: U64) -> DirectoryProjectionWorker {
+        if event_type_id == FILE_EVENT_CREATED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_RENAMED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_CONTENT_COMMITTED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == FILE_EVENT_DELETED {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+    }
+}

@@ -42,6 +42,35 @@ data BoundedBytes {
         return self.unchecked_read_u64(offset = offset)
     }
 
+    fn write_u8(self, offset: U64, value: U8) {
+        self.require_range(offset = offset, width = 1)
+        self.unchecked_write_u8(offset = offset, value = value)
+    }
+
+    fn write_u16(self, offset: U64, value: U16) {
+        self.require_range(offset = offset, width = 2)
+        self.unchecked_write_u16(offset = offset, value = value)
+    }
+
+    fn write_u32(self, offset: U64, value: U32) {
+        self.require_range(offset = offset, width = 4)
+        self.unchecked_write_u32(offset = offset, value = value)
+    }
+
+    fn write_u64(self, offset: U64, value: U64) {
+        self.require_range(offset = offset, width = 8)
+        self.unchecked_write_u64(offset = offset, value = value)
+    }
+
+    fn write_physical_address(self, offset: U64, value: PhysicalAddress) {
+        self.require_range(offset = offset, width = 8)
+        self.unchecked_write_physical_address(offset = offset, value = value)
+    }
+
+    fn zero(self) {
+        self.unchecked_zero()
+    }
+
     asm fn unchecked_read_u8(self, offset: U64) -> U8 {
         mov r11, self.address
         add r11, offset
@@ -67,6 +96,68 @@ data BoundedBytes {
         mov r11, self.address
         add r11, offset
         mov rax, [r11]
+        ret
+    }
+
+    asm fn unchecked_write_u8(self, offset: U64, value: U8) {
+        mov r11, self.address
+        add r11, offset
+        mov al, value
+        mov [r11], al
+        ret
+    }
+
+    asm fn unchecked_write_u16(self, offset: U64, value: U16) {
+        mov r11, self.address
+        add r11, offset
+        mov ax, value
+        mov [r11], ax
+        ret
+    }
+
+    asm fn unchecked_write_u32(self, offset: U64, value: U32) {
+        mov r11, self.address
+        add r11, offset
+        mov eax, value
+        mov [r11], eax
+        ret
+    }
+
+    asm fn unchecked_write_u64(self, offset: U64, value: U64) {
+        mov r11, self.address
+        add r11, offset
+        mov rax, value
+        mov [r11], rax
+        ret
+    }
+
+    asm fn unchecked_write_physical_address(self, offset: U64, value: PhysicalAddress) {
+        mov r11, self.address
+        add r11, offset
+        mov rax, value
+        mov [r11], rax
+        ret
+    }
+
+    asm fn unchecked_zero(self) {
+        mov r11, self.address
+        mov rcx, self.length
+        mov rax, 0
+    zero_loop:
+        cmp rcx, 8
+        jl zero_tail
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 8
+        jmp zero_loop
+    zero_tail:
+        cmp rcx, 0
+        je zero_done
+        mov [r11], al
+        add r11, 1
+        sub rcx, 1
+        jmp zero_tail
+    zero_done:
         ret
     }
 }

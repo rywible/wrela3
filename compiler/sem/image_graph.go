@@ -42,6 +42,18 @@ type ExecutorNode struct {
 	LoopStrategy     string
 	LoopFallback     string
 	MemoryOwnerLabel string
+	fieldOrigins     map[string]localOrigin
+}
+
+type CoreLinkEndpointUseNode struct {
+	Role         string
+	Owner        string
+	Endpoint     CoreLinkEndpointNode
+	EndpointOK   bool
+	ReceiverType *Type
+	ExecutorType *Type
+	FieldName    string
+	Span         source.Span
 }
 
 type ExecutorSlotNode struct {
@@ -105,6 +117,8 @@ type InterruptTopicRouteNode struct {
 	Vector              int
 	PathLabel           string
 	PathBinding         string
+	PathBindingType     *Type
+	PathField           string
 	ContextSymbol       string
 	PathFieldOffset     int
 	TopicLabel          string
@@ -279,6 +293,12 @@ type ImageGraph struct {
 	DMABuffers              []DMABufferNode
 	InterruptQueues         []InterruptQueueNode
 	SharedInterruptSources  []SharedInterruptSourceNode
+	StoragePaths            []StoragePathNode
+	CoreLinkEndpoints       []CoreLinkEndpointNode
+	CoreLinkEndpointUses    []CoreLinkEndpointUseNode
+	ProjectionFeeds         []ProjectionFeedNode
+	StorageWriters          []StorageWriterNode
+	StorageAppendCalls      []StorageAppendCallNode
 }
 
 func sharedIRQRouteKey(irq uint64, vector uint64) string {

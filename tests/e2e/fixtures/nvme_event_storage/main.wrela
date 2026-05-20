@@ -1,0 +1,424 @@
+module tests.e2e.fixtures.nvme_event_storage.main
+
+use { FirstAppendBuilder, FirstAppendEvents, ReplayRecovery, ReplayScratch } from tests.e2e.fixtures.nvme_event_storage.program
+use { PlatformDiscoveryRoot } from platform.hardware.discovery
+use { BootPanic } from platform.hardware.panic
+use { DelegatedHardware } from platform.uefi.transition
+use { ArenaIdentity, ArenaPolicy } from platform.hardware.memory
+use { ClaimedPciPlanBuilder, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { Bytes, ExecutorMemory } from machine.x86_64.executor_memory
+use { ExecutorSlot } from machine.x86_64.executor_slot
+use { ApicInterruptController, InterruptSourceIdentity, InterruptVector } from machine.x86_64.interrupts
+use { InterruptOverflowPolicy, InterruptQueue, QueueIdentity } from machine.x86_64.interrupt_queue
+use { CoreSpscConsumer, CoreSpscProducer } from machine.x86_64.core_link
+use { NVME_PATH_BACKGROUND, NVME_PATH_FOREGROUND, BackgroundStoragePath, ForegroundStoragePath, NvmeCompletionInterrupt, NvmeCompletionQueue, NvmeControllerRegisters, NvmeDirectStorage, NvmeIoPath, NvmeNamespace, NvmePathRole, NvmeQueueMemoryBuilder } from machine.x86_64.nvme
+use { QemuFwCfg } from machine.x86_64.qemu_fw_cfg
+use { SerialDriver, SerialWriterRegisters, SerialWritePath } from machine.x86_64.serial
+use { Topic, TopicSubscription } from machine.x86_64.topic
+use { TopicIdentity } from machine.x86_64.topic_u64
+use { PortIo } from arch.x86_64.io
+use { BLOB_ALLOCATOR_FREE_EXTENT_LIMIT, BlobRef, Extent } from storage.blob
+use { STORAGE_EVENT_HEADER_SIZE, STORAGE_EVENT_PAYLOAD_BYTES, STORAGE_EVENT_SLOT_SIZE, STORAGE_MAX_BATCH_SLOTS, STORAGE_TARGET_BATCH_SLOTS, StorageMetrics } from storage.format
+use { StreamDirectory } from storage.stream
+use { CommitToken, CommittedAtomicGroup, PendingAtomicGroup, StorageWriter } from storage.writer
+use { Option } from wrela.lang.core
+
+executor NvmeStoragePark {
+    slot: ExecutorSlot
+    memory: ExecutorMemory
+
+    start fn run(self) -> never {
+        self.memory.halt_forever()
+    }
+}
+
+executor NvmeStorageMaintenance {
+    slot: ExecutorSlot
+    memory: ExecutorMemory
+    committed_groups: CoreSpscConsumer<CommittedAtomicGroup>
+
+    start fn run(self) -> never {
+        match self.committed_groups.try_next() {
+            Option.Some(value = committed) => {
+                if committed.last_event_id != 1 {
+                    BootPanic().fail(code = 0xAC080151)
+                }
+            }
+            Option.None => {
+                BootPanic().fail(code = 0xAC080152)
+            }
+        }
+        self.memory.halt_forever()
+    }
+}
+
+class NvmeReplayReporter {
+    serial_path: SerialWritePath
+    memory: ExecutorMemory
+
+    fn report(self, events: FirstAppendEvents, last_event_id: U64, projection_watermark: U64, orphan_collected: Bool, storage: NvmeDirectStorage) {
+        with self.memory.frame(length = 65536) as replay_scratch {
+            let allocated_slots = replay_scratch.reserve_array(Extent, count = BLOB_ALLOCATOR_FREE_EXTENT_LIMIT)
+            let allocated_extents = allocated_slots.fill(value = Extent(start_lba = 0, block_count = 0))
+            let acknowledged_slots = replay_scratch.reserve_array(BlobRef, count = BLOB_ALLOCATOR_FREE_EXTENT_LIMIT)
+            let acknowledged_refs = acknowledged_slots.fill(value = BlobRef(blob_id = 0, start_lba = 0, block_count = 0))
+            allocated_extents.set(index = 0, value = Extent(start_lba = storage.first_append_payload_u64(slot_offset = 0, payload_offset = 8), block_count = storage.first_append_payload_u64(slot_offset = 0, payload_offset = 16)))
+            allocated_extents.set(index = 1, value = Extent(start_lba = storage.first_append_payload_u64(slot_offset = 512, payload_offset = 8), block_count = storage.first_append_payload_u64(slot_offset = 512, payload_offset = 16)))
+            allocated_extents.set(index = 2, value = Extent(start_lba = storage.first_append_payload_u64(slot_offset = 512, payload_offset = 32), block_count = storage.first_append_payload_u64(slot_offset = 512, payload_offset = 40)))
+            acknowledged_refs.set(index = 0, value = BlobRef(blob_id = storage.first_append_payload_u64(slot_offset = 0, payload_offset = 0), start_lba = storage.first_append_payload_u64(slot_offset = 0, payload_offset = 8), block_count = storage.first_append_payload_u64(slot_offset = 0, payload_offset = 16)))
+            let replay = FirstAppendBuilder(marker = 0).replay_outcome(
+                events = events,
+                recovery = ReplayRecovery(last_event_id = last_event_id, projection_watermark = projection_watermark, orphan_collected = orphan_collected),
+                scratch = ReplayScratch(allocated_extents = allocated_extents, acknowledged_refs = acknowledged_refs)
+            )
+            if replay.last_event_id != 1 {
+                BootPanic().fail(code = 0xAC080146)
+            }
+            if replay.projection_watermark != 1 {
+                BootPanic().fail(code = 0xAC080147)
+            }
+            if replay.orphan_collected == false {
+                BootPanic().fail(code = 0xAC080148)
+            }
+        }
+        self.serial_path.write(self.memory.bytes(value = "NVME_STORAGE_REPLAY_OK last_event_id=1\n"))
+        if storage.namespace.logical_block_size == 4096 {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=4096\n"))
+        } else {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=512\n"))
+        }
+        self.serial_path.write(self.memory.bytes(value = "projection_watermark=1\n"))
+        self.serial_path.write(self.memory.bytes(value = "NVME_ORPHAN_COLLECTION_OK\n"))
+    }
+}
+
+class NvmeAppendReporter {
+    serial_path: SerialWritePath
+    memory: ExecutorMemory
+
+    fn report(self, writer: StorageWriter, storage: NvmeDirectStorage, foreground: ForegroundStoragePath, completions: TopicSubscription<NvmeCompletionInterrupt>) {
+        let group = PendingAtomicGroup(semantic_event_count = 2, reserved_empty_slot_count = storage.first_append_reserved_empty_slots())
+        let append = writer.enqueue_atomic_group(group = group)
+        if append.accepted == false {
+            BootPanic().fail(code = append.reject_code)
+        }
+        if append.last_event_id != 1 {
+            BootPanic().fail(code = 0xAC080145)
+        }
+        let durable = storage.write_first_append(foreground = foreground, completions = completions)
+        let token = CommitToken(
+            first_event_id = append.first_event_id,
+            last_event_id = append.last_event_id,
+            pending_write_count = durable.pending_write_count,
+            completed_write_count = durable.completed_write_count,
+            batch_submitted = true,
+            flush_required = durable.flush_required,
+            flush_completed = durable.flush_completed,
+            durability_failed = durable.durability_failed
+        )
+        let acknowledged = writer.on_durability_completed(token = token)
+        if acknowledged.accepted == false {
+            BootPanic().fail(code = acknowledged.reject_code)
+        }
+        if acknowledged.open_batch_slots != 0 {
+            BootPanic().fail(code = 0xAC0801AE)
+        }
+        let committed = writer.publish_committed_group(token = token)
+        if committed.last_event_id != 1 {
+            BootPanic().fail(code = 0xAC08014A)
+        }
+        if storage.namespace.logical_block_size == 4096 {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=4096\n"))
+        } else {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=512\n"))
+        }
+        self.serial_path.write(self.memory.bytes(value = "NVME_STORAGE_APPEND_OK last_event_id=1\n"))
+    }
+}
+
+image NvmeEventStorageImage {
+    transitions {
+        delegated_hardware -> owned_hardware
+    }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        let root = PlatformDiscoveryRoot(panic = BootPanic())
+        let discovery = root.from_uefi(hardware = hardware)
+        let nvme_device = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let root_region = discovery.memory.require_usable_region(
+            min_base = 0x200000,
+            length = 0x400000,
+            align = 4096
+        )
+        let mode = QemuFwCfg(io = PortIo())
+        if mode.signature_present() == false {
+            BootPanic().fail(code = 0xAC0801B0)
+        }
+        let mode_selector = mode.storage_mode_selector_from_directory()
+        if mode_selector == 0 {
+            BootPanic().fail(code = 0xAC0801B1)
+        }
+        if mode.selector_payload_mode_is_invalid(selector = mode_selector) {
+            BootPanic().fail(code = 0xAC0801B2)
+        }
+        let root_arena = root_region.create_arena(
+            identity = ArenaIdentity(label = "nvme.storage.root"),
+            policy = ArenaPolicy(evict_cache_by_default = true)
+        )
+        let memory_region = root_region.bytes()
+        let cpus = discovery.acpi.require_madt().enabled_cpus().require_count(count = 2)
+        let foreground_slot_seed = ExecutorSlot(id = 0)
+        let maintenance_slot_seed = ExecutorSlot(id = 1)
+        let foreground_memory_seed = root_arena.executor_memory(owner = foreground_slot_seed, length = 0x200000, align = 4096)
+        let maintenance_memory_seed = root_arena.executor_memory(owner = maintenance_slot_seed, length = 0x100000, align = 4096)
+        let interrupts = discovery.interrupts
+        let apic_mode = interrupts.select_apic_mode().with_xapic_fallback()
+        let shared_serial_route = interrupts.route_shared_irq(irq = 4, vector = InterruptVector(value = 0x40))
+        let serial_irq_source = shared_serial_route.claim_source(identity = InterruptSourceIdentity(label = "serial.rx"))
+        let serial_irq_slots = foreground_memory_seed.reserve_array(U8, count = 64)
+        let serial_irq_queue = InterruptQueue<U8>(identity = QueueIdentity(label = "irq.serial.rx"), owner = foreground_slot_seed, slots = serial_irq_slots, capacity = 64, overflow = InterruptOverflowPolicy(mode = 0), head = 0, tail = 0, overflowed = false)
+        let timer = discovery.timers.require_periodic(period_us = 1000)
+        let wake_strategy = discovery.cpus.wake_strategy(features = discovery.cpus.features)
+        let nvme_bar0 = nvme_device.claim_mmio_bar_at32(index = 0, base = 0xC0000000)
+        let nvme_interrupt_routes = nvme_device.route_nvme_io_completion_interrupts(
+            table_bar_index = 0,
+            table = nvme_bar0,
+            foreground_vector = InterruptVector(value = 0x50),
+            background_vector = InterruptVector(value = 0x51),
+            target = interrupts.local_apic
+        )
+        let pci_plan = ClaimedPciPlanBuilder(panic = discovery.panic).empty_with_nvme_device_bar_and_interrupts(
+            nvme_device = nvme_device,
+            nvme_bar0 = nvme_bar0,
+            interrupt_routes = nvme_interrupt_routes
+        )
+        let hardware_plan = HardwarePlan(
+            cpus = cpus,
+            interrupts = InterruptRoutingPlan(
+                local_apic = interrupts.local_apic,
+                serial_irq4 = shared_serial_route.route,
+                serial_shared_irq4 = shared_serial_route,
+                serial_irq_source = serial_irq_source
+            ),
+            pci = pci_plan,
+            timer = timer,
+            serial_irq_queue = serial_irq_queue,
+            console_memory = foreground_memory_seed,
+            worker_memory = maintenance_memory_seed,
+            wake_strategy = wake_strategy
+        )
+        let memory_plan = MemoryPlan(
+            owned_memory = OwnedMemory(arena = memory_region),
+            executor_arena = memory_region,
+            io_ports = IoPortAuthority()
+        )
+        let cpu_plan = CpuPlan(
+            owned_stack_top = memory_region.address + memory_region.length,
+            gdt_descriptor = Bytes(address = 0, length = 0),
+            idt_descriptor = Bytes(address = 0, length = 0),
+            cr3 = memory_region.address
+        )
+        return hardware.exit_to_owned_hardware(
+            memory_plan = memory_plan,
+            cpu_plan = cpu_plan,
+            hardware_plan = hardware_plan
+        )
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let com1 = hardware.io_ports.claim_com1()
+        let serial_registers = SerialWriterRegisters(port_base = com1.port_base)
+        let serial_driver = SerialDriver(
+            registers = serial_registers,
+            memory = DriverMemory(region = hardware.memory.arena)
+            ).initialize()
+        let serial_path = SerialWritePath(registers = serial_driver.registers)
+        let foreground_slot = hardware.executors.claim(identity = SlotIdentity(label = "foreground"))
+        let maintenance_slot = hardware.executors.claim(identity = SlotIdentity(label = "maintenance"))
+        let foreground_memory = hardware.hardware_plan.executor_memory(owner = foreground_slot, memory = hardware.hardware_plan.console_memory)
+        let maintenance_memory = hardware.hardware_plan.executor_memory(owner = maintenance_slot, memory = hardware.hardware_plan.worker_memory)
+        hardware.hardware_plan.pci.nvme_device.enable_mmio_and_bus_master_mmio()
+        let nvme_bar0 = hardware.hardware_plan.pci.nvme_bar0
+        let owned_nvme_interrupt_routes = hardware.hardware_plan.pci.nvme_interrupt_routes.reapply_msix_table(
+            device = hardware.hardware_plan.pci.nvme_device,
+            table = nvme_bar0,
+            target = hardware.hardware_plan.interrupts.local_apic
+        )
+        let interrupt_controller = ApicInterruptController(local_apic = hardware.hardware_plan.interrupts.local_apic)
+        let nvme_registers = NvmeControllerRegisters(mmio = nvme_bar0, panic = BootPanic())
+        let dma_base = maintenance_memory.arena_base + 0x80000
+        let storage_seed = NvmeDirectStorage(
+            registers = nvme_registers,
+            queues = NvmeQueueMemoryBuilder(panic = BootPanic()).from_base(base = dma_base),
+            namespace = NvmeNamespace(namespace_id = 1, logical_block_size = 0, block_count = 0, zone_size_blocks = 0, supports_zns = false, supports_fua = false, atomic_write_unit_blocks = 0, power_fail_atomic_write_unit_blocks = 0, volatile_write_cache = false),
+            admin_tail = 0,
+            admin_head = 0,
+            admin_phase = true,
+            admin_phase_known = false,
+            io_tail = 0,
+            io_head = 0,
+            io_phase = true,
+            next_command_id = 1,
+            foreground_interrupt_entry = owned_nvme_interrupt_routes.foreground_entry,
+            background_interrupt_entry = owned_nvme_interrupt_routes.background_entry,
+            panic = BootPanic()
+        )
+        let nvme_foreground_interrupt_topic = Topic<NvmeCompletionInterrupt>(
+            identity = TopicIdentity(label = "nvme.foreground.completion"),
+            id = 4,
+            depth = 64
+        )
+        let nvme_background_interrupt_topic = Topic<NvmeCompletionInterrupt>(
+            identity = TopicIdentity(label = "nvme.background.completion"),
+            id = 5,
+            depth = 64
+        )
+        let nvme_foreground_interrupts = nvme_foreground_interrupt_topic.publisher()
+        let nvme_foreground_completion_subscription = nvme_foreground_interrupt_topic.subscribe(subscriber = foreground_slot)
+        let nvme_background_interrupts = nvme_background_interrupt_topic.publisher()
+        let foreground_completion_queue = NvmeCompletionQueue(queue_id = 1, head = 0, depth = 256, entries = storage_seed.queues.foreground_io_cq, expected_phase = true, panic = BootPanic())
+        let background_completion_queue = NvmeCompletionQueue(queue_id = 2, head = 0, depth = 128, entries = storage_seed.queues.background_io_cq, expected_phase = true, panic = BootPanic())
+        let foreground = ForegroundStoragePath(
+            nvme_path = NvmeIoPath(
+                identity = PathIdentity(label = "nvme.foreground"),
+                role = NvmePathRole(role = NVME_PATH_FOREGROUND),
+                owner = foreground_slot,
+                queue_id = 1,
+                vector = owned_nvme_interrupt_routes.foreground_vector,
+                registers = nvme_registers,
+                submission_queue = storage_seed.queues.foreground_io_sq,
+                submission_tail = 0,
+                submission_depth = 256,
+                logical_block_size = 512,
+                next_command_id = 1,
+                completion_queue = foreground_completion_queue,
+                irq = nvme_foreground_interrupts
+            )
+        )
+        let background = BackgroundStoragePath(
+            nvme_path = NvmeIoPath(
+                identity = PathIdentity(label = "nvme.background"),
+                role = NvmePathRole(role = NVME_PATH_BACKGROUND),
+                owner = maintenance_slot,
+                queue_id = 2,
+                vector = owned_nvme_interrupt_routes.background_vector,
+                registers = nvme_registers,
+                submission_queue = storage_seed.queues.background_io_sq,
+                submission_tail = 0,
+                submission_depth = 128,
+                logical_block_size = 512,
+                next_command_id = 1,
+                completion_queue = background_completion_queue,
+                irq = nvme_background_interrupts
+            )
+        )
+        interrupt_controller.local_apic.enable()
+        let storage = storage_seed.initialize()
+        foreground.nvme_path.logical_block_size = storage.namespace.logical_block_size
+        background.nvme_path.logical_block_size = storage.namespace.logical_block_size
+        interrupt_controller.enable_cpu_interrupts()
+        let committed_group_slot_storage = foreground_memory.reserve_array(CommittedAtomicGroup, count = STORAGE_TARGET_BATCH_SLOTS)
+        let committed_group_slots = committed_group_slot_storage.fill(value = CommittedAtomicGroup(first_event_id = 0, last_event_id = 0))
+        let committed_group_control_storage = foreground_memory.reserve_array(U64, count = 3)
+        let committed_group_control = committed_group_control_storage.fill(value = 0)
+        let committed_group_producer = CoreSpscProducer<CommittedAtomicGroup>(
+            owner = foreground_slot,
+            peer = maintenance_slot,
+            slots = committed_group_slots,
+            control = committed_group_control,
+            capacity = STORAGE_TARGET_BATCH_SLOTS,
+            head = 0,
+            tail = 0,
+            credits = STORAGE_TARGET_BATCH_SLOTS,
+            wake_strategy = hardware.hardware_plan.wake_strategy
+        )
+        let committed_group_consumer = CoreSpscConsumer<CommittedAtomicGroup>(
+            owner = maintenance_slot,
+            peer = foreground_slot,
+            slots = committed_group_slots,
+            control = committed_group_control,
+            capacity = STORAGE_TARGET_BATCH_SLOTS,
+            head = 0,
+            tail = 0,
+            wait_armed = false,
+            wake_strategy = hardware.hardware_plan.wake_strategy
+        )
+        let stream_directory = StreamDirectory(next_stream_id = 0)
+        let metrics = StorageMetrics(
+            foreground_path_owner = foreground_slot.id,
+            foreground_path_queue_id = 1,
+            foreground_path_vector = owned_nvme_interrupt_routes.foreground_vector,
+            background_path_owner = maintenance_slot.id,
+            background_path_queue_id = 2,
+            background_path_vector = owned_nvme_interrupt_routes.background_vector,
+            active_lba_size = 512,
+            selected_durability_mode = storage.first_append_durability_mode_value(),
+            event_slot_size = STORAGE_EVENT_SLOT_SIZE,
+            event_header_size = STORAGE_EVENT_HEADER_SIZE,
+            event_payload_bytes = STORAGE_EVENT_PAYLOAD_BYTES,
+            event_slots_written = 2,
+            event_slots_reserved_empty = storage.first_append_reserved_empty_slots(),
+            event_slots_recovered = 2,
+            blob_orphan_bytes = 448,
+            projection_lag_events = 1,
+            stream_directory_cache_hits = 1,
+            stream_directory_cache_misses = 0,
+            stream_directory_cache_hit_rate_ppm = 1000000,
+            device_media_write_commands = 1,
+            device_media_write_bytes = 1024,
+            target_batch_slots = STORAGE_TARGET_BATCH_SLOTS,
+            max_batch_slots = STORAGE_MAX_BATCH_SLOTS,
+            batches_submitted = 1,
+            batch_overflow_count = 0,
+            append_latency_us = 10,
+            durability_latency_us = 2000,
+            admin_queue_depth = 32,
+            foreground_io_queue_depth = 256,
+            background_io_queue_depth = 128,
+            core_link_committed_groups = 1,
+            core_link_backpressure_count = 0,
+            event_upcast_count = 1,
+            projection_upcast_count = 1,
+            projection_rebuild_count = 1
+        )
+        metrics.active_lba_size = storage.namespace.logical_block_size
+        let writer = StorageWriter(
+            foreground = foreground,
+            background = background,
+            stream_directory = stream_directory,
+            metrics = metrics,
+            committed_groups = committed_group_producer,
+            next_event_id = 0,
+            next_stream_id = 0,
+            durable_frontier = 0,
+            open_batch_slots = 0
+        )
+        let first_events = FirstAppendBuilder(marker = 0).events()
+        let owned_mode = QemuFwCfg(io = PortIo())
+        let owned_mode_selector = owned_mode.storage_mode_selector_from_directory()
+        if owned_mode.selector_payload_mode_is_invalid(selector = owned_mode_selector) {
+            BootPanic().fail(code = 0xAC0801B3)
+        }
+        if owned_mode.selector_payload_mode_is_replay(selector = owned_mode_selector) {
+            let replay_state = storage.read_replay_state(foreground = foreground, completions = nvme_foreground_completion_subscription)
+            NvmeReplayReporter(serial_path = serial_path, memory = foreground_memory).report(
+                events = first_events,
+                last_event_id = replay_state.last_event_id,
+                projection_watermark = replay_state.projection_watermark,
+                orphan_collected = replay_state.orphan_collected,
+                storage = storage
+            )
+        }
+        if owned_mode.selector_payload_mode_is_first(selector = owned_mode_selector) {
+            NvmeAppendReporter(serial_path = serial_path, memory = foreground_memory).report(writer = writer, storage = storage, foreground = foreground, completions = nvme_foreground_completion_subscription)
+            let maintenance = NvmeStorageMaintenance(slot = maintenance_slot, memory = maintenance_memory, committed_groups = committed_group_consumer)
+            let maintenance_status = hardware.vcpu1.start(executor = maintenance)
+            if maintenance_status.started == false {
+                BootPanic().fail(code = 0xAC080144)
+            }
+        }
+        serial_path.write(foreground_memory.bytes(value = "NVME_STORAGE_DONE\n"))
+        let park = NvmeStoragePark(slot = foreground_slot, memory = foreground_memory)
+        hardware.vcpu0.enter(executor = park)
+    }
+}

@@ -3,10 +3,10 @@ module machine.x86_64.cpu_state
 use { Bytes, ExecutorMemory, MutableBytes } from machine.x86_64.executor_memory
 use { WakeStrategy } from machine.x86_64.executor_loop
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { IoApicRoute, LocalApic, SharedInterruptSource, SharedIrqRoute } from machine.x86_64.interrupts
+use { InterruptVector, IoApicRoute, LocalApic, SharedInterruptSource, SharedIrqRoute } from machine.x86_64.interrupts
 use { InterruptQueue } from machine.x86_64.interrupt_queue
 use { PlacementPreferenceResult, PlacementTarget } from machine.x86_64.placement
-use { MsiCapability, MsixCapability, PciDevice, PciDeviceIdentity, PcieEcamWindow } from machine.x86_64.pci
+use { MsiCapability, MsixCapability, NvmeInterruptRoutes, PciDevice, PciDeviceIdentity, PciInterruptRoute, PcieEcamWindow } from machine.x86_64.pci
 use { TimerAuthority } from machine.x86_64.timer
 use { Option } from wrela.lang.core
 use { MmioRegion } from platform.hardware.bytes
@@ -241,6 +241,11 @@ data ClaimedPciPlan {
     ivshmem_rx_bar0: MmioRegion
     ivshmem_rx_msix: MsixCapability
     ivshmem_tx_bar0: MmioRegion
+    nvme_bar0: MmioRegion
+    nvme_device: PciDevice
+    nvme_interrupt_routes: NvmeInterruptRoutes
+    nvme_foreground_interrupt_entry: U32
+    nvme_background_interrupt_entry: U32
 }
 
 class ClaimedPciPlanBuilder {
@@ -251,13 +256,47 @@ class ClaimedPciPlanBuilder {
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
         let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0, revision = 0, header_type = 0, interrupt_pin = 0, interrupt_line = 0)
         let empty_device = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
+        let empty_route = PciInterruptRoute(vector = InterruptVector(value = 0))
+        let empty_nvme_interrupt_routes = NvmeInterruptRoutes(uses_msix = false, foreground_entry = 0, background_entry = 0, foreground_vector = 0, background_vector = 0, msix_capability_offset = 0, msix_table_offset = 0, foreground_route = empty_route, background_route = empty_route)
         return ClaimedPciPlan(
             edu_bar0 = empty_mmio,
             edu_msi = MsiCapability(device = empty_device, capability_offset = 0),
             ivshmem_rx_bar0 = empty_mmio,
             ivshmem_rx_msix = MsixCapability(device = empty_device, capability_offset = 0, table = empty_mmio, table_offset = 0),
-            ivshmem_tx_bar0 = empty_mmio
+            ivshmem_tx_bar0 = empty_mmio,
+            nvme_bar0 = empty_mmio,
+            nvme_device = empty_device,
+            nvme_interrupt_routes = empty_nvme_interrupt_routes,
+            nvme_foreground_interrupt_entry = 0,
+            nvme_background_interrupt_entry = 0
         )
+    }
+
+    fn empty_with_nvme(self, nvme_bar0: MmioRegion) -> ClaimedPciPlan {
+        let plan = self.empty()
+        plan.nvme_bar0 = nvme_bar0
+        return plan
+    }
+
+    fn empty_with_nvme_device(self, nvme_device: PciDevice) -> ClaimedPciPlan {
+        let plan = self.empty()
+        plan.nvme_device = nvme_device
+        return plan
+    }
+
+    fn empty_with_nvme_device_and_bar(self, nvme_device: PciDevice, nvme_bar0: MmioRegion) -> ClaimedPciPlan {
+        let plan = self.empty()
+        plan.nvme_device = nvme_device
+        plan.nvme_bar0 = nvme_bar0
+        return plan
+    }
+
+    fn empty_with_nvme_device_bar_and_interrupts(self, nvme_device: PciDevice, nvme_bar0: MmioRegion, interrupt_routes: NvmeInterruptRoutes) -> ClaimedPciPlan {
+        let plan = self.empty_with_nvme_device_and_bar(nvme_device = nvme_device, nvme_bar0 = nvme_bar0)
+        plan.nvme_interrupt_routes = interrupt_routes
+        plan.nvme_foreground_interrupt_entry = interrupt_routes.foreground_entry
+        plan.nvme_background_interrupt_entry = interrupt_routes.background_entry
+        return plan
     }
 }
 

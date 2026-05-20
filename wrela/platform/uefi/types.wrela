@@ -3,6 +3,7 @@ module platform.uefi.types
 use { MutableBytes } from machine.x86_64.executor_memory
 use { BootPanic } from platform.hardware.panic
 use { PhysicalRegionAuthority } from platform.hardware.memory
+use { MmioRegion } from platform.hardware.bytes
 
 data UefiHandle {
     address: U64
@@ -66,6 +67,23 @@ class UefiBootServices {
     exit: VirtualAddress
     unload_image: VirtualAddress
     exit_boot_services: VirtualAddress
+    get_next_monotonic_count: VirtualAddress
+    stall: VirtualAddress
+    set_watchdog_timer: VirtualAddress
+    connect_controller: VirtualAddress
+    disconnect_controller: VirtualAddress
+    open_protocol: VirtualAddress
+    close_protocol: VirtualAddress
+    open_protocol_information: VirtualAddress
+    protocols_per_handle: VirtualAddress
+    locate_handle_buffer: VirtualAddress
+    locate_protocol: VirtualAddress
+    install_multiple_protocol_interfaces: VirtualAddress
+    uninstall_multiple_protocol_interfaces: VirtualAddress
+    calculate_crc32: VirtualAddress
+    copy_mem: VirtualAddress
+    set_mem: VirtualAddress
+    create_event_ex: VirtualAddress
 }
 
 data UefiConfigurationTableEntry {
@@ -157,6 +175,43 @@ data DelegatedBytes {
 data DelegatedMutableBytes {
     address: VirtualAddress
     length: U64
+
+    asm fn read_u64(self, offset: U64) -> U64 {
+        mov r11, self.address
+        add r11, offset
+        mov rax, [r11]
+        ret
+    }
+
+    asm fn write_u64(self, offset: U64, value: U64) {
+        mov r11, self.address
+        add r11, offset
+        mov rax, value
+        mov [r11], rax
+        ret
+    }
+
+    asm fn zero(self) {
+        mov r11, self.address
+        mov rcx, self.length
+        mov rax, 0
+    zero_loop:
+        cmp rcx, 8
+        jl zero_tail
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 8
+        jmp zero_loop
+    zero_tail:
+        cmp rcx, 0
+        je zero_done
+        mov [r11], al
+        add r11, 1
+        sub rcx, 1
+        jmp zero_tail
+    zero_done:
+        ret
+    }
 }
 
 data UefiMemoryMap {
@@ -267,12 +322,13 @@ class DelegatedMemory {
         ret
     }
 
-    asm fn build_identity_paging(self, memory_map: UefiMemoryMap) -> PhysicalAddress {
+    asm fn build_identity_paging(self, memory_map: UefiMemoryMap, mmio: MmioRegion) -> PhysicalAddress {
         push rbx
         push r12
         push r13
         push r14
         push r15
+        push rdx
 
         mov r10, self.next_offset
         add r10, self.arena_base
@@ -457,9 +513,130 @@ class DelegatedMemory {
         jmp descriptor_loop
 
     descriptors_done:
+        mov r8, [rsp]
+        mov r15, [r8]
+        mov r9, r15
+        add r9, [r8 + 8]
+        cmp r15, 0
+        jle mmio_done
+        cmp r9, r15
+        jle mmio_done
+        mov rax, 0xffffffffffe00000
+        and r15, rax
+
+    map_mmio_pages:
+        cmp r15, r9
+        jge mmio_done
+
+        mov r10, r15
+        shr r10, 39
+        cmp r10, 512
+        jge mmio_done
+
+        mov rdx, rbx
+    mmio_pml4_slot_loop:
+        cmp r10, 0
+        jle mmio_pml4_slot_ready
+        add rdx, 8
+        sub r10, 1
+        jmp mmio_pml4_slot_loop
+
+    mmio_pml4_slot_ready:
+        mov r13, [rdx]
+        cmp r13, 0
+        jne mmio_pml4_ready
+
+        mov r13, self.arena_base
+        add r13, r14
+        add r14, 4096
+        mov r11, r13
+        mov rax, 0
+        mov rcx, 512
+    mmio_zero_new_pdpt_loop:
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 1
+        jne mmio_zero_new_pdpt_loop
+
+        mov rax, r13
+        add rax, 3
+        mov [rdx], rax
+
+    mmio_pml4_ready:
+        mov rax, 0xfffffffffffff000
+        and r13, rax
+        mov r11, r15
+        shr r11, 30
+
+    mmio_reduce_pdpt_index:
+        cmp r11, 512
+        jl mmio_pdpt_index_ready
+        sub r11, 512
+        jmp mmio_reduce_pdpt_index
+
+    mmio_pdpt_index_ready:
+        mov rdx, r13
+    mmio_pdpt_slot_loop:
+        cmp r11, 0
+        jle mmio_pdpt_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp mmio_pdpt_slot_loop
+
+    mmio_pdpt_slot_ready:
+        mov r13, [rdx]
+        cmp r13, 0
+        jne mmio_pd_ready
+
+        mov r13, self.arena_base
+        add r13, r14
+        add r14, 4096
+        mov r11, r13
+        mov rax, 0
+        mov rcx, 512
+    mmio_zero_new_pd_loop:
+        mov [r11], rax
+        add r11, 8
+        sub rcx, 1
+        jne mmio_zero_new_pd_loop
+
+        mov rax, r13
+        add rax, 3
+        mov [rdx], rax
+
+    mmio_pd_ready:
+        mov rax, 0xfffffffffffff000
+        and r13, rax
+        mov r11, r15
+        shr r11, 21
+
+    mmio_reduce_pd_index:
+        cmp r11, 512
+        jl mmio_pd_index_ready
+        sub r11, 512
+        jmp mmio_reduce_pd_index
+
+    mmio_pd_index_ready:
+        mov rdx, r13
+    mmio_pd_slot_loop:
+        cmp r11, 0
+        jle mmio_pd_slot_ready
+        add rdx, 8
+        sub r11, 1
+        jmp mmio_pd_slot_loop
+
+    mmio_pd_slot_ready:
+        mov rax, r15
+        add rax, 0x83
+        mov [rdx], rax
+        add r15, 0x200000
+        jmp map_mmio_pages
+
+    mmio_done:
 
         mov self.next_offset, r14
         mov rax, rbx
+        pop rdx
         pop r15
         pop r14
         pop r13
@@ -562,6 +739,53 @@ class DelegatedMemory {
         mov rax, r10
         pop r15
         pop r14
+        pop r13
+        pop r12
+        ret
+
+    write_idt_gate:
+        mov rax, r13
+        mov [r12], ax
+        mov ax, 8
+        mov [r12 + 2], ax
+        mov ax, 0
+        mov [r12 + 4], ax
+        mov al, 0x8E
+        mov [r12 + 5], al
+        mov rax, r13
+        shr rax, 16
+        mov [r12 + 6], ax
+        mov rax, r13
+        shr rax, 32
+        mov [r12 + 8], eax
+        mov rax, 0
+        mov [r12 + 12], eax
+        ret
+    }
+
+    asm fn install_nvme_interrupt_idt_gates(
+        self,
+        idt: DelegatedBytes,
+        vector50_handler: VirtualAddress,
+        vector51_handler: VirtualAddress
+    ) -> DelegatedBytes {
+        push r12
+        push r13
+
+        mov r11, idt
+        mov r11, [r11 + DelegatedBytes.address]
+
+        mov r12, r11
+        add r12, 1296
+        mov r13, vector50_handler
+        call write_idt_gate
+
+        mov r12, r11
+        add r12, 1312
+        mov r13, vector51_handler
+        call write_idt_gate
+
+        mov rax, idt
         pop r13
         pop r12
         ret

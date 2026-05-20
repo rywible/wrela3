@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -28,6 +29,7 @@ type Options struct {
 	SuccessText    string
 	UseSerialPipe  bool
 	SerialPipePath string
+	ExtraArgs      []string
 
 	IvshmemServerBinary   string
 	InputText             string
@@ -98,6 +100,7 @@ func Args(opts Options) []string {
 			"-device", "ivshmem-doorbell,vectors=1,chardev=ivshmem1,addr=0x7",
 		)
 	}
+	args = append(args, opts.ExtraArgs...)
 
 	return args
 }
@@ -213,10 +216,10 @@ func Run(opts Options) (string, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, bin, Args(opts)...)
-	var output bytes.Buffer
-	var serialOutput bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := newSuccessCapture(opts.SuccessText, cancel)
+	serialOutput := newSuccessCapture(opts.SuccessText, cancel)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	var stdin io.WriteCloser
 	if opts.InputText != "" {
 		if serialInputPath == "" {
@@ -234,7 +237,7 @@ func Run(opts Options) (string, error) {
 		go func() {
 			outputPipe, openErr := os.OpenFile(serialOutputPath, os.O_RDONLY, 0)
 			if openErr == nil {
-				_, _ = io.Copy(&serialOutput, outputPipe)
+				_, _ = io.Copy(serialOutput, outputPipe)
 				_ = outputPipe.Close()
 			}
 			close(serialDone)
@@ -292,6 +295,35 @@ func Run(opts Options) (string, error) {
 		return out, nil
 	}
 	return out, err
+}
+
+type successCapture struct {
+	mu          sync.Mutex
+	buf         bytes.Buffer
+	successText string
+	cancel      context.CancelFunc
+	found       bool
+}
+
+func newSuccessCapture(successText string, cancel context.CancelFunc) *successCapture {
+	return &successCapture{successText: successText, cancel: cancel}
+}
+
+func (w *successCapture) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if w.successText != "" && !w.found && strings.Contains(w.buf.String(), w.successText) {
+		w.found = true
+		w.cancel()
+	}
+	return n, err
+}
+
+func (w *successCapture) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 func StageESP(imagePath, espDir string) error {

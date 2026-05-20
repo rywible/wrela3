@@ -1,0 +1,33 @@
+// expect: SEM0120: projection worker feed is not boot wired
+module storage.writer
+data CommittedAtomicGroup {
+    first_event_id: U64
+    last_event_id: U64
+}
+
+module storage.projections
+data ProjectionWriter<P> {
+    root_ref: U64
+}
+
+module negative.projection_worker_without_feed
+
+use { ProjectionWriter } from storage.projections
+
+projection DirectoryChildren id 12 {
+    layout 1 current {
+        count: StateCell
+    }
+}
+
+data StateCell {}
+
+class DirectoryProjectionWorker {
+    writer: ProjectionWriter<DirectoryChildren>
+}
+
+class Boot {
+    fn run(self) {
+        let worker = DirectoryProjectionWorker(writer = ProjectionWriter<DirectoryChildren>(root_ref = 0))
+    }
+}

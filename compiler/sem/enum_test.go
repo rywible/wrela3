@@ -14,8 +14,8 @@ data Event { kind: U64 }
 class Worker {
     fn handle(self, next: Option<Event>) {
         match next {
-            Option.Some(value = event) => {
-                let k = event.kind
+            Option.Some(value = payload) => {
+                let k = payload.kind
             }
             Option.None => {
                 let z = 0
@@ -39,8 +39,8 @@ data Event { kind: U64 }
 class Worker {
     fn handle(self, next: Option<Event>) {
         match next {
-            Option.Some(value = event) => {
-                let k = event.kind
+            Option.Some(value = payload) => {
+                let k = payload.kind
             }
         }
     }
@@ -61,8 +61,8 @@ enum Option<T> { None Some(value: T) }
 data Event { kind: U64 }
 class Worker {
     fn handle(self, next: Option<Event>) {
-        if let Option.Some(value = event) = next {
-            let k = event.kind
+        if let Option.Some(value = payload) = next {
+            let k = payload.kind
         }
         match next {
             Option.Some(value = one, value = two) => {}

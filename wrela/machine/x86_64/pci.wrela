@@ -37,6 +37,37 @@ data PciInterruptRoute {
     vector: InterruptVector
 }
 
+data NvmeInterruptRoutes {
+    uses_msix: Bool
+    foreground_entry: U32
+    background_entry: U32
+    foreground_vector: U8
+    background_vector: U8
+    msix_capability_offset: U16
+    msix_table_offset: U32
+    foreground_route: PciInterruptRoute
+    background_route: PciInterruptRoute
+
+    fn reapply_msix_table(self, device: PciDevice, table: MmioRegion, target: LocalApic) -> NvmeInterruptRoutes {
+        if self.uses_msix {
+            self.write_msix_entry(table = table, table_offset = self.msix_table_offset, entry = self.foreground_entry, vector = InterruptVector(value = self.foreground_vector), target = target)
+            self.write_msix_entry(table = table, table_offset = self.msix_table_offset, entry = self.background_entry, vector = InterruptVector(value = self.background_vector), target = target)
+            device.enable_mmio_and_bus_master_mmio()
+            let header = device.read_config32_mmio(offset = self.msix_capability_offset)
+            device.write_config32_mmio(offset = self.msix_capability_offset, value = (header | 0x80000000) & 0xBFFFFFFF)
+        }
+        return self
+    }
+
+    fn write_msix_entry(self, table: MmioRegion, table_offset: U32, entry: U32, vector: InterruptVector, target: LocalApic) {
+        let base = table_offset + (entry * 16)
+        table.write32(offset = base + 0, value = target.message_address())
+        table.write32(offset = base + 4, value = 0)
+        table.write32(offset = base + 8, value = vector.value)
+        table.write32(offset = base + 12, value = 0)
+    }
+}
+
 data PcieEcamWindow {
     base: PhysicalAddress
     segment: U16
@@ -48,7 +79,36 @@ data PcieEcamWindow {
         // This milestone uses standard PCI capability space only; extended
         // capability offsets above 0x0FFF are out of scope and intentionally
         // masked to one ECAM function page.
-        return self.base + ((bus - self.start_bus) << 20) + (device << 15) + (function << 12) + (offset & 0x0FFC)
+        let bus_index = self.u8_to_u64(value = bus) - self.u8_to_u64(value = self.start_bus)
+        let device_index = self.u8_to_u64(value = device)
+        let function_index = self.u8_to_u64(value = function)
+        let config_offset = self.u16_to_u64(value = offset & 0x0FFC)
+        return self.base + (bus_index * 1048576) + (device_index * 32768) + (function_index * 4096) + config_offset
+    }
+
+    fn u8_to_u64(self, value: U8) -> U64 {
+        return value
+    }
+
+    fn u16_to_u64(self, value: U16) -> U64 {
+        return value
+    }
+
+    fn u8_to_u32(self, value: U8) -> U32 {
+        return value
+    }
+
+    fn u16_to_u32(self, value: U16) -> U32 {
+        return value
+    }
+
+    fn io_config_address(self, bus: U8, device: U8, function: U8, offset: U16) -> U32 {
+        let address = 0x80000000
+        address = address | (self.u8_to_u32(value = bus) << 16)
+        address = address | (self.u8_to_u32(value = device) << 11)
+        address = address | (self.u8_to_u32(value = function) << 8)
+        address = address | (self.u16_to_u32(value = offset) & 0xFC)
+        return address
     }
 
     fn mmio(self, bus: U8, device: U8, function: U8) -> MmioRegion {
@@ -56,11 +116,51 @@ data PcieEcamWindow {
     }
 
     fn read_config32(self, bus: U8, device: U8, function: U8, offset: U16) -> U32 {
-        return self.mmio(bus = bus, device = device, function = function).read32(offset = offset)
+        return self.read_io_config32(address = self.io_config_address(bus = bus, device = device, function = function, offset = offset))
     }
 
     fn write_config32(self, bus: U8, device: U8, function: U8, offset: U16, value: U32) {
-        self.mmio(bus = bus, device = device, function = function).write32(offset = offset, value = value)
+        self.write_io_config32(address = self.io_config_address(bus = bus, device = device, function = function, offset = offset), value = value)
+    }
+
+    fn read_config32_mmio(self, bus: U8, device: U8, function: U8, offset: U16) -> U32 {
+        return self.read_mmio_config32(address = self.config_address(bus = bus, device = device, function = function, offset = offset))
+    }
+
+    fn write_config32_mmio(self, bus: U8, device: U8, function: U8, offset: U16, value: U32) {
+        self.write_mmio_config32(address = self.config_address(bus = bus, device = device, function = function, offset = offset), value = value)
+    }
+
+    asm fn read_io_config32(self, address: U32) -> U32 {
+        mov eax, address
+        mov dx, 0x0CF8
+        out dx, eax
+        mov dx, 0x0CFC
+        in eax, dx
+        ret
+    }
+
+    asm fn write_io_config32(self, address: U32, value: U32) {
+        mov eax, address
+        mov dx, 0x0CF8
+        out dx, eax
+        mov eax, value
+        mov dx, 0x0CFC
+        out dx, eax
+        ret
+    }
+
+    asm fn read_mmio_config32(self, address: PhysicalAddress) -> U32 {
+        mov r11, address
+        mov eax, [r11]
+        ret
+    }
+
+    asm fn write_mmio_config32(self, address: PhysicalAddress, value: U32) {
+        mov r11, address
+        mov eax, value
+        mov [r11], eax
+        ret
     }
 }
 
@@ -118,6 +218,10 @@ data PciDevice {
     identity: PciDeviceIdentity
     panic: BootPanic
 
+    fn u32_to_u64(self, value: U32) -> U64 {
+        return value
+    }
+
     fn read_config32(self, offset: U16) -> U32 {
         return self.window.read_config32(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset)
     }
@@ -126,28 +230,178 @@ data PciDevice {
         self.window.write_config32(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset, value = value)
     }
 
+    fn read_config32_mmio(self, offset: U16) -> U32 {
+        return self.window.read_config32_mmio(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset)
+    }
+
+    fn write_config32_mmio(self, offset: U16, value: U32) {
+        self.window.write_config32_mmio(bus = self.identity.bus, device = self.identity.device, function = self.identity.function, offset = offset, value = value)
+    }
+
     fn claim_mmio_bar(self, index: U8) -> MmioRegion {
         let offset = 0x10 + (index << 2)
-        let original = self.read_config32(offset = offset)
+        let original = self.read_config32_mmio(offset = offset)
         if (original & 1) != 0 {
             self.panic.fail(code = 0xAC060001)
         }
-        self.write_config32(offset = offset, value = 0xFFFFFFFF)
-        let mask = self.read_config32(offset = offset)
-        self.write_config32(offset = offset, value = original)
-        let bar_type = (original >> 1) & 3
-        if (mask & 0xFFFFFFF0) == 0 {
-            self.panic.fail(code = 0xAC060005)
+        let bar_kind = original & 6
+        if bar_kind == 0 {
+            self.write_config32(offset = offset, value = 0xFFFFFFFF)
+            let kind_probe = self.read_config32(offset = offset) & 6
+            self.write_config32(offset = offset, value = original)
+            if kind_probe == 4 {
+                bar_kind = 4
+            }
         }
-        if bar_type == 0 {
+        if bar_kind == 0 {
+            self.write_config32(offset = offset, value = 0xFFFFFFFF)
+            let mask = self.read_config32(offset = offset)
+            self.write_config32(offset = offset, value = original)
+            if (mask & 0xFFFFFFF0) == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
             let base = original & 0xFFFFFFF0
             let size = (0 - (mask & 0xFFFFFFF0)) & 0xFFFFFFFF
             return MmioRegion(address = base, length = size, panic = self.panic)
         }
-        if bar_type == 2 {
+        if bar_kind < 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if bar_kind > 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if index >= 5 {
             self.panic.fail(code = 0xAC060004)
         }
-        self.panic.fail(code = 0xAC060002)
+        let high_offset = offset + 4
+        let original_high = self.read_config32(offset = high_offset)
+        self.write_config32(offset = offset, value = 0xFFFFFFFF)
+        self.write_config32(offset = high_offset, value = 0xFFFFFFFF)
+        let mask_low = self.read_config32(offset = offset)
+        let mask_high = self.read_config32(offset = high_offset)
+        self.write_config32(offset = high_offset, value = original_high)
+        self.write_config32(offset = offset, value = original)
+        let masked_low = mask_low & 0xFFFFFFF0
+        if masked_low == 0 {
+            if mask_high == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+        }
+        let base = (self.u32_to_u64(value = original_high) << 32) | self.u32_to_u64(value = original & 0xFFFFFFF0)
+        let size = self.u32_to_u64(value = (0 - masked_low) & 0xFFFFFFFF)
+        if size == 0 {
+            let mask = (self.u32_to_u64(value = mask_high) << 32) | self.u32_to_u64(value = masked_low)
+            size = 0 - mask
+        }
+        return MmioRegion(address = base, length = size, panic = self.panic)
+    }
+
+    fn claim_mmio_bar_at32(self, index: U8, base: U32) -> MmioRegion {
+        if (base & 0xF) != 0 {
+            self.panic.fail(code = 0xAC060006)
+        }
+        let base64 = self.u32_to_u64(value = base)
+        let offset = 0x10 + (index << 2)
+        let original = self.read_config32_mmio(offset = offset)
+        if (original & 1) != 0 {
+            self.panic.fail(code = 0xAC060001)
+        }
+        let bar_kind = original & 6
+        let command_status = self.read_config32_mmio(offset = 0x04)
+        self.write_config32_mmio(offset = 0x04, value = command_status & 0x0000FFF9)
+        if bar_kind == 0 {
+            self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+            let kind_probe = self.read_config32_mmio(offset = offset) & 6
+            self.write_config32_mmio(offset = offset, value = original)
+            if kind_probe == 4 {
+                bar_kind = 4
+            }
+        }
+        if bar_kind == 0 {
+            self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+            let mask = self.read_config32_mmio(offset = offset)
+            let masked = mask & 0xFFFFFFF0
+            if masked == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+            let size = (0 - masked) & 0xFFFFFFFF
+            let size64 = self.u32_to_u64(value = size)
+            if (base64 & (size64 - 1)) != 0 {
+                self.panic.fail(code = 0xAC060007)
+            }
+            if (base64 + size64) > 0x100000000 {
+                self.panic.fail(code = 0xAC060008)
+            }
+            self.write_config32_mmio(offset = offset, value = (base & 0xFFFFFFF0) | (original & 0xF))
+            if (self.read_config32_mmio(offset = offset) & 0xFFFFFFF0) != (base & 0xFFFFFFF0) {
+                self.panic.fail(code = 0xAC06000C)
+            }
+            self.enable_mmio_and_bus_master()
+            return MmioRegion(address = base64, length = size64, panic = self.panic)
+        }
+        if bar_kind < 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if bar_kind > 4 {
+            self.panic.fail(code = 0xAC060002)
+        }
+        if index >= 5 {
+            self.panic.fail(code = 0xAC060004)
+        }
+        let high_offset = offset + 4
+        let original_high = self.read_config32_mmio(offset = high_offset)
+        self.write_config32_mmio(offset = offset, value = 0xFFFFFFFF)
+        self.write_config32_mmio(offset = high_offset, value = 0xFFFFFFFF)
+        let mask_low = self.read_config32_mmio(offset = offset)
+        let mask_high = self.read_config32_mmio(offset = high_offset)
+        self.write_config32_mmio(offset = high_offset, value = original_high)
+        self.write_config32_mmio(offset = offset, value = original)
+        let masked_low = mask_low & 0xFFFFFFF0
+        if masked_low == 0 {
+            if mask_high == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+        }
+        let size = self.u32_to_u64(value = (0 - masked_low) & 0xFFFFFFFF)
+        if size == 0 {
+            let mask = (self.u32_to_u64(value = mask_high) << 32) | self.u32_to_u64(value = masked_low)
+            size = 0 - mask
+            if size == 0 {
+                self.panic.fail(code = 0xAC060005)
+            }
+            if size > 0xFFFFFFFF {
+                self.panic.fail(code = 0xAC060009)
+            }
+        }
+        if (base64 & (size - 1)) != 0 {
+            self.panic.fail(code = 0xAC06000A)
+        }
+        if (base64 + size) > 0x100000000 {
+            self.panic.fail(code = 0xAC06000B)
+        }
+        let bar_attrs = original & 0xF
+        if (bar_attrs & 6) == 0 {
+            bar_attrs = (bar_attrs & 0x9) | 4
+        }
+        self.write_config32_mmio(offset = high_offset, value = 0)
+        self.write_config32_mmio(offset = offset, value = (base & 0xFFFFFFF0) | bar_attrs)
+        self.write_config32_mmio(offset = high_offset, value = 0)
+        if (self.read_config32_mmio(offset = offset) & 0xFFFFFFF0) != (base & 0xFFFFFFF0) {
+            self.panic.fail(code = 0xAC06000C)
+        }
+        if (self.read_config32_mmio(offset = offset) & 6) != 4 {
+            self.panic.fail(code = 0xAC06000F)
+        }
+        self.enable_mmio_and_bus_master()
+        self.write_config32_mmio(offset = 0x04, value = 0x00000006)
+        if (self.read_config32_mmio(offset = 0x04) & 0x00000006) != 0x00000006 {
+            self.panic.fail(code = 0xAC06000D)
+        }
+        return MmioRegion(address = base64, length = size, panic = self.panic)
+    }
+
+    fn reapply_mmio_bar_at32(self, index: U8, base: U32) -> MmioRegion {
+        return self.claim_mmio_bar_at32(index = index, base = base)
     }
 
     fn claim_io_bar(self, index: U8) -> IoPortRegion {
@@ -185,6 +439,27 @@ data PciDevice {
         return 0
     }
 
+    fn find_capability_optional_mmio(self, capability_id: U8) -> U16 {
+        let status = self.read_config32_mmio(offset = 0x04)
+        if (status & 0x00100000) == 0 {
+            return 0
+        }
+        let ptr = self.read_config32_mmio(offset = 0x34) & 0xFC
+        let remaining = 48
+        while remaining != 0 {
+            if ptr == 0 {
+                return 0
+            }
+            let header = self.read_config32_mmio(offset = ptr)
+            if (header & 0xFF) == capability_id {
+                return ptr
+            }
+            ptr = (header >> 8) & 0xFC
+            remaining = remaining - 1
+        }
+        return 0
+    }
+
     fn find_capability(self, capability_id: U8) -> U16 {
         let status = self.read_config32(offset = 0x04)
         if (status & 0x00100000) == 0 {
@@ -197,6 +472,27 @@ data PciDevice {
                 self.panic.fail(code = 0xAC060021)
             }
             let header = self.read_config32(offset = ptr)
+            if (header & 0xFF) == capability_id {
+                return ptr
+            }
+            ptr = (header >> 8) & 0xFC
+            remaining = remaining - 1
+        }
+        self.panic.fail(code = 0xAC060022)
+    }
+
+    fn find_capability_mmio(self, capability_id: U8) -> U16 {
+        let status = self.read_config32_mmio(offset = 0x04)
+        if (status & 0x00100000) == 0 {
+            self.panic.fail(code = 0xAC060020)
+        }
+        let ptr = self.read_config32_mmio(offset = 0x34) & 0xFC
+        let remaining = 48
+        while remaining != 0 {
+            if ptr == 0 {
+                self.panic.fail(code = 0xAC060021)
+            }
+            let header = self.read_config32_mmio(offset = ptr)
             if (header & 0xFF) == capability_id {
                 return ptr
             }
@@ -221,9 +517,29 @@ data PciDevice {
         )
     }
 
+    fn facts_mmio(self) -> PciFunctionFacts {
+        let bridge_data = self.read_config32_mmio(offset = 0x18)
+        let interrupt_data = self.read_config32_mmio(offset = 0x3C)
+        return PciFunctionFacts(
+            identity = self.identity,
+            has_msi = self.find_capability_optional_mmio(capability_id = 0x05) != 0,
+            has_msix = self.find_capability_optional_mmio(capability_id = 0x11) != 0,
+            bridge_range = PciBridgeBusRange(
+                primary = self.identity.bus,
+                secondary = (bridge_data >> 8) & 0xFF,
+                subordinate = (bridge_data >> 16) & 0xFF
+            )
+        )
+    }
+
     fn enable_mmio_and_bus_master(self) {
         let command_status = self.read_config32(offset = 0x04)
-        self.write_config32(offset = 0x04, value = (command_status & 0x0000FFFF) | 0x00000006)
+        self.write_config32(offset = 0x04, value = (command_status & 0x0000FBFF) | 0x00000006)
+    }
+
+    fn enable_mmio_and_bus_master_mmio(self) {
+        let command_status = self.read_config32_mmio(offset = 0x04)
+        self.write_config32_mmio(offset = 0x04, value = (command_status & 0x0000FBFF) | 0x00000006)
     }
 
     fn claim_msi(self) -> MsiCapability {
@@ -243,6 +559,68 @@ data PciDevice {
         self.enable_mmio_and_bus_master()
         return MsixCapability(device = self, capability_offset = cap, table = table, table_offset = table_offset)
     }
+
+    fn claim_msix_in_bar(self, table_bar_index: U8, table: MmioRegion) -> MsixCapability {
+        let cap = self.find_capability(capability_id = 0x11)
+        let table_info = self.read_config32(offset = cap + 4)
+        let bir = table_info & 0x7
+        if bir != table_bar_index {
+            self.panic.fail(code = 0xAC060023)
+        }
+        let table_offset = table_info & 0xFFFFFFF8
+        self.enable_mmio_and_bus_master()
+        return MsixCapability(device = self, capability_offset = cap, table = table, table_offset = table_offset)
+    }
+
+    fn claim_msix_in_bar_mmio(self, table_bar_index: U8, table: MmioRegion) -> MsixCapability {
+        let cap = self.find_capability_mmio(capability_id = 0x11)
+        let table_info = self.read_config32_mmio(offset = cap + 4)
+        let bir = table_info & 0x7
+        if bir != table_bar_index {
+            self.panic.fail(code = 0xAC060023)
+        }
+        let table_offset = table_info & 0xFFFFFFF8
+        self.enable_mmio_and_bus_master()
+        return MsixCapability(device = self, capability_offset = cap, table = table, table_offset = table_offset)
+    }
+
+    fn route_nvme_io_completion_interrupts(self, table_bar_index: U8, table: MmioRegion, foreground_vector: InterruptVector, background_vector: InterruptVector, target: LocalApic) -> NvmeInterruptRoutes {
+        let facts = self.facts_mmio()
+        if facts.has_msix {
+            let msix = self.claim_msix_in_bar_mmio(table_bar_index = table_bar_index, table = table)
+            let foreground_route = msix.route_entry(entry = 0, vector = foreground_vector, target = target)
+            let background_route = msix.route_entry(entry = 1, vector = background_vector, target = target)
+            return NvmeInterruptRoutes(
+                uses_msix = true,
+                foreground_entry = 0,
+                background_entry = 1,
+                foreground_vector = foreground_vector.value,
+                background_vector = background_vector.value,
+                msix_capability_offset = msix.capability_offset,
+                msix_table_offset = msix.table_offset,
+                foreground_route = foreground_route,
+                background_route = background_route
+            )
+        }
+        if facts.has_msi {
+            let msi = self.claim_msi()
+            let foreground_route = msi.route_pair(foreground_vector = foreground_vector, background_vector = background_vector, target = target)
+            let background_route = PciInterruptRoute(vector = background_vector)
+            return NvmeInterruptRoutes(
+                uses_msix = false,
+                foreground_entry = 0,
+                background_entry = 1,
+                foreground_vector = foreground_vector.value,
+                background_vector = background_vector.value,
+                msix_capability_offset = 0,
+                msix_table_offset = 0,
+                foreground_route = foreground_route,
+                background_route = background_route
+            )
+        }
+        self.panic.fail(code = 0xAC060024)
+    }
+
 }
 
 data MsiCapability {
@@ -250,19 +628,41 @@ data MsiCapability {
     capability_offset: U16
 
     fn route(self, vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
-        self.device.enable_mmio_and_bus_master()
-        let header = self.device.read_config32(offset = self.capability_offset)
+        self.device.enable_mmio_and_bus_master_mmio()
+        let header = self.device.read_config32_mmio(offset = self.capability_offset)
         let control = (header >> 16) & 0xFFFF
         let message_address = target.message_address()
-        self.device.write_config32(offset = self.capability_offset + 4, value = message_address)
+        self.device.write_config32_mmio(offset = self.capability_offset + 4, value = message_address)
         if (control & 0x80) != 0 {
-            self.device.write_config32(offset = self.capability_offset + 8, value = 0)
-            self.device.write_config32(offset = self.capability_offset + 12, value = vector.value)
+            self.device.write_config32_mmio(offset = self.capability_offset + 8, value = 0)
+            self.device.write_config32_mmio(offset = self.capability_offset + 12, value = vector.value)
         } else {
-            self.device.write_config32(offset = self.capability_offset + 8, value = vector.value)
+            self.device.write_config32_mmio(offset = self.capability_offset + 8, value = vector.value)
         }
-        self.device.write_config32(offset = self.capability_offset, value = header | 0x00010000)
+        self.device.write_config32_mmio(offset = self.capability_offset, value = header | 0x00010000)
         return PciInterruptRoute(vector = vector)
+    }
+
+    fn route_pair(self, foreground_vector: InterruptVector, background_vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
+        self.device.enable_mmio_and_bus_master_mmio()
+        let header = self.device.read_config32_mmio(offset = self.capability_offset)
+        let control = (header >> 16) & 0xFFFF
+        if (control & 0x0E) == 0 {
+            self.device.panic.fail(code = 0xAC060025)
+        }
+        if background_vector.value != foreground_vector.value + 1 {
+            self.device.panic.fail(code = 0xAC060026)
+        }
+        let message_address = target.message_address()
+        self.device.write_config32_mmio(offset = self.capability_offset + 4, value = message_address)
+        if (control & 0x80) != 0 {
+            self.device.write_config32_mmio(offset = self.capability_offset + 8, value = 0)
+            self.device.write_config32_mmio(offset = self.capability_offset + 12, value = foreground_vector.value)
+        } else {
+            self.device.write_config32_mmio(offset = self.capability_offset + 8, value = foreground_vector.value)
+        }
+        self.device.write_config32_mmio(offset = self.capability_offset, value = (header & 0xFF8FFFFF) | 0x00110000)
+        return PciInterruptRoute(vector = foreground_vector)
     }
 }
 
@@ -273,16 +673,17 @@ data MsixCapability {
     table_offset: U32
 
     fn route_entry(self, entry: U16, vector: InterruptVector, target: LocalApic) -> PciInterruptRoute {
-        self.device.enable_mmio_and_bus_master()
+        self.device.enable_mmio_and_bus_master_mmio()
         let base = self.table_offset + (entry << 4)
         self.table.write32(offset = base + 0, value = target.message_address())
         self.table.write32(offset = base + 4, value = 0)
         self.table.write32(offset = base + 8, value = vector.value)
         self.table.write32(offset = base + 12, value = 0)
-        let header = self.device.read_config32(offset = self.capability_offset)
-        self.device.write_config32(offset = self.capability_offset, value = header | 0x80000000)
+        let header = self.device.read_config32_mmio(offset = self.capability_offset)
+        self.device.write_config32_mmio(offset = self.capability_offset, value = (header | 0x80000000) & 0xBFFFFFFF)
         return PciInterruptRoute(vector = vector)
     }
+
 }
 
 data PciDeviceSet {
@@ -303,6 +704,22 @@ data PciDeviceSet {
     device13: PciDevice
     device14: PciDevice
     device15: PciDevice
+    device16: PciDevice
+    device17: PciDevice
+    device18: PciDevice
+    device19: PciDevice
+    device20: PciDevice
+    device21: PciDevice
+    device22: PciDevice
+    device23: PciDevice
+    device24: PciDevice
+    device25: PciDevice
+    device26: PciDevice
+    device27: PciDevice
+    device28: PciDevice
+    device29: PciDevice
+    device30: PciDevice
+    device31: PciDevice
     panic: BootPanic
 
     fn at(self, index: U64) -> PciDevice {
@@ -322,6 +739,22 @@ data PciDeviceSet {
         if index == 13 { return self.device13 }
         if index == 14 { return self.device14 }
         if index == 15 { return self.device15 }
+        if index == 16 { return self.device16 }
+        if index == 17 { return self.device17 }
+        if index == 18 { return self.device18 }
+        if index == 19 { return self.device19 }
+        if index == 20 { return self.device20 }
+        if index == 21 { return self.device21 }
+        if index == 22 { return self.device22 }
+        if index == 23 { return self.device23 }
+        if index == 24 { return self.device24 }
+        if index == 25 { return self.device25 }
+        if index == 26 { return self.device26 }
+        if index == 27 { return self.device27 }
+        if index == 28 { return self.device28 }
+        if index == 29 { return self.device29 }
+        if index == 30 { return self.device30 }
+        if index == 31 { return self.device31 }
         self.panic.fail(code = 0xAC060011)
     }
 
@@ -347,7 +780,7 @@ data PciDeviceSet {
         if self.contains(window = window, bus = bus, device = device, function = function) == true {
             return
         }
-        if self.count >= 16 {
+        if self.count >= 32 {
             self.panic.fail(code = 0xAC060012)
         }
         let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
@@ -386,18 +819,27 @@ data PciDeviceSet {
         if self.count == 13 { self.device13 = value }
         if self.count == 14 { self.device14 = value }
         if self.count == 15 { self.device15 = value }
+        if self.count == 16 { self.device16 = value }
+        if self.count == 17 { self.device17 = value }
+        if self.count == 18 { self.device18 = value }
+        if self.count == 19 { self.device19 = value }
+        if self.count == 20 { self.device20 = value }
+        if self.count == 21 { self.device21 = value }
+        if self.count == 22 { self.device22 = value }
+        if self.count == 23 { self.device23 = value }
+        if self.count == 24 { self.device24 = value }
+        if self.count == 25 { self.device25 = value }
+        if self.count == 26 { self.device26 = value }
+        if self.count == 27 { self.device27 = value }
+        if self.count == 28 { self.device28 = value }
+        if self.count == 29 { self.device29 = value }
+        if self.count == 30 { self.device30 = value }
+        if self.count == 31 { self.device31 = value }
         self.count = self.count + 1
     }
 
     fn scan_window(self, window: PcieEcamWindow) {
-        let bus = window.start_bus
-        while bus <= window.end_bus {
-            self.scan_bus_depth(window = window, bus = bus, depth = 0)
-            if bus == window.end_bus {
-                return
-            }
-            bus = bus + 1
-        }
+        self.scan_bus_depth(window = window, bus = window.start_bus, depth = 0)
     }
 
     fn scan_bus_depth(self, window: PcieEcamWindow, bus: U8, depth: U64) {
@@ -410,6 +852,9 @@ data PciDeviceSet {
                     let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
                     if (vendor_device & 0xFFFF) != 0xFFFF {
                         let header = window.read_config32(bus = bus, device = device, function = function, offset = 0x0C)
+                        if (vendor_device & 0xFFFF) == 0 {
+                            scan_more_functions = false
+                        }
                         if (header & 0x00800000) == 0 {
                             scan_more_functions = false
                         }
@@ -432,6 +877,9 @@ data PciDeviceSet {
             self.panic.fail(code = 0xAC060016)
         }
         let vendor_device = window.read_config32(bus = bus, device = device, function = function, offset = 0)
+        if (vendor_device & 0xFFFF) == 0 {
+            return
+        }
         if (vendor_device & 0xFFFF) == 0xFFFF {
             return
         }
@@ -473,6 +921,26 @@ data PciDeviceSet {
         }
         self.panic.fail(code = 0xAC060010)
     }
+
+    fn require_class(self, class_code: U8, subclass: U8, prog_if: U8, occurrence: U64) -> PciDevice {
+        let seen = 0
+        let index = 0
+        while index < self.count {
+            let candidate = self.at(index = index)
+            if candidate.identity.class_code == class_code {
+                if candidate.identity.subclass == subclass {
+                    if candidate.identity.prog_if == prog_if {
+                        if seen == occurrence {
+                            return candidate
+                        }
+                        seen = seen + 1
+                    }
+                }
+            }
+            index = index + 1
+        }
+        self.panic.fail(code = 0xAC060030)
+    }
 }
 
 class PciDeviceSetBuilder {
@@ -482,6 +950,41 @@ class PciDeviceSetBuilder {
         let empty_window = PcieEcamWindow(base = 0, segment = 0, start_bus = 0, end_bus = 0, panic = self.panic)
         let empty_identity = PciDeviceIdentity(segment = 0, bus = 0, device = 0, function = 0, vendor_id = 0xFFFF, device_id = 0xFFFF, class_code = 0, subclass = 0, prog_if = 0, revision = 0, header_type = 0, interrupt_pin = 0, interrupt_line = 0)
         let empty = PciDevice(window = empty_window, identity = empty_identity, panic = self.panic)
-        return PciDeviceSet(count = 0, device0 = empty, device1 = empty, device2 = empty, device3 = empty, device4 = empty, device5 = empty, device6 = empty, device7 = empty, device8 = empty, device9 = empty, device10 = empty, device11 = empty, device12 = empty, device13 = empty, device14 = empty, device15 = empty, panic = self.panic)
+        return PciDeviceSet(
+            count = 0,
+            device0 = empty,
+            device1 = empty,
+            device2 = empty,
+            device3 = empty,
+            device4 = empty,
+            device5 = empty,
+            device6 = empty,
+            device7 = empty,
+            device8 = empty,
+            device9 = empty,
+            device10 = empty,
+            device11 = empty,
+            device12 = empty,
+            device13 = empty,
+            device14 = empty,
+            device15 = empty,
+            device16 = empty,
+            device17 = empty,
+            device18 = empty,
+            device19 = empty,
+            device20 = empty,
+            device21 = empty,
+            device22 = empty,
+            device23 = empty,
+            device24 = empty,
+            device25 = empty,
+            device26 = empty,
+            device27 = empty,
+            device28 = empty,
+            device29 = empty,
+            device30 = empty,
+            device31 = empty,
+            panic = self.panic
+        )
     }
 }

@@ -4,7 +4,7 @@ use { BackgroundWorker, HelloWorld } from examples.hello.program
 use { PlatformDiscoveryRoot } from platform.hardware.discovery
 use { BootPanic } from platform.hardware.panic
 use { DelegatedHardware } from platform.uefi.transition
-use { ClaimedPciPlan, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
+use { ClaimedPciPlan, ClaimedPciPlanBuilder, CpuPlan, DriverMemory, HardwarePlan, InterruptRoutingPlan, IoPortAuthority, MemoryPlan, OwnedHardware, OwnedMemory, PathIdentity, SlotIdentity } from machine.x86_64.cpu_state
 use { EventSleepPolicy, HotPollPolicy } from machine.x86_64.executor_loop
 use { Bytes } from machine.x86_64.executor_memory
 use { ExecutorSlot } from machine.x86_64.executor_slot
@@ -77,6 +77,7 @@ image HelloSerial {
         let serial_irq_source = shared_serial_route.claim_source(
             identity = InterruptSourceIdentity(label = "serial.rx")
         )
+        let empty_pci = ClaimedPciPlanBuilder(panic = discovery.panic).empty()
         let hardware_plan = HardwarePlan(
             cpus = cpus,
             interrupts = InterruptRoutingPlan(
@@ -90,7 +91,12 @@ image HelloSerial {
                 edu_msi = edu.claim_msi(),
                 ivshmem_rx_bar0 = ivshmem_rx.claim_mmio_bar(index = 0),
                 ivshmem_rx_msix = ivshmem_rx.claim_msix(table_bar_index = 1),
-                ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0)
+                ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0),
+                nvme_bar0 = empty_pci.nvme_bar0,
+                nvme_device = empty_pci.nvme_device,
+                nvme_interrupt_routes = empty_pci.nvme_interrupt_routes,
+                nvme_foreground_interrupt_entry = empty_pci.nvme_foreground_interrupt_entry,
+                nvme_background_interrupt_entry = empty_pci.nvme_background_interrupt_entry
             ),
             timer = timer,
             serial_irq_queue = serial_irq_queue,

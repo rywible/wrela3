@@ -1,0 +1,166 @@
+module tests.e2e.fixtures.nvme_event_storage.program
+
+use { BLOB_ALLOCATOR_FREE_EXTENT_LIMIT, BlobOrphanCollector, BlobRef, BlobTruth, Extent, PublishedBlobRef, RelocateBlobProposal } from storage.blob
+use { MutableSlice } from machine.x86_64.executor_memory
+
+data FileId {
+    value: U64
+}
+
+data FileNameKey {
+    value: U64
+}
+
+data FileCreated {
+    file_id: FileId
+    parent_id: FileId
+    name_ref: FileNameKey
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+}
+
+data FileContentCommitted {
+    file_id: FileId
+    blob_ref: PublishedBlobRef
+    stream_sequence: U64
+}
+
+data DirectoryProjectionWorker {
+    projection_id: U64
+    watermark: U64
+
+    fn apply_group(self, last_event_id: U64, event_type_id: U64) -> DirectoryProjectionWorker {
+        if event_type_id == 1001 {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        if event_type_id == 1003 {
+            return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+        }
+        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
+    }
+}
+
+data FirstAppendEvents {
+    created: FileCreated
+    committed: FileContentCommitted
+    directory_worker: DirectoryProjectionWorker
+}
+
+data ReplayOutcome {
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
+}
+
+data ReplayRecovery {
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
+}
+
+data ReplayScratch {
+    allocated_extents: MutableSlice<Extent>
+    acknowledged_refs: MutableSlice<BlobRef>
+}
+
+data ReplayBlobFacts {
+    acknowledged_blob_id: U64
+    acknowledged_start_lba: U64
+    acknowledged_block_count: U64
+    relocated_blob_id: U64
+    relocated_start_lba: U64
+    relocated_block_count: U64
+    orphan_start_lba: U64
+    orphan_block_count: U64
+}
+
+data FirstAppendBuilder {
+    marker: U64
+
+    fn events(self) -> FirstAppendEvents {
+        let blob = PublishedBlobRef(ref = BlobRef(blob_id = 1, start_lba = 20, block_count = 2))
+        return FirstAppendEvents(
+            created = FileCreated(
+                file_id = FileId(value = 1),
+                parent_id = FileId(value = 0),
+                name_ref = FileNameKey(value = 1),
+                blob_ref = blob,
+                stream_sequence = 1
+            ),
+            committed = FileContentCommitted(
+                file_id = FileId(value = 1),
+                blob_ref = blob,
+                stream_sequence = 2
+            ),
+            directory_worker = DirectoryProjectionWorker(projection_id = 12, watermark = 0)
+        )
+    }
+
+    fn replay_outcome(
+        self,
+        events: FirstAppendEvents,
+        recovery: ReplayRecovery,
+        scratch: ReplayScratch
+    ) -> ReplayOutcome {
+        let projected = events.directory_worker.apply_group(last_event_id = recovery.last_event_id, event_type_id = 1003)
+        let facts = self.blob_facts(scratch = scratch)
+        let old_ref = BlobRef(blob_id = facts.acknowledged_blob_id, start_lba = facts.acknowledged_start_lba, block_count = facts.acknowledged_block_count)
+        let new_ref = BlobRef(blob_id = facts.relocated_blob_id, start_lba = facts.relocated_start_lba, block_count = facts.relocated_block_count)
+        let truth = BlobTruth(blob_id = 1, ref = old_ref, version = 1)
+        let relocation = RelocateBlobProposal(blob_id = 1, old_ref = old_ref, new_ref = new_ref, observed_version = 0)
+        let relocation_accepted = truth.can_accept_relocate(proposal = relocation)
+        let collector = BlobOrphanCollector(
+            allocated_extent_count = 3,
+            allocated_extents = scratch.allocated_extents,
+            acknowledged_ref_count = 1,
+            acknowledged_refs = scratch.acknowledged_refs
+        )
+        let reclaimed = collector.reclaimable(scratch = scratch.allocated_extents)
+        let orphan_collected = false
+        if relocation_accepted == false {
+            if recovery.last_event_id == 1 {
+                    if reclaimed.extent_count == 2 {
+                        let first_reclaimed = reclaimed.extents.get(index = 0)
+                        let second_reclaimed = reclaimed.extents.get(index = 1)
+                        if first_reclaimed.start_lba == facts.relocated_start_lba {
+                            if first_reclaimed.block_count == facts.relocated_block_count {
+                                if second_reclaimed.start_lba == facts.orphan_start_lba {
+                                    if second_reclaimed.block_count == facts.orphan_block_count {
+                                        orphan_collected = true
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+        let last_event_id = 0
+        if recovery.last_event_id == 1 {
+            last_event_id = recovery.last_event_id
+        }
+        let projection_watermark = 0
+        if projected.watermark == recovery.projection_watermark {
+            projection_watermark = recovery.projection_watermark
+        }
+        if recovery.orphan_collected == false {
+            orphan_collected = false
+        }
+        return ReplayOutcome(last_event_id = last_event_id, projection_watermark = projection_watermark, orphan_collected = orphan_collected)
+    }
+
+    fn blob_facts(self, scratch: ReplayScratch) -> ReplayBlobFacts {
+        let acknowledged = scratch.acknowledged_refs.get(index = 0)
+        let relocated = scratch.allocated_extents.get(index = 1)
+        let orphan = scratch.allocated_extents.get(index = 2)
+        return ReplayBlobFacts(
+            acknowledged_blob_id = acknowledged.blob_id,
+            acknowledged_start_lba = acknowledged.start_lba,
+            acknowledged_block_count = acknowledged.block_count,
+            relocated_blob_id = 20,
+            relocated_start_lba = relocated.start_lba,
+            relocated_block_count = relocated.block_count,
+            orphan_start_lba = orphan.start_lba,
+            orphan_block_count = orphan.block_count
+        )
+    }
+}

@@ -1,0 +1,56 @@
+module storage.projections
+
+data StateCell<T> {
+    value: T
+}
+
+data DenseEntityMap<Id, T> {
+    root_ref: U64
+    entity_count: U64
+}
+
+data OrderedPages<Partition, SortKey, Row> {
+    root_ref: U64
+    page_count: U64
+}
+
+data ProjectionRootRef {
+    container_id: U64
+    root_ref: U64
+}
+
+data ProjectionCheckpoint {
+    projection_id: U64
+    layout_id: U64
+    layout_hash: U64
+    worker_code_hash: U64
+    last_append_log_event_id: U64
+    root_ref_0: ProjectionRootRef
+    root_ref_1: ProjectionRootRef
+    root_ref_count: U64
+}
+
+data ProjectionQueryResult {
+    projection_id: U64
+    layout_id: U64
+    through_event_id: U64
+    root_ref: U64
+    found: Bool
+}
+
+data AdvanceProjection {
+    projection_id: U64
+    through_event_id: U64
+    checkpoint_root_ref: U64
+}
+
+data ProjectionTruth {
+    atomic_group_frontier: U64
+
+    fn accept_advance(self, advance: AdvanceProjection) -> Bool {
+        if advance.through_event_id > self.atomic_group_frontier {
+            return false
+        }
+        return true
+    }
+}

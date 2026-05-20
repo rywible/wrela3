@@ -1,0 +1,33 @@
+// expect: SEM0118: maintenance proposal mutates truth directly
+module storage.blob
+
+data BlobRef {
+    blob_id: U64
+}
+
+data RelocateBlobProposal {
+    blob_id: U64
+    old_ref: BlobRef
+    new_ref: BlobRef
+    observed_version: U64
+}
+
+data BlobTruth {
+    blob_id: U64
+    ref: BlobRef
+    version: U64
+
+    fn accept_relocate(self, proposal: RelocateBlobProposal) -> Bool {
+        return true
+    }
+}
+
+module negative.maintenance_mutates_blob_truth
+
+use { BlobTruth, RelocateBlobProposal } from storage.blob
+
+class MaintenanceWorker {
+    fn run(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> Bool {
+        return truth.accept_relocate(proposal = proposal)
+    }
+}
