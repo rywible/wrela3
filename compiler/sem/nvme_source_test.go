@@ -509,6 +509,7 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 		t.Fatalf("advance signature = %#v, want count:U32 and no return", advanceMethod)
 	}
 	assertMethodSignature(t, methodByName(t, completionQueue, "drain"), nil, "NvmeCompletionInterrupt")
+	assertMethodSignature(t, methodByName(t, completionQueue, "consume_completion"), []string{"command_id:U16"}, "NvmeCompletionInterrupt")
 
 	path := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeIoPath")
 	assertMethodSignature(t, methodByName(t, path, "signal_completion_interrupt"), nil, "NvmeCompletionInterrupt")
@@ -555,15 +556,21 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 	afterInterruptDrain := sourceBetween(t, source, "fn drain_completion_queue_after_interrupt(self, command_id: U16) -> NvmeCompletionInterrupt {", "\n    fn drain_completion_queue")
 	assertOrderedSubstrings(t, afterInterruptDrain, []string{
 		"while attempts < 1024",
-		"let completion = self.drain_completion_queue()",
+		"let completion = self.consume_completion(command_id = command_id)",
 		"if completion.completed_count > 0",
-		"completion.last_command_id == self.u16_to_u32(value = command_id)",
 		"self.wait_for_poll_window()",
 		"return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = 0",
 	})
 	ioDrain := sourceBetween(t, source, "fn drain_completion_queue(self) -> NvmeCompletionInterrupt {", "\n    fn submit_read")
 	assertOrderedSubstrings(t, ioDrain, []string{
 		"let completion = self.completion_queue.drain()",
+		"if completion.completed_count > 0",
+		"self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)",
+		"return completion",
+	})
+	consumeDrain := sourceBetween(t, source, "fn consume_completion(self, command_id: U16) -> NvmeCompletionInterrupt {", "\n    fn wait_for_completion_interrupt")
+	assertOrderedSubstrings(t, consumeDrain, []string{
+		"let completion = self.completion_queue.consume_completion(command_id = command_id)",
 		"if completion.completed_count > 0",
 		"self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)",
 		"return completion",

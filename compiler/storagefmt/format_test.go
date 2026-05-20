@@ -463,6 +463,17 @@ func TestDirectoryProjectionAppliesKnownFileEvents(t *testing.T) {
 	}
 }
 
+func TestDirectoryProjectionIgnoresUnknownOnlyGroupWatermark(t *testing.T) {
+	p := DirectoryProjection{Watermark: 6}
+	p.ApplyGroup(CommittedGroup{LastEventID: 9}, []Event{{TypeID: 9999, FileID: 8}})
+	if p.Watermark != 6 {
+		t.Fatalf("watermark = %d, want unchanged 6", p.Watermark)
+	}
+	if _, ok := p.Files[8]; ok {
+		t.Fatalf("unknown event created file 8: %#v", p.Files[8])
+	}
+}
+
 func TestStorageWriterRejectsOversizedAtomicGroup(t *testing.T) {
 	writer := WriterPolicy{}
 	got := writer.EnqueueAtomicGroup(StorageMaxAtomicGroupSlots + 1)

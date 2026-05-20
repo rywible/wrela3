@@ -923,7 +923,7 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		{hasFact("projection_upcast_count"), "projection_upcast_count"},
 		{hasFact("projection_rebuild_count"), "projection_rebuild_count"},
 		{r.Storage.StreamDirectoryCacheHits+r.Storage.StreamDirectoryCacheMisses != 0, "stream_directory_cache_hits"},
-		{r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
+		{hasFact("stream_directory_cache_hit_rate_ppm") || hasFact("stream_directory_cache_hits") || hasFact("stream_directory_cache_misses") || r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
 		{hasFact("core_link_committed_groups"), "core_link_committed_groups"},
 		{hasFact("core_link_backpressure_count"), "core_link_backpressure_count"},
 		{r.Storage.NvmePaths != nil, "nvme_paths"},

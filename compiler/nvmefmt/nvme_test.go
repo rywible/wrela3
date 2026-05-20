@@ -336,6 +336,32 @@ func TestCompletionDrainRingsDoorbellAndReturnsInterrupt(t *testing.T) {
 	}
 }
 
+func TestConsumeCompletionLeavesLaterCQEs(t *testing.T) {
+	q := CompletionQueue{QueueID: 5, Depth: 4, Phase: true}
+	entries := []CompletionEntry{
+		{CommandID: 7, Phase: true, OK: true},
+		{CommandID: 9, Phase: true, OK: true},
+		{Phase: false},
+		{Phase: false},
+	}
+	var doorbellHead uint16
+	ok := ConsumeCompletion(&q, entries, 7, func(queueID uint16, head uint16) {
+		if queueID != 5 {
+			t.Fatalf("doorbell queue = %d, want 5", queueID)
+		}
+		doorbellHead = head
+	})
+	if !ok {
+		t.Fatal("ConsumeCompletion rejected valid target CQE")
+	}
+	if q.Head != 1 || !q.Phase {
+		t.Fatalf("queue = %+v, want head 1 phase true", q)
+	}
+	if doorbellHead != 1 {
+		t.Fatalf("doorbell head = %d, want 1", doorbellHead)
+	}
+}
+
 func TestCompletionDrainRejectsInvalidDepth(t *testing.T) {
 	q := CompletionQueue{QueueID: 9, Depth: 3, Phase: true}
 	interrupt := DrainCompletions(&q, []CompletionEntry{{Phase: true}}, func(queueID uint16, head uint16) {

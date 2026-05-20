@@ -318,6 +318,43 @@ func TestStorageReportMissingPlanRequiredMetricsEmitsSEM0124(t *testing.T) {
 	}
 }
 
+func TestStorageReportAllowsZeroCacheHitRate(t *testing.T) {
+	checked := &CheckedProgram{
+		Modules: []*ast.Module{storageReportMetricsModule(
+			ast.NamedArg{Name: "selected_durability_mode", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "512"}},
+			ast.NamedArg{Name: "append_latency_us", Value: &ast.IntLiteral{Value: "10"}},
+			ast.NamedArg{Name: "durability_latency_us", Value: &ast.IntLiteral{Value: "2000"}},
+			ast.NamedArg{Name: "device_media_write_commands", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "device_media_write_bytes", Value: &ast.IntLiteral{Value: "512"}},
+			ast.NamedArg{Name: "blob_orphan_bytes", Value: &ast.IntLiteral{Value: "448"}},
+			ast.NamedArg{Name: "projection_lag_events", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "stream_directory_cache_hits", Value: &ast.IntLiteral{Value: "0"}},
+			ast.NamedArg{Name: "stream_directory_cache_misses", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "stream_directory_cache_hit_rate_ppm", Value: &ast.IntLiteral{Value: "0"}},
+			ast.NamedArg{Name: "core_link_committed_groups", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "core_link_backpressure_count", Value: &ast.IntLiteral{Value: "0"}},
+			ast.NamedArg{Name: "projection_upcast_count", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "projection_rebuild_count", Value: &ast.IntLiteral{Value: "1"}},
+		)},
+		ImageGraph: ImageGraph{
+			StoragePaths: []StoragePathNode{
+				{Label: "nvme.foreground", Role: "foreground", Owner: "foreground", QueueID: 1, Vector: 80},
+				{Label: "nvme.background", Role: "background", Owner: "maintenance", QueueID: 2, Vector: 81},
+			},
+			CoreLinkEndpoints:  []CoreLinkEndpointNode{{Label: "core_link.producer.0", Direction: "tx", Role: "producer", Owner: "foreground", Peer: "maintenance", Depth: 64}},
+			StorageAppendCalls: []StorageAppendCallNode{{ResultObserved: true}},
+		},
+	}
+	r := BuildImageReport(checked)
+	if r.Storage.StreamDirectoryCacheHitRateX1000 != 0 {
+		t.Fatalf("cache hit rate = %d, want 0", r.Storage.StreamDirectoryCacheHitRateX1000)
+	}
+	if ds := ValidateStorageReportContent(r); hasDiagnosticMessage(ds, "stream_directory_cache_hit_rate_x1000") {
+		t.Fatalf("diagnostics = %#v, want zero cache hit rate accepted", ds)
+	}
+}
+
 func TestStorageReportUsesNvmeFixtureStorageMetricsFacts(t *testing.T) {
 	checked := checkedStorageReportProgramAt(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
 	facts := storageMetricsFacts(checked)

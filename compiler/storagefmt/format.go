@@ -261,6 +261,7 @@ func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
 	if p.Files == nil {
 		p.Files = map[uint64]FileState{}
 	}
+	applied := false
 	for _, event := range events {
 		state := p.Files[event.FileID]
 		switch event.TypeID {
@@ -271,22 +272,28 @@ func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
 			state.Deleted = false
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
+			applied = true
 		case 1002:
 			state.ParentID = event.ParentID
 			state.NameRef = event.NameRef
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
+			applied = true
 		case 1003:
 			state.CurrentBlobRef = event.BlobRef
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
+			applied = true
 		case 1004:
 			state.Deleted = true
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
+			applied = true
 		}
 	}
-	p.Watermark = group.LastEventID
+	if applied {
+		p.Watermark = group.LastEventID
+	}
 }
 
 type OrphanCollector struct {

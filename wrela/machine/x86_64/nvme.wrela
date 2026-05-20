@@ -211,7 +211,28 @@ data NvmeCompletionQueue {
         return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = completed, last_command_id = last_command_id, failed = failed)
     }
 
+    fn consume_completion(self, command_id: U16) -> NvmeCompletionInterrupt {
+        let cqe_offset = self.u32_to_u64(value = self.head) * 16
+        let dword3 = self.entries.read_u32(offset = cqe_offset + 12)
+        let entry_phase = ((dword3 >> 16) & 1) != 0
+        if entry_phase != self.expected_phase {
+            return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = 0, last_command_id = 0, failed = false)
+        }
+        let status = (dword3 >> 17) & 0x7FFF
+        let failed = status != 0
+        let command = dword3 & 0xFFFF
+        if command != self.u16_to_u32(value = command_id) {
+            self.panic.fail(code = 0xAC08018C)
+        }
+        self.advance(count = 1)
+        return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = 1, last_command_id = command, failed = failed)
+    }
+
     fn u32_to_u64(self, value: U32) -> U64 {
+        return value
+    }
+
+    fn u16_to_u32(self, value: U16) -> U32 {
         return value
     }
 }
@@ -1497,11 +1518,9 @@ driver path NvmeIoPath {
     fn drain_completion_queue_after_interrupt(self, command_id: U16) -> NvmeCompletionInterrupt {
         let attempts = 0
         while attempts < 1024 {
-            let completion = self.drain_completion_queue()
+            let completion = self.consume_completion(command_id = command_id)
             if completion.completed_count > 0 {
-                if completion.last_command_id == self.u16_to_u32(value = command_id) {
-                    return completion
-                }
+                return completion
             }
             self.wait_for_poll_window()
             attempts = attempts + 1
@@ -1511,6 +1530,14 @@ driver path NvmeIoPath {
 
     fn drain_completion_queue(self) -> NvmeCompletionInterrupt {
         let completion = self.completion_queue.drain()
+        if completion.completed_count > 0 {
+            self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)
+        }
+        return completion
+    }
+
+    fn consume_completion(self, command_id: U16) -> NvmeCompletionInterrupt {
+        let completion = self.completion_queue.consume_completion(command_id = command_id)
         if completion.completed_count > 0 {
             self.registers.write32(offset = self.cq_doorbell_offset(), value = self.completion_queue.head)
         }
@@ -1576,14 +1603,7 @@ driver path NvmeIoPath {
 
     // Close a missed-edge race after arming but before entering hlt; this is one CQ check, not a poll loop.
     fn resynchronize_completion_after_arm(self, command_id: U16) -> NvmeCompletionInterrupt {
-        let completion = self.drain_completion_queue()
-        if completion.completed_count == 0 {
-            return completion
-        }
-        if completion.last_command_id != self.u16_to_u32(value = command_id) {
-            self.completion_queue.panic.fail(code = 0xAC08018B)
-        }
-        return completion
+        return self.consume_completion(command_id = command_id)
     }
 
     asm fn wait_for_completion_window(self) {
