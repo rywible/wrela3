@@ -36,6 +36,22 @@ That proves PCI device discovery, BAR ownership, DMA rings, interrupt delivery,
 packet buffers, Ethernet parsing, IPv4 checksums, and one visible network
 behavior before TCP, TLS, DNS, or HTTP enter the system.
 
+The design should be read as three related scopes, not one giant milestone:
+
+```text
+network-substrate-v0:
+  packet harness, e1000e, Ethernet, ARP, IPv4, ICMP, UDP
+
+network-flow-authority-model:
+  declared flows, endpoint authority, egress policy, budgets, epochs, reports
+
+secure-web-stack:
+  TCP, TLS, HTTP, crypto, trust, QUIC, HTTP/3
+```
+
+The first scope is the implementation target. The other two scopes define the
+shape that substrate work must not block.
+
 ## Assumptions
 
 - The first NIC target is QEMU `e1000e`.
@@ -51,12 +67,20 @@ behavior before TCP, TLS, DNS, or HTTP enter the system.
   extensions.
 - Applications do not directly touch NIC MMIO, descriptor rings, DMA buffers,
   or raw mutable packet memory.
-- TLS crypto is Wrela-owned, not imported from a C TLS stack.
-- TLS key exchange is quantum-safe from the first TLS milestone through a hybrid
-  TLS 1.3 group using X25519 and ML-KEM-768.
+- Wrela owns the TLS crypto ABI, trust policy, endpoint policy, test corpus,
+  constant-time rules, key lifecycle, and reports. Primitive implementations can
+  mature behind that boundary.
+- Wrela-controlled TLS endpoints should default to hybrid TLS 1.3 key exchange
+  using X25519 and ML-KEM-768 once TLS work begins.
 - Bespoke TLS crypto is treated as a serious security project: it needs known
   test vectors, differential tests, transcript tests, negative tests, and
   timing-aware implementation review before any production claim.
+- Endpoint identity is name, SNI, and trust-policy first. IP addresses are route
+  facts with TTL and provenance, not stable endpoint identity unless the endpoint
+  explicitly declares static addressing.
+- Real-hardware networking should require an explicit DMA domain policy. If the
+  target lacks IOMMU containment, the image report must say that the NIC is a
+  trusted DMA device.
 
 ## Non-Goals
 
@@ -70,11 +94,12 @@ This design does not add:
 - NIC checksum offload in the first milestones
 - TCP segmentation offload, LRO, RSS, or multiqueue in the first milestones
 - Wi-Fi
-- packet capture tooling beyond small debug reports
+- full packet capture tooling
 - production networking crypto on CPUs below the AVX2 fallback tier
 - multiple NICs, multiple gateways, or multihomed routing in the first
   milestones
 - QUIC before HTTP/1.1 compatibility exists
+- a socket-style application API as the primary app surface
 
 The design should not block those features. It should make each one an explicit
 capability or protocol extension instead of a rewrite of the stack.
@@ -116,6 +141,27 @@ allowed, maximum concurrent connections, DNS policy, trust policy, and memory
 budgets. Closed endpoint authority is the default for appliances; dynamic web
 authority is the explicit shape for free browsing.
 
+Network authority should also compose with data classification. A value carrying
+secret, credential, personal, or regulated data should not be sendable through a
+general web authority unless the endpoint authority explicitly permits that data
+flow. This turns "no ambient networking" into exfiltration resistance that the
+compiler and image report can explain.
+
+That policy should eventually be type-level information flow control, not only a
+runtime flag. Values can carry labels such as:
+
+```wrela
+data Classified<T, Label> {
+    value: T
+}
+```
+
+An endpoint authority declares the labels it may transmit. Derived values inherit
+the most restrictive label of their inputs unless source passes through an
+explicit declassification authority that is named in the image report. A public
+metrics endpoint can therefore accept `Public` counters but reject a value
+derived from `Secret<ApiKey>` before code generation.
+
 Conceptual source shape:
 
 ```wrela
@@ -126,21 +172,69 @@ data RemoteHttpsEndpoint {
     allowed_group: TlsGroup
     allowed_cipher: TlsCipherSuite
     max_connections: U64
+    egress: EgressPolicy
 }
 ```
 
-An `HttpClient` for a closed endpoint should not iterate a general cipher list
-or trust arbitrary certificate roots. It should expect the declared endpoint,
-declared trust material, declared TLS group, declared cipher suite, and declared
-buffer budget. A request to a non-declared endpoint is a type error unless the
-image explicitly holds dynamic network authority.
+A request through a closed endpoint authority should not iterate a general cipher
+list or trust arbitrary certificate roots. It should use the declared endpoint,
+declared trust material, declared TLS group, declared cipher suite, declared
+buffer budget, and declared egress policy. A request to a non-declared endpoint
+is a type error unless the image explicitly holds dynamic network authority.
 
-DNS can also be mostly compile-time for closed endpoints. The compiler can
-resolve declared names during the build, embed the resolved addresses as
-fallbacks, and report the resolution. Runtime DNS then refreshes or verifies the
-route instead of being the first source of truth. Fully dynamic DNS remains
-possible, but it is an explicit authority with its own budget and attack
-surface.
+DNS can be mostly compile-time for closed endpoints, but build-time DNS is not
+endpoint truth. The compiler can resolve declared names during the build, embed
+the resolved addresses as route hints, and report the resolution time, TTL, and
+resolver provenance. Runtime DNS refreshes or verifies route facts. Fully dynamic
+DNS remains possible, but it is an explicit authority with its own budget and
+attack surface.
+
+### Declared Flows Are The Spine
+
+Protocols are implementation stages. Flows are the Wrela-visible network unit.
+The image declares which traffic classes can exist, and the compiler lowers each
+declared flow into the smallest packet-to-event or request-to-packet pipeline
+that satisfies that declaration.
+
+Conceptual source shape:
+
+```wrela
+data DeclaredFlow {
+    identity: FlowIdentity
+    direction: FlowDirection
+    local: LocalEndpointPattern
+    remote: RemoteEndpointPattern
+    protocol: ProtocolShape
+    executor: ExecutorSlot
+    arena: NetworkArena
+    trust: PeerTrustPolicy
+    budgets: FlowBudgets
+    egress: EgressPolicy
+    epoch: EpochPolicy
+}
+```
+
+For a closed outbound HTTPS endpoint, that flow can include host, SNI, SPKI pin,
+TLS group, cipher suite, route policy, maximum connections, memory budget,
+congestion policy, and executor binding. For an inbound route, it can include
+local port, peer policy, method/path shape, body schema, response authority, and
+admission budget.
+
+The runtime should therefore dispatch by declared flow before it performs
+expensive work:
+
+```text
+RX bytes
+  -> quarantine
+  -> structural Ethernet/IP/transport verification
+  -> declared-flow match
+  -> generated flow pipeline
+  -> typed semantic event or drop reason
+```
+
+Reusable protocol modules still exist for correctness and tests. The generated
+runtime path is specialized to the declared flow rather than exposing one
+general socket-shaped protocol stack to applications.
 
 ### Single-Core Network Reactor First
 
@@ -168,9 +262,9 @@ The network reactor owns:
 - retransmits
 - semantic network event emission
 
-Other executors communicate with networking through typed request queues,
-topics, or connection authorities. This keeps ownership reviewable and avoids
-cross-core mutation of descriptor rings or protocol state.
+Other executors communicate with networking through typed request queues, topics,
+endpoint authorities, or flow-specific response authorities. This keeps ownership
+reviewable and avoids cross-core mutation of descriptor rings or protocol state.
 
 The reactor loop should have budgeted lanes so expensive work cannot starve
 urgent packet maintenance:
@@ -188,6 +282,12 @@ expensive lane:
   bursts
 ```
 
+Those lanes need mechanical budgets, not only names. The image report should
+show packet budgets, queue-slot budgets, cycle or tick budgets, timer deadlines,
+and interrupt moderation policy for each lane. Expensive work consumes declared
+budget tokens before it begins so remote peers cannot mint unbounded work by
+sending handshakes, parser-deep bodies, or RX storms.
+
 The escape hatch is measured and explicit. If one core is not enough for a
 declared target, Wrela can split selected flows or crypto work onto helper
 executors:
@@ -197,15 +297,18 @@ NetworkReactor:
   owns NIC rings, RX quarantine, TX completion, ARP, routing, and packet dispatch
 
 Flow executors:
-  own bounded TCP connections, TLS sessions, HTTP streams, or QUIC connections
+  own declared flow state machines and their narrowed packet/buffer authorities
 
 Crypto executors, optional:
   own expensive handshake or bulk crypto work when the image declares them
 ```
 
-The reactor remains the truth owner for NIC queues and packet memory. Per-flow
-executors receive narrowed authorities for specific flows and buffer leases.
-Helper cores are a performance escape valve, not the baseline architecture.
+The reactor remains the truth owner for NIC queues and packet memory. If flow
+execution splits across cores, the source declaration must choose a transfer
+mechanic: static flow-to-executor affinity, drain-and-transfer at an epoch
+boundary, or a specific queue contract. The default answer is no handoff:
+declared flow affinity decides which executor owns the state. Helper cores are a
+performance escape valve, not the baseline architecture.
 
 ### Cross-Executor Queue Contract
 
@@ -224,6 +327,50 @@ The first queue shapes should be explicit:
 The compiler should reject an SPSC queue if call-graph analysis finds multiple
 producers. The image report should name each network queue, its producer set,
 consumer, capacity, payload size, wake policy, and memory owner.
+
+### Device DMA And Ordering Are Explicit
+
+The e1000e driver is not just parser code with an MMIO object. It is a
+CPU/device concurrency boundary. The driver design must specify:
+
+- descriptor ownership states for host-owned, device-owned, completed, and
+  recycled descriptors
+- RX and TX buffer lifecycle from DMA allocation through quarantine, lease, and
+  return to the ring
+- MMIO register ordering and required barriers around ring setup, tail updates,
+  interrupt masking, and interrupt acknowledgement
+- cache coherency assumptions for descriptor rings and packet buffers
+- DDIO or NIC-to-LLC placement assumptions when the target exposes them
+- reset epochs for descriptors, packet leases, ARP entries, flows, and pending
+  app response authorities
+- interrupt acknowledgement order relative to descriptor drain and device status
+  reads
+
+QEMU may be forgiving, but the source model should not teach the wrong contract.
+The first implementation can conservatively use strongly ordered MMIO helpers,
+architecture-specific ordering helpers, and uncached or explicitly coherent DMA
+buffers. On x86, those helpers may lower to PAT or MTRR memory-type choices,
+compiler barriers, `sfence`, `mfence`, or ordinary ordered stores depending on
+whether the access is normal memory, MMIO, write-combining memory, or a device
+doorbell. The source should request semantics such as "descriptor writes visible
+before tail update" instead of spelling raw fences everywhere. The report should
+say which memory type, cache-placement assumption, and barrier policy were
+selected.
+
+Real hardware also needs a DMA containment answer:
+
+```wrela
+data DmaDomainAuthority {
+    device: PciDevice
+    allowed_regions: BoundedDmaRegionSet
+    iommu_enforced: Bool
+}
+```
+
+For QEMU, Wrela may run with `iommu_enforced = false` while reporting trusted DMA
+device status. For production hardware, network images should either require an
+IOMMU-backed domain for NIC DMA or loudly report that the NIC can DMA outside the
+network arena and is therefore part of the trusted computing base.
 
 ### Bounded Memory Everywhere
 
@@ -280,7 +427,7 @@ data VerifiedIpv4Packet {
 ```
 
 Each parser performs the smallest checks needed to promote one typestate to the
-next:
+next. `Verified*` means structurally valid for that layer, not trustworthy:
 
 ```text
 QuarantinedRxBytes
@@ -290,6 +437,26 @@ QuarantinedRxBytes
   -> VerifiedIpv4Packet
   -> verify UDP/TCP/ICMP length and checksum
   -> Verified transport payload
+```
+
+Later states should distinguish structure, authority, identity, and application
+meaning:
+
+```text
+VerifiedTransportPacket:
+  structurally valid packet for a transport protocol
+
+MatchedDeclaredFlow:
+  packet belongs to a declared flow and has an admission budget
+
+AuthenticatedPeer:
+  peer identity has been established by the declared policy, such as TLS SPKI
+
+AuthorizedRequest:
+  authenticated peer, route, method, body, and egress/ingress policy agree
+
+DomainEvent:
+  protocol details have been lowered into a typed application event
 ```
 
 Malformed packets never become typed frames. They are dropped from quarantine,
@@ -390,6 +557,26 @@ Entropy should also be explicit. Candidate entropy sources include:
 These sources feed a Wrela-owned CSPRNG with health checks and provenance in the
 image report. Hardware entropy is an input authority, not ambient randomness.
 
+### Network Epochs
+
+Network state should be tied to explicit epochs. The reactor advances an epoch
+when the facts that made existing state valid may have changed:
+
+- NIC reset
+- link flap
+- DHCP lease acquire, renew, or loss
+- static IP conflict detection
+- route or gateway change
+- DNS policy update
+- TLS trust or endpoint policy update
+- clock policy update that affects certificate validity
+
+Each lease or state table declares whether it survives an epoch transition.
+Packet leases, ARP entries, TCP control blocks, QUIC connections, DNS answers,
+TLS sessions, and pending `ResponseAuthority` values must either carry the
+epoch they were created in or be explicitly epoch-stable. This makes reset and
+renumbering behavior reviewable instead of relying on scattered cleanup code.
+
 ### Attack Surface And Exhaustion Policy
 
 Networking is hostile input. The stack should report its exposed parser and
@@ -408,18 +595,41 @@ The image report should include:
 - packet parser byte budgets
 - drop and admission policies
 
+Expensive inbound work should be charged before it starts:
+
+```wrela
+data BudgetTokenAuthority {
+    bytes: U64
+    packets: U64
+    cycles_or_ticks: U64
+    handshake_slots: U64
+    parser_depth: U64
+    response_bytes: U64
+}
+```
+
+The exact units can evolve, but the principle should not: unauthenticated peers
+do not receive unlimited CPU, memory, parser recursion, handshake slots, or
+response amplification. A declared flow decides how tokens are minted, refilled,
+and consumed.
+
 The first TCP listener must not be merely "bounded table or fail." It needs an
 admission policy such as token-bucket SYN admission, SYN cookies, or an explicit
 "not internet-facing without upstream filtering" declaration.
 
-### Protocols Are Layered, Drivers Are Replaceable
+### Protocol Modules Are Reusable, Flow Pipelines Are Specialized
 
 The e1000e driver exposes an Ethernet device path. ARP, IPv4, ICMP, UDP, TCP,
-TLS, HTTP, QUIC, and HTTP/3 consume generic packet and endpoint abstractions.
+TLS, HTTP, QUIC, and HTTP/3 should still have reusable modules, tests, and
+conformance fixtures.
 
-This keeps the second NIC driver from contaminating the protocol stack. Later
-NIC families such as Intel `igb`, Realtek `r8169`, or `virtio-net` should only
-need to implement the Ethernet device boundary.
+The runtime path for a declared endpoint should be a specialized flow pipeline,
+not a general socket API. This keeps the second NIC driver from contaminating the
+protocol modules while still letting the compiler emit per-flow dispatch,
+budgets, trust checks, route parsers, and semantic app events. Later NIC families
+such as Intel `igb`, Realtek `r8169`, or `virtio-net` should only need to
+implement the Ethernet device boundary or a richer hardware-flow-steering
+boundary.
 
 ### Prefer Source-Visible Software Paths Before Offloads
 
@@ -448,6 +658,36 @@ long-lived crypto state on one core. Interrupt handlers still need a clear rule.
 They should not execute vector crypto code unless the interrupt path has an
 explicit vector-state save policy.
 
+Crypto backend selection should not stop at AVX2 and AVX-512. QAT, platform
+crypto engines, future post-quantum accelerators, or a DPU-hosted network
+executor can satisfy the same Wrela crypto ABI when declared as hardware-backed
+authorities and reported with their trust and side-channel assumptions. If the
+network core shares last-level cache with app cores, that side-channel surface is
+also a reported platform fact rather than an invisible property.
+
+### Hardware Enforcement And QoS Are Backend Capabilities
+
+The source model should leave room for hardware enforcement without depending on
+it in the first implementation.
+
+Possible backend capabilities:
+
+- page-table permissions, PKEY/PKU, PKS, or another protection mechanism for
+  quarantine and packet lease arenas
+- cache-line wait using `MONITOR`/`MWAIT`, `MONITORX`/`MWAITX`, or related
+  target-specific primitives for Wrela-owned waitlines
+- CAT or equivalent cache partitioning for network executors, packet rings, and
+  app cores
+- DDIO or target-specific DMA cache-placement controls when the platform exposes
+  them
+
+These are reportable backend choices, not semantic requirements. PKEY-style
+quarantine is page-granular, so it only protects a packet lease if the containing
+page holds data that the target executor may see. Directly monitoring a NIC-owned
+descriptor line is also hardware-dependent; the safe baseline is a Wrela-owned
+waitline plus MSI/MSI-X or polling fallback. CAT and DDIO should be selected from
+discovered hardware facts and reported as performance and side-channel policy.
+
 ### Compatibility Before Fancy Protocols
 
 HTTP/1.1 over TLS is still the universal web compatibility path. HTTP/3 is
@@ -459,26 +699,29 @@ should therefore build the boring universal path before QUIC/HTTP/3.
 ```text
 Application executors
   |
-  | typed semantic network events and response commands
+  | endpoint requests, typed semantic events, response commands
+  v
+DeclaredFlow table and generated flow modules
+  |
+  +-- inbound POST /events:
+  |     Ethernet/IP/TCP/TLS/HTTP/JSON -> EventAppendRequested
+  |
+  +-- outbound api.example.com HTTPS:
+  |     Request<EventBatch> -> DNS route fact -> TCP/TLS/HTTP
+  |
+  +-- DNS, DHCP, ICMP, UDP service flows
+  |
   v
 Network reactor on dedicated core
   |
-  +-- HTTP/3 over QUIC over UDP later
+  +-- quarantine, structural parse, declared-flow dispatch
   |
-  +-- HTTP/2 over TLS over TCP later
+  +-- ARP, IPv4 routing, timers, retransmits, admissions
   |
-  +-- HTTP/1.1 over TLS over TCP
-  |
-  +-- DNS over UDP
-  |
-  +-- DHCP over UDP
-  |
-  +-- ICMP over IPv4
-  |
-  +-- ARP + IPv4 + UDP/TCP
+  +-- TCP/TLS/HTTP/QUIC stages as generated flow code
   |
   v
-Ethernet II frame layer
+Ethernet II frame boundary
   |
   v
 e1000e Ethernet device path
@@ -488,9 +731,17 @@ PCI BAR + DMA rings + MSI/MSI-X interrupt receiver
 ```
 
 The baseline path does not move packet or protocol work off the reactor. It
-emits semantic app events and accepts semantic response commands. Optional flow
-or crypto helper executors can be added later only when the image declares them
-and measurement justifies the added cross-core traffic.
+matches structurally verified packets to declared flows, runs the generated
+pipeline for that flow, emits semantic app events, and accepts semantic response
+commands. Optional flow or crypto helper executors can be added later only when
+the image declares them and measurement justifies the added cross-core traffic.
+
+For later NICs with useful filters or steering, the same declared-flow table
+should become a hardware programming artifact. The compiler can emit RX queue
+affinity, hardware drop filters, RSS or flow-steering rules, interrupt target
+selection, and executor placement from the source graph. The e1000e baseline may
+emulate that in software because the design shape matters more than early
+hardware richness.
 
 ### Network Authority
 
@@ -509,6 +760,10 @@ let net_arena = root_arena.child(
     length = NETWORK_ARENA_BYTES,
     align = 4096
 )
+let net_dma = nic.claim_dma_domain(
+    arena = net_arena,
+    policy = DmaPolicy(require_iommu = target.production)
+)
 ```
 
 `QEMU_E1000E_DEVICE_ID` is a source constant added during implementation after
@@ -517,7 +772,8 @@ start with that one known QEMU ID and only add real hardware IDs as they are
 tested.
 
 The resulting driver path is the only value that can read or write e1000e MMIO
-registers or mutate descriptor rings.
+registers or mutate descriptor rings. The DMA domain is the only authority that
+can allocate network DMA buffers for that device.
 
 ### Driver Boundary
 
@@ -533,16 +789,16 @@ driver path E1000ePath {
 
     interrupt receiver -> NetworkInterrupt
     fn initialize(self) -> LinkState
-    fn poll_rx(self) -> Option<EthernetFrame>
-    fn transmit(self, frame: EthernetFrame) -> Result<Unit, TxFull>
+    fn poll_rx(self) -> Option<QuarantinedRxBytes>
+    fn transmit(self, frame: TxFrameLease) -> Result<Unit, TxFull>
     fn link_state(self) -> LinkState
     fn mac_address(self) -> MacAddress
 }
 ```
 
 The actual API can be smaller in the first implementation. The important
-boundary is that the driver exposes Ethernet frames and link facts, not PCI
-registers or descriptor ownership.
+boundary is that the driver exposes quarantined receive bytes, transmit leases,
+and link facts, not PCI registers or descriptor ownership.
 
 ## Milestone 0: Packet Trace Harness
 
@@ -577,8 +833,11 @@ Required behavior:
 - allocate RX descriptors from a DMA arena
 - allocate TX descriptors from a DMA arena
 - allocate fixed-size packet buffers from a DMA arena
+- model descriptor ownership transitions explicitly
+- use explicit MMIO and DMA ordering helpers for ring setup and tail updates
 - program one RX queue
 - program one TX queue
+- record the selected DMA memory type and IOMMU/trusted-device policy
 - enable MSI or MSI-X when supported by the selected device
 - provide an interrupt receiver for RX/TX/link events
 - transmit one Ethernet frame
@@ -602,6 +861,8 @@ Verification:
 - the host sees a transmitted frame
 - the image receives a host-generated frame
 - the image does not touch raw memory outside its network DMA arena
+- the image report names descriptor counts, DMA domain policy, memory type,
+  barrier policy, interrupt mode, and reset epoch
 
 ## Milestone 2: Ethernet II
 
@@ -786,6 +1047,7 @@ Required first support:
 - out-of-order receive handling within a bounded window
 - FIN close
 - RST handling
+- TIME_WAIT policy
 - checksum validation and emission
 - bounded connection table
 - bounded send and receive buffers
@@ -808,13 +1070,44 @@ tests. Because IPv4 fragmentation is deferred, TCP must clamp MSS during SYN
 handling to the configured MTU and should treat PMTU discovery as a later
 explicit feature.
 
-## Milestone 10: TLS With Wrela Crypto
+Congestion control, retransmit timers, and TIME_WAIT are flow policy, not hidden
+globals. A local appliance flow, LAN service flow, WAN client flow, and
+public-web dynamic flow can choose different conservative defaults once measured.
+The first implementation can use one simple policy, but the declared-flow report
+should leave room for per-flow congestion policy, retransmit timer shape, and
+connection-retention budget.
+
+The transport strategy should split local/fleet traffic from public WAN traffic.
+Wrela-controlled LAN or fleet flows can use simple credit-based or bounded-window
+transport policies because both endpoints are compiled with the same budget and
+schema assumptions. Public WAN TCP should be an isolated transport module whose
+congestion controller, RTT estimator, loss recovery, ACK behavior, and TIME_WAIT
+policy can be upgraded without changing the reactor, declared-flow API, or
+application event surface.
+
+## Milestone 10: TLS With Wrela Crypto Policy
 
 TLS gives HTTPS its security properties. Wrela will own its TLS crypto instead
-of linking a foreign TLS library.
+of exposing a foreign TLS stack as the platform contract.
 
 This is intentionally ambitious and must be treated as a security-critical
 subsystem, not just another parser.
+
+Wrela ownership means:
+
+- source-visible endpoint trust policy
+- source-visible group and cipher policy
+- a stable crypto ABI owned by Wrela
+- known-answer, differential, transcript, parser, and negative test corpora
+- constant-time implementation rules for every primitive and backend
+- key lifecycle and zeroization rules
+- image reports that say which backend, trust roots, pins, and groups are active
+
+Primitive implementations can mature behind that boundary. Early interop or test
+work may use a non-production backend if the image report says so plainly. A
+production claim requires Wrela-reviewed primitive implementations or a
+separately declared hardware/backend authority that satisfies the same ABI and
+verification gates.
 
 ### TLS Version
 
@@ -826,16 +1119,18 @@ old protocol hazards.
 
 ### Hybrid Post-Quantum Key Agreement
 
-The first TLS milestone includes hybrid post-quantum key agreement. The default
-Wrela-controlled endpoint group is:
+The Wrela-controlled endpoint target includes hybrid post-quantum key agreement.
+The default Wrela-controlled endpoint group is:
 
 ```text
 X25519MLKEM768
 ```
 
 This combines classical X25519 with ML-KEM-768 so the connection is not relying
-only on elliptic-curve discrete log assumptions. The implementation should track
-the IETF TLS hybrid ECDHE-ML-KEM wire format and NIST ML-KEM semantics.
+only on elliptic-curve discrete log assumptions. The implementation should name
+the exact IETF TLS hybrid ECDHE-ML-KEM draft or RFC version it targets, including
+hybrid shared-secret concatenation and KDF binding, and should track NIST ML-KEM
+semantics.
 
 Endpoint policy is source-visible:
 
@@ -908,7 +1203,7 @@ Reason: the networking target explicitly assumes modern x86_64 crypto
 acceleration. AES-GCM maps well to AES-NI/PCLMULQDQ on the AVX2 fallback tier
 and to VAES/VPCLMULQDQ on the AVX-512 fast tier.
 
-The first TLS milestone should also implement:
+The first TLS implementation should also implement:
 
 ```text
 TLS_AES_256_GCM_SHA384
@@ -921,10 +1216,9 @@ the chosen policy, but it is not the primary performance target for this design.
 
 ### Required Crypto Primitives
 
-First TLS milestone:
+First production-trusted TLS backend:
 
-- X25519 written to avoid secret-dependent branches and memory lookups on the
-  supported backend
+- X25519 written to avoid secret-dependent branches and memory lookups
 - ML-KEM-768 key generation, encapsulation, and decapsulation
 - hybrid X25519MLKEM768 shared secret construction
 - HKDF-SHA256
@@ -945,6 +1239,33 @@ First TLS milestone:
 - certificate signature verification for one chosen signature family
 - ML-DSA verification for Wrela-controlled post-quantum endpoints when the
   endpoint declares it
+
+All production-trusted implementations must avoid secret-dependent branches and
+memory lookups, including AES, GHASH, Poly1305, HMAC, ML-KEM decapsulation, and
+failure handling. Side-channel review is part of the backend acceptance criteria,
+not an X25519-only requirement.
+
+### Binary-Level Constant-Time Validation
+
+Source-level constant-time review is not enough once Wrela owns lowering,
+optimization, register allocation, and assembly emission. Secret taint should
+survive from source values into IR, machine operations, registers, spills, and
+emitted assembly.
+
+The compiler should reject a production-trusted crypto backend if a secret-tainted
+value influences:
+
+- a conditional branch or indirect branch target
+- a load or store address
+- a variable-latency instruction forbidden by the target profile
+- a call into an unverified helper
+
+For Wrela-generated crypto, this can become a compile-time codegen check. For
+handwritten assembly, hardware crypto, or imported verified objects, the image
+must declare a backend authority with disassembly, object metadata, or an
+external proof artifact that satisfies the same reporting surface. Timing tests
+remain useful, but they are evidence on top of binary structure checks, not a
+replacement for them.
 
 The crypto package should contain a small scalar reference path for known-answer
 tests and differential checks. That reference path is not the production
@@ -989,10 +1310,13 @@ Bespoke crypto is allowed only with hard verification gates:
 - differential tests against at least one mature implementation during
   development
 - fuzz tests for parsers
-- code review focused on secret-dependent branches and table lookups
+- code review focused on secret-dependent branches, table lookups, rejection
+  sampling, cache behavior, and zeroization
+- binary-level secret-taint checks for production-trusted generated crypto
+- disassembly or proof artifacts for production-trusted non-generated crypto
 - explicit statement of what is and is not production-trusted
 
-The first TLS milestone can be excellent engineering without being declared
+The first TLS implementation can be excellent engineering without being declared
 production-safe on day one.
 
 ## Milestone 11: HTTP/1.1
@@ -1117,16 +1441,20 @@ long-term modern networking story.
 ## Application API Shape
 
 The first app-facing API should not mimic POSIX sockets. Wrela should expose
-authority-bearing network values and typed semantic events:
+endpoint authorities, request/response futures, event streams, and typed
+semantic events:
 
 ```wrela
-data NetworkEndpointAuthority {}
-data TcpConnection {}
-data TlsConnection {}
-data HttpClient {}
-data HttpRequest {}
-data HttpResponse {}
+data EndpointAuthority<F> {}
+data EndpointRequestAuthority<F, Request, Response> {}
+data NetworkEventStream<Event> {}
+data ResponseAuthority<F> {}
 ```
+
+TCP connections, TLS sessions, HTTP streams, and QUIC connections are reactor
+state, not ordinary application objects. Compatibility modules may expose narrow
+byte-stream authorities for special cases, but that is not the primary appliance
+API.
 
 For server-side routes, apps should not need to know HTTP exists. The network
 reactor owns Ethernet, IP, TCP or QUIC, TLS, HTTP parsing, routing, and body
@@ -1155,10 +1483,10 @@ Example event shape:
 
 ```wrela
 data EventAppendRequested {
-    auth: VerifiedAuth
+    auth: AuthenticatedPeer
     stream: StreamId
     body: HttpBodyLease
-    response: HttpResponseAuthority
+    response: ResponseAuthority<AppendEventsFlow>
 }
 ```
 
@@ -1166,13 +1494,13 @@ The app responds with semantic commands:
 
 ```wrela
 data SendJsonResponse<T> {
-    response: HttpResponseAuthority
+    response: ResponseAuthority<F>
     status: HttpStatus
     body: T
 }
 
 data SendBlobResponse {
-    response: HttpResponseAuthority
+    response: ResponseAuthority<F>
     status: HttpStatus
     body: BlobReadLease
 }
@@ -1182,14 +1510,21 @@ The network reactor turns response commands back into HTTP, TLS, TCP or QUIC,
 and Ethernet frames. This keeps HTTP as a reactor implementation detail for
 declared routes.
 
-Client-side code similarly asks the network reactor to open or use explicit
-endpoint authorities. The returned authority determines what the app can do.
+Blob responses are the place where Wrela can eventually beat conventional
+`sendfile` plus kTLS. A `BlobReadLease`, `TlsSessionAuthority`, and `TxBufferLease`
+can form a compile-time-proved chain of compatible region authorities. When the
+backend can prove nonce, lifetime, alignment, and buffer ownership, it may encrypt
+directly into the TX buffer instead of copying through a user-visible byte stream.
+
+Client-side code similarly uses explicit endpoint authorities. The authority
+determines destination, trust, request type, response type, body limits, egress
+classification, and runtime budget.
 
 Examples:
 
 ```text
-HttpClient can issue requests through the network reactor.
-TcpConnection can send and receive bounded byte slices.
+EndpointRequestAuthority<MetricsFlow> can send MetricsBatch and receive Ack.
+EndpointAuthority<GeneralWebFlow> can issue declared dynamic-web requests.
 UdpEndpoint can send datagrams from one local port.
 DnsClient can resolve names through configured resolver authority.
 ```
@@ -1219,6 +1554,12 @@ event.
 For public-web compatibility, full JSON behavior may be required. For
 Wrela-controlled clients, a typed binary frame can avoid JSON entirely and
 promote a verified body lease directly into typed views.
+
+Wrela-to-Wrela traffic should not be forced through JSON over HTTP when both
+ends are compiled with known schemas. A later `wrela-binary-v1` ALPN can use
+length-prefixed, schema-compiled frames with the same endpoint trust and flow
+budget model. Public web gets HTTP and JSON. Wrela fleets get compiler-emitted
+encoders and decoders for declared types.
 
 ## Error Handling
 
@@ -1251,22 +1592,32 @@ The image report should include:
 
 - selected NIC PCI identity
 - BAR ownership
+- DMA domain policy and whether IOMMU containment is enforced
+- DMA memory type, cache-placement assumption, and MMIO/barrier policy
 - interrupt vector and mode
 - network reactor executor slot and CPU placement
+- hardware enforcement choices for quarantine, packet leases, waitlines, cache
+  partitioning, and DMA cache placement
 - reactor loop budgets for urgent, normal, and expensive lanes
 - network arena size and subdivisions
 - RX/TX descriptor counts
 - packet buffer counts and sizes
 - packet quarantine pool size and verified packet lease budget
 - cross-executor queue producers, consumers, capacities, and wake policies
+- declared flows, executor affinity, arena, route, trust, and budget policy
+- hardware flow-steering or software dispatch policy
 - declared remote endpoints and local listening ports
 - dynamic web authorities, if present
+- egress data-classification policy by endpoint authority
+- declassification authorities, if present
 - computed or declared connection budgets
+- inbound budget token policy
 - typed route-to-event mapping
 - endpoint trust policy and pinned SPKI or certificate identities
 - declared time, clock, and entropy authorities
 - entropy source provenance and CSPRNG policy
 - timer wheel or timer table capacities
+- network epoch sources and survival policies
 - attack-surface summary and admission policies
 - static or DHCP configuration mode
 - supported protocols
@@ -1275,6 +1626,8 @@ The image report should include:
 - post-quantum TLS policy
 - required SIMD tier
 - selected crypto backend
+- hardware-backed crypto authorities and reported side-channel assumptions
+- constant-time validation mode for each production-trusted crypto backend
 - enabled XCR0 vector-state bits
 - supported HTTP versions
 
@@ -1293,6 +1646,25 @@ Runtime diagnostics should include bounded counters:
 - TLS handshake failures
 - HTTP request count
 - typed semantic events emitted by route
+- epoch advances by reason
+- budget-token denials by flow
+
+Runtime diagnostics should also include a tiny bounded flight recorder. This is
+not full packet capture. It is an always-on ring of metadata records:
+
+- packet metadata without full payloads
+- flow-match results
+- drop reasons
+- state transitions
+- timer firings
+- descriptor ring pressure
+- queue pressure
+- budget-token denials
+- epoch changes
+
+The recorder should have a fixed memory budget and redact payload bytes by
+default. Network bugs are otherwise too hard to understand on a freestanding
+image.
 
 ## Testing Strategy
 
@@ -1304,12 +1676,27 @@ Runtime diagnostics should include bounded counters:
 - reject network tables without bounded capacities
 - reject use of quarantined bytes outside verifier functions
 - reject cross-executor packet borrows without lease transfer
+- reject declared-flow executor ownership mismatches
+- reject packet delivery to a flow without an admission budget
 - reject closed endpoint requests to undeclared hostnames or ports
 - allow dynamic web requests only with explicit dynamic web authority
+- reject secret-bearing data sent through an endpoint whose egress policy does
+  not allow that data classification
+- reject implicit declassification of secret-bearing data before network egress
+- verify derived values preserve restrictive labels unless source holds an
+  explicit declassification authority
 - verify declared routes emit typed semantic events with bounded payloads
 - reject TLS endpoints without clock and entropy authority
 - reject TLS endpoints without declared trust material
+- reject stale build-time DNS facts used as endpoint identity without an explicit
+  static-address policy
 - report network arena ownership in the image report
+- report DMA domain, IOMMU/trusted-device status, declared flows, budgets,
+  epochs, and flight recorder capacity in the image report
+- report hardware enforcement capabilities and fallbacks for quarantine,
+  waitlines, cache partitioning, and DMA cache placement
+- reject production-trusted generated crypto whose emitted code uses
+  secret-tainted values in branch conditions or memory addresses
 
 ### Unit Tests
 
@@ -1324,13 +1711,18 @@ Runtime diagnostics should include bounded counters:
 - ML-KEM-768 known-answer tests
 - X25519MLKEM768 transcript tests
 - build-time endpoint trust validation tests
+- information-flow egress and declassification tests
 - packet quarantine promotion tests
 - packet lease lifetime negative tests
+- declared-flow match and drop-reason tests
+- budget-token admission tests
+- network epoch invalidation tests
 - typed route-to-event parser tests
 - dynamic web authority negative tests
 - SIMD backend selection tests
 - scalar-versus-AVX2 crypto differential tests
 - AVX2-versus-AVX-512 crypto differential tests when host support exists
+- emitted-assembly secret-taint tests for generated crypto backends
 - HTTP parser bounds
 
 ### QEMU End-to-End Tests
@@ -1374,7 +1766,8 @@ The stack should be implemented in small gates:
 1. Add enough e1000e QEMU test plumbing to boot with the NIC.
 2. Add the packet trace harness and parser fuzz fixtures.
 3. Add quarantined packet bytes and verified packet typestates.
-4. Add DMA ring memory shapes and reports.
+4. Add DMA ring memory shapes, descriptor ownership states, DMA domain policy,
+   ordering helpers, and reports.
 5. Bring up e1000e reset/init/link/MAC reporting.
 6. Prove RX/TX with raw Ethernet frames.
 7. Add Ethernet II parse/emit helpers.
@@ -1384,21 +1777,32 @@ The stack should be implemented in small gates:
 11. Add UDP.
 12. Add time, clock, entropy, and bounded timer authorities over the existing
     `TimerAuthority`.
-13. Add DHCP, or keep static config if the next target is DNS/TCP.
-14. Add DNS.
-15. Add TCP.
-16. Add compile-time network shape declarations and reports, including dynamic
-    web authority.
-17. Add CPU feature discovery and vector-state policy for networking crypto.
-18. Add AVX2 fallback crypto backends.
-19. Add AVX-512 fast crypto backends.
-20. Add ML-KEM-768 and X25519MLKEM768.
-21. Add TLS 1.3 with Wrela crypto and build-time trust policy.
-22. Add HTTP/1.1 route-specialized semantic events.
-23. Add schema-specialized JSON-to-event parsing.
-24. Add HTTP/2 if the use case requires it.
-25. Add QUIC.
-26. Add HTTP/3.
+13. Add network epochs and epoch-carrying packet/state leases.
+14. Add the bounded flight recorder and drop/state-transition diagnostics.
+15. Add compile-time declared-flow shapes and reports, including dynamic web
+    authority, egress policy, and budget-token policy.
+16. Add type-level information-flow labels and explicit declassification
+    authority for network egress.
+17. Add DHCP, or keep static config if the next target is DNS/TCP.
+18. Add DNS as route-fact resolution with TTL/provenance.
+19. Add TCP inside declared-flow state machines with transport policy separated
+    by LAN/fleet and public-WAN flow class.
+20. Add hardware enforcement capability reports for quarantine, waitlines, cache
+    partitioning, and DMA cache placement.
+21. Add CPU feature discovery and vector-state policy for networking crypto.
+22. Add Wrela crypto ABI, trust-policy reports, and test backend boundaries.
+23. Add binary-level secret-taint validation for production-trusted generated
+    crypto.
+24. Add AVX2 fallback crypto backends.
+25. Add AVX-512 fast crypto backends.
+26. Add ML-KEM-768 and X25519MLKEM768 for Wrela-controlled TLS endpoints.
+27. Add TLS 1.3 with Wrela crypto policy and build-time trust policy.
+28. Add HTTP/1.1 route-specialized semantic events.
+29. Add schema-specialized JSON-to-event parsing.
+30. Add Wrela-to-Wrela binary framing when a fleet use case needs it.
+31. Add HTTP/2 if the use case requires it.
+32. Add QUIC.
+33. Add HTTP/3.
 
 Every gate must have a QEMU or unit-test success criterion before the next layer
 depends on it.
@@ -1406,10 +1810,29 @@ depends on it.
 ## Open Decisions
 
 - Whether the first e1000e interrupt mode is MSI, MSI-X, or fallback-driven.
+- What DMA memory type, MMIO ordering helpers, and descriptor ownership states
+  the first e1000e driver exposes.
+- Whether real-hardware networking requires IOMMU-backed `DmaDomainAuthority` or
+  permits an explicit trusted-DMA-device report.
 - Whether the first test network uses QEMU user networking, socket networking,
   TAP, or passt.
 - Whether DHCP comes before DNS/TCP or static config remains the only path until
   HTTPS works.
+- Which `DeclaredFlow` syntax best expresses local/inbound flows, closed remote
+  endpoints, and dynamic web authority.
+- Which egress data-classification labels are built into the first network
+  authority checker.
+- Which information-flow labels are type-level, and which operations require
+  explicit declassification authority.
+- Which budget-token units are required for the first listener and first outbound
+  client.
+- Which transport policy classes distinguish LAN/fleet flows from public-WAN TCP
+  flows.
+- Which network epoch transitions invalidate packet leases, ARP entries, TCP
+  flows, TLS sessions, and response authorities.
+- How large the always-on flight recorder should be and which fields it stores.
+- Whether PKEY/PKU, PKS, page permissions, cache-line wait, CAT, or DDIO are
+  available on the first real hardware target and what fallback each uses.
 - Which first real hardware target satisfies the AVX-512 fast tier.
 - Whether vector code is permitted only in the network executor or also inside
   selected interrupt handlers with explicit XSAVE/XRSTOR policy.
@@ -1424,26 +1847,50 @@ depends on it.
   lanes on the first six-core target.
 - Whether the first TLS verification target is a pinned local test server or a
   known external endpoint.
+- What binary-level constant-time validation is required before a generated
+  crypto backend can be production-trusted.
 - Which real e1000e-family card is the first hardware target after QEMU.
 
 ## Success Criteria
 
-The design is successful when:
+The `network-substrate-v0` scope is successful when:
 
 - Wrela can boot under QEMU with `e1000e`.
 - The network reactor owns all baseline networking state on its dedicated core.
+- Wrela reports DMA domain policy, descriptor counts, memory type, MMIO/barrier
+  policy, interrupt mode, and reset epoch.
 - A host can ping the Wrela image.
 - Wrela can complete a UDP exchange with a controlled host service.
-- Wrela can resolve a hostname through DNS.
-- Wrela can complete a TCP exchange with a controlled host service.
 - Wrela rejects quarantined packet bytes outside the verifier path.
-- Wrela reports declared endpoints, connection budgets, trust policy, and timer
-  budgets.
+- Wrela records bounded drop reasons, state transitions, queue pressure, and
+  epoch changes in the flight recorder.
+
+The `network-flow-authority-model` scope is successful when:
+
+- Wrela reports declared flows with executor affinity, arena, route, trust,
+  egress, budget, and epoch policy.
+- Wrela rejects closed endpoint requests to undeclared hostnames or ports.
+- Wrela rejects secret-bearing values sent through endpoint authorities whose
+  egress policy does not allow that classification.
+- Wrela preserves information-flow labels through derived values and requires
+  explicit declassification authority for label downgrades before egress.
+- Wrela treats DNS answers as route facts with TTL and provenance, not endpoint
+  identity unless static addressing is declared.
 - Wrela reports typed route-to-event mappings and dynamic web authority when
   present.
+- Wrela denies expensive inbound work when budget tokens are exhausted.
+
+The `secure-web-stack` scope is successful when:
+
+- Wrela can resolve a hostname through DNS.
+- Wrela can complete a TCP exchange with a controlled host service.
 - Wrela reports the selected AVX2 or AVX-512 crypto backend.
+- Wrela reports which crypto backend is production-trusted, test-only, or
+  hardware-authority-backed.
+- Wrela rejects production-trusted generated crypto whose emitted code branches
+  on secret-tainted values or uses them as memory addresses.
 - Wrela has passing AES-GCM, SHA, HKDF, ML-KEM, X25519MLKEM768, and TLS
-  key-schedule tests for each supported backend.
+  key-schedule tests for each supported production backend.
 - Wrela can complete a TLS 1.3 handshake using Wrela-owned hybrid
   post-quantum crypto.
 - Wrela can perform an HTTP/1.1 HTTPS request.
