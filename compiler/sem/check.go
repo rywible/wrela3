@@ -292,6 +292,7 @@ func Check(index *Index, modules []*ast.Module) (*CheckedProgram, []diag.Diagnos
 	c.checkExecutorTopicGraph()
 	c.checkHardwareClaims()
 	c.validateArenaGraph()
+	c.checkCoreLinkEndpointOwnership()
 	c.checkStorageAuthority()
 	storage := c.checkStorageDecls()
 
@@ -3407,6 +3408,7 @@ func (c *checker) updateExecutorGraphNode(origin localOrigin, span source.Span) 
 		Type:             origin.Type,
 		Span:             span,
 		FieldBindings:    origin.FieldBindings,
+		fieldOrigins:     origin.FieldOrigins,
 		SlotLabel:        origin.SlotLabel,
 		LoopPolicy:       origin.LoopPolicy,
 		LoopStrategy:     origin.LoopStrategy,
@@ -3420,6 +3422,18 @@ func syntheticExecutorFieldBinding(expr *ast.ConstructorExpr, field string, span
 		return fmt.Sprintf("__executor_field_%d_%d_%s", expr.SpanV.Start, span.Start, field)
 	}
 	return fmt.Sprintf("__executor_field_%d_%s", span.Start, field)
+}
+
+func (c *checker) constructorFieldOrigins(moduleName string, expr *ast.ConstructorExpr, scope *Scope) map[string]localOrigin {
+	origins := map[string]localOrigin{}
+	if expr == nil {
+		return origins
+	}
+	for _, arg := range expr.Args {
+		argType := c.exprStaticType(moduleName, arg.Value, scope)
+		origins[arg.Name] = c.originForExprValue(moduleName, arg.Value, argType, scope)
+	}
+	return origins
 }
 
 func (c *checker) typeVcpuIntrinsicCall(moduleName string, expr *ast.CallExpr, scope *Scope, ctx ContextKind) {
@@ -3781,6 +3795,7 @@ func (c *checker) typeConstructorExpr(moduleName string, expr *ast.ConstructorEx
 			Type:          constructed,
 			Span:          expr.SpanV,
 			FieldBindings: fieldBindings,
+			fieldOrigins:  c.constructorFieldOrigins(moduleName, expr, scope),
 			FieldSpans:    fieldSpans,
 			BoundTypes:    boundTypes,
 			PathUses:      pathUses,

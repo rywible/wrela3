@@ -42,6 +42,18 @@ type ExecutorNode struct {
 	LoopStrategy     string
 	LoopFallback     string
 	MemoryOwnerLabel string
+	fieldOrigins     map[string]localOrigin
+}
+
+type CoreLinkEndpointUseNode struct {
+	Role         string
+	Owner        string
+	Endpoint     CoreLinkEndpointNode
+	EndpointOK   bool
+	ReceiverType *Type
+	ExecutorType *Type
+	FieldName    string
+	Span         source.Span
 }
 
 type ExecutorSlotNode struct {
@@ -283,6 +295,7 @@ type ImageGraph struct {
 	SharedInterruptSources  []SharedInterruptSourceNode
 	StoragePaths            []StoragePathNode
 	CoreLinkEndpoints       []CoreLinkEndpointNode
+	CoreLinkEndpointUses    []CoreLinkEndpointUseNode
 	ProjectionFeeds         []ProjectionFeedNode
 	StorageWriters          []StorageWriterNode
 	StorageAppendCalls      []StorageAppendCallNode

@@ -193,6 +193,39 @@ func TestCoreLinkWrongOwnerThroughAliasFails(t *testing.T) {
 	}
 }
 
+func TestCoreLinkWrongOwnerWithExecutorBeforeImageFails(t *testing.T) {
+	source := strings.Replace(coreLinkWrongOwnerSource,
+		"image CoreLinkWrongOwnerImage",
+		"executor EarlyWorker {\n    slot: ExecutorSlot\n    loop: HotPollPolicy\n    producer: CoreSpscProducer<U64>\n    consumer: CoreSpscConsumer<U64>\n\n    start fn run(self) -> never {\n        let sent = self.producer.try_send(value = 1)\n        while true {}\n    }\n}\n\nimage CoreLinkWrongOwnerImage",
+		1,
+	)
+	source = strings.Replace(source,
+		"let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)",
+		"let worker = EarlyWorker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)",
+		1,
+	)
+	modules := parseModulesForTest(t, strings.Split(source, "\n---\n")...)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
+	}
+}
+
+func TestCoreLinkWrongOwnerWithInlineEndpointFails(t *testing.T) {
+	source := strings.Replace(coreLinkWrongOwnerSource,
+		"let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)\n        let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)\n        let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)",
+		"let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)\n        let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake), consumer = consumer)",
+		1,
+	)
+	modules := parseModulesForTest(t, strings.Split(source, "\n---\n")...)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
+	}
+}
+
 func TestCoreLinkWrongOwnerNegativeFixtureFails(t *testing.T) {
 	modules := parseAuthorityFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", "core_link_wrong_owner.wrela"))
 	index := mustBuildIndex(t, modules)

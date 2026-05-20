@@ -430,15 +430,17 @@ func (c *checker) checkCoreLinkEndpointCall(moduleName string, expr *ast.CallExp
 	default:
 		return
 	}
-	owner := c.currentExecutorSlotLabel()
-	if owner == "" {
-		return
-	}
 	endpoint, ok := c.coreLinkEndpointForReceiver(moduleName, expr.Receiver, receiverType, role, scope)
-	if !ok || endpoint.Owner == "" || endpoint.Owner == owner {
-		return
-	}
-	c.error(expr.SpanV, diag.SEM0112, role+" endpoint owned by "+endpoint.Owner+" cannot be used by executor "+owner)
+	c.graph.CoreLinkEndpointUses = append(c.graph.CoreLinkEndpointUses, CoreLinkEndpointUseNode{
+		Role:         role,
+		Owner:        c.currentExecutorSlotLabel(),
+		Endpoint:     endpoint,
+		EndpointOK:   ok,
+		ReceiverType: receiverType,
+		ExecutorType: c.currentType,
+		FieldName:    selfFieldName(expr.Receiver),
+		Span:         expr.SpanV,
+	})
 }
 
 func (c *checker) currentExecutorSlotLabel() string {
@@ -453,13 +455,103 @@ func (c *checker) currentExecutorSlotLabel() string {
 	return ""
 }
 
+func (c *checker) checkCoreLinkEndpointOwnership() {
+	for _, use := range c.graph.CoreLinkEndpointUses {
+		if use.FieldName != "" && use.ExecutorType != nil {
+			resolved := false
+			for _, exec := range c.graph.Executors {
+				if exec.Type == nil || exec.Type.Key() != use.ExecutorType.Key() {
+					continue
+				}
+				endpoint, ok := c.coreLinkEndpointForExecutorNodeField(use.Role, exec, use.FieldName)
+				if !ok {
+					continue
+				}
+				resolved = true
+				c.checkCoreLinkEndpointUse(use, exec.SlotLabel, endpoint, ok)
+			}
+			if resolved {
+				continue
+			}
+		}
+		owner := use.Owner
+		if owner == "" {
+			owner = c.executorSlotForType(use.ExecutorType)
+		}
+		c.checkCoreLinkEndpointUse(use, owner, use.Endpoint, use.EndpointOK)
+	}
+}
+
+func (c *checker) checkCoreLinkEndpointUse(use CoreLinkEndpointUseNode, owner string, endpoint CoreLinkEndpointNode, endpointOK bool) {
+	if !endpointOK || endpoint.Owner == "" || endpoint.Owner == owner {
+		return
+	}
+	c.error(use.Span, diag.SEM0112, use.Role+" endpoint owned by "+endpoint.Owner+" cannot be used by executor "+owner)
+}
+
+func (c *checker) executorSlotForType(typ *Type) string {
+	if c.currentType != nil && c.currentType.Kind == KindExecutor {
+		for _, exec := range c.graph.Executors {
+			if exec.Type != nil && exec.Type.Key() == c.currentType.Key() {
+				return exec.SlotLabel
+			}
+		}
+	}
+	if typ == nil {
+		return ""
+	}
+	for _, exec := range c.graph.Executors {
+		if exec.Type != nil && exec.Type.Key() == typ.Key() {
+			return exec.SlotLabel
+		}
+	}
+	return ""
+}
+
+func (c *checker) coreLinkEndpointForExecutorField(role string, typ *Type, fieldName string) (CoreLinkEndpointNode, bool) {
+	if typ == nil || fieldName == "" {
+		return CoreLinkEndpointNode{}, false
+	}
+	for _, exec := range c.graph.Executors {
+		if exec.Type == nil || exec.Type.Key() != typ.Key() {
+			continue
+		}
+		if endpoint, ok := c.coreLinkEndpointForExecutorNodeField(role, exec, fieldName); ok {
+			return endpoint, true
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) coreLinkEndpointForExecutorNodeField(role string, exec ExecutorNode, fieldName string) (CoreLinkEndpointNode, bool) {
+	if origin, ok := exec.fieldOrigins[fieldName]; ok {
+		return c.coreLinkEndpointForOrigin(role, origin)
+	}
+	if binding := exec.FieldBindings[fieldName]; binding != "" {
+		return c.coreLinkEndpointForOrigin(role, localOrigin{FieldBindings: map[string]string{"self": binding}})
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
 func (c *checker) coreLinkEndpointForReceiver(moduleName string, receiver ast.Expr, receiverType *Type, role string, scope *Scope) (CoreLinkEndpointNode, bool) {
 	origin := c.originForExprValue(moduleName, receiver, receiverType, scope)
 	if origin.Constructor != nil {
 		return c.coreLinkEndpointForConstructor(role, origin.Constructor)
 	}
 	if field, ok := receiver.(*ast.FieldExpr); ok {
-		if binding := c.currentExecutorFieldBinding(field); binding != "" {
+		if origin, ok := c.currentExecutorFieldOrigin(field); ok {
+			return c.coreLinkEndpointForOrigin(role, origin)
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) coreLinkEndpointForOrigin(role string, origin localOrigin) (CoreLinkEndpointNode, bool) {
+	if origin.Constructor != nil {
+		return c.coreLinkEndpointForConstructor(role, origin.Constructor)
+	}
+	if origin.FieldBindings != nil {
+		if binding := origin.FieldBindings["self"]; binding != "" {
 			return c.coreLinkEndpointForBinding(role, binding)
 		}
 	}
@@ -478,20 +570,37 @@ func (c *checker) coreLinkEndpointForConstructor(role string, constructor *ast.C
 	return CoreLinkEndpointNode{}, false
 }
 
-func (c *checker) currentExecutorFieldBinding(field *ast.FieldExpr) string {
+func (c *checker) currentExecutorFieldOrigin(field *ast.FieldExpr) (localOrigin, bool) {
 	if c.currentType == nil || field == nil || field.Field == "" {
+		return localOrigin{}, false
+	}
+	base, ok := field.Base.(*ast.NameExpr)
+	if !ok || base.Name != "self" {
+		return localOrigin{}, false
+	}
+	for _, exec := range c.graph.Executors {
+		if exec.Type != nil && exec.Type.Key() == c.currentType.Key() {
+			if origin, ok := exec.fieldOrigins[field.Field]; ok {
+				return origin, true
+			}
+			if binding := exec.FieldBindings[field.Field]; binding != "" {
+				return localOrigin{FieldBindings: map[string]string{"self": binding}}, true
+			}
+		}
+	}
+	return localOrigin{}, false
+}
+
+func selfFieldName(expr ast.Expr) string {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok || field.Field == "" {
 		return ""
 	}
 	base, ok := field.Base.(*ast.NameExpr)
 	if !ok || base.Name != "self" {
 		return ""
 	}
-	for _, exec := range c.graph.Executors {
-		if exec.Type != nil && exec.Type.Key() == c.currentType.Key() {
-			return exec.FieldBindings[field.Field]
-		}
-	}
-	return ""
+	return field.Field
 }
 
 func (c *checker) coreLinkEndpointForBinding(role string, binding string) (CoreLinkEndpointNode, bool) {
