@@ -1,6 +1,9 @@
 package sem
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ryanwible/wrela3/compiler/diag"
@@ -139,6 +142,44 @@ event A id 1 {
 	if !hasMessage(ds, diag.CG0001, "type mismatch") {
 		t.Fatalf("diagnostics = %#v, want CG0001 type mismatch", ds)
 	}
+}
+
+func TestEventLayoutEncodeRejectsNestedUnpublishedBlobRef(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	src, err := os.ReadFile(filepath.Join(wd, "..", "..", "tests", "fixtures", "negative", "event_layout_encode_unpublished_blob_nested.wrela"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	fixture := strings.SplitN(string(src), "\n", 2)
+	if len(fixture) != 2 {
+		t.Fatalf("fixture missing body")
+	}
+	modules := parseModulesForTest(t, splitModulesForSemTest(fixture[1])...)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0117) {
+		t.Fatalf("diagnostics = %#v, want SEM0117", ds)
+	}
+}
+
+func splitModulesForSemTest(src string) []string {
+	lines := strings.Split(src, "\n")
+	var out []string
+	var current []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "module ") && len(current) != 0 {
+			out = append(out, strings.Join(current, "\n"))
+			current = nil
+		}
+		current = append(current, line)
+	}
+	if len(current) != 0 {
+		out = append(out, strings.Join(current, "\n"))
+	}
+	return out
 }
 
 func TestEventLayoutPayloadFieldMetadata(t *testing.T) {

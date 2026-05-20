@@ -126,7 +126,12 @@ data LocalApic {
     }
 
     fn enable(self) {
+        self.mmio().write32(offset = 0x80, value = 0)
         self.mmio().write32(offset = 0xF0, value = 0x1FF)
+        let spurious_vector = self.mmio().read32(offset = 0xF0)
+        if (spurious_vector & 0x100) == 0 {
+            self.panic.fail(code = 0xAC050012)
+        }
     }
 
     fn eoi(self) {

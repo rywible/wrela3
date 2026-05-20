@@ -509,6 +509,35 @@ func TestStorageWriterAdvancesEventIDsAcrossAppends(t *testing.T) {
 	}
 }
 
+func TestStorageWriterConsumesReservedEmptyEventIDs(t *testing.T) {
+	writer := WriterPolicy{}
+	first := writer.EnqueueAtomicGroupWithReserved(2, 6)
+	second := writer.EnqueueAtomicGroup(1)
+	if !first.Accepted || !second.Accepted {
+		t.Fatalf("appends rejected: first=%#v second=%#v", first, second)
+	}
+	if first.FirstEventID != 0 || first.LastEventID != 1 {
+		t.Fatalf("first append = %#v, want event ids 0..1", first)
+	}
+	if second.FirstEventID != 8 || second.LastEventID != 8 {
+		t.Fatalf("second append = %#v, want event id 8 after reserved empty slots", second)
+	}
+	if writer.NextEventID != 9 || writer.OpenBatchSlots != 9 {
+		t.Fatalf("writer state = %#v, want next_event_id=9 open_batch_slots=9", writer)
+	}
+}
+
+func TestStorageWriterRejectsReservedEmptyOverflow(t *testing.T) {
+	writer := WriterPolicy{NextEventID: 4, OpenBatchSlots: 1}
+	got := writer.EnqueueAtomicGroupWithReserved(2, StorageMaxBatchSlots)
+	if got.Accepted || got.RejectCode != "SEM0114" {
+		t.Fatalf("enqueue = %#v, want SEM0114 rejection", got)
+	}
+	if writer.NextEventID != 4 || writer.OpenBatchSlots != 1 {
+		t.Fatalf("writer state mutated on rejection: %#v", writer)
+	}
+}
+
 func TestStreamDirectoryMath(t *testing.T) {
 	dir := StreamDirectory{NextStreamID: 8}
 	if !dir.Exists(7) || dir.Exists(8) {

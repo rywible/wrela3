@@ -390,10 +390,44 @@ func isUnpublishedBlobRefType(typ *Type) bool {
 }
 
 func eventEncodeReferencesUnpublishedBlob(expr ast.Expr, eventFieldTypes map[string]*Type) bool {
-	field, ok := expr.(*ast.FieldExpr)
-	if !ok {
+	if expr == nil {
 		return false
 	}
+	switch e := expr.(type) {
+	case *ast.FieldExpr:
+		if selfFieldReferencesUnpublishedBlob(e, eventFieldTypes) {
+			return true
+		}
+		return eventEncodeReferencesUnpublishedBlob(e.Base, eventFieldTypes)
+	case *ast.CallExpr:
+		if eventEncodeReferencesUnpublishedBlob(e.Receiver, eventFieldTypes) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if eventEncodeReferencesUnpublishedBlob(arg.Value, eventFieldTypes) {
+				return true
+			}
+		}
+	case *ast.ConstructorExpr:
+		for _, arg := range e.Args {
+			if eventEncodeReferencesUnpublishedBlob(arg.Value, eventFieldTypes) {
+				return true
+			}
+		}
+	case *ast.VariantConstructorExpr:
+		for _, arg := range e.Args {
+			if eventEncodeReferencesUnpublishedBlob(arg.Value, eventFieldTypes) {
+				return true
+			}
+		}
+	case *ast.BinaryExpr:
+		return eventEncodeReferencesUnpublishedBlob(e.Left, eventFieldTypes) ||
+			eventEncodeReferencesUnpublishedBlob(e.Right, eventFieldTypes)
+	}
+	return false
+}
+
+func selfFieldReferencesUnpublishedBlob(field *ast.FieldExpr, eventFieldTypes map[string]*Type) bool {
 	base, ok := field.Base.(*ast.NameExpr)
 	if !ok || base.Name != "self" {
 		return false

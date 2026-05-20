@@ -55,6 +55,27 @@ func TestNvmeEventStorageReplayQEMU(t *testing.T) {
 	}
 }
 
+func TestNvmeEventStorageReplayQEMU4KiBLBA(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "storage.raw")
+	createSparseRawDisk(t, disk, nvmeStorageDiskBytes)
+	first := runStorageQEMUWithBlockSize(t, disk, "first", 4096)
+	if !strings.Contains(first, "NVME_STORAGE_APPEND_OK last_event_id=1") {
+		t.Fatalf("first boot missing append marker:\n%s", first)
+	}
+	assertFirstAppendEventSlots(t, disk)
+	assertFirstAppendReservedEmptySlots(t, disk)
+	second := runStorageQEMUWithBlockSize(t, disk, "replay", 4096)
+	for _, want := range []string{
+		"NVME_STORAGE_REPLAY_OK last_event_id=1",
+		"projection_watermark=1",
+		"NVME_ORPHAN_COLLECTION_OK",
+	} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second boot missing %q:\n%s", want, second)
+		}
+	}
+}
+
 func TestNvmeEventStorageInvalidModeQEMU(t *testing.T) {
 	disk := filepath.Join(t.TempDir(), "storage.raw")
 	createSparseRawDisk(t, disk, nvmeStorageDiskBytes)
@@ -65,6 +86,23 @@ func TestNvmeEventStorageInvalidModeQEMU(t *testing.T) {
 	createSparseRawDisk(t, prefixDisk, nvmeStorageDiskBytes)
 	prefixOut, prefixErr := runStorageQEMUResult(t, prefixDisk, "first-bad")
 	assertInvalidStorageMode(t, prefixOut, prefixErr)
+}
+
+func assertFirstAppendReservedEmptySlots(t *testing.T, disk string) {
+	t.Helper()
+	f, err := os.Open(disk)
+	if err != nil {
+		t.Fatalf("open storage disk: %v", err)
+	}
+	defer f.Close()
+
+	for i := uint64(2); i < 8; i++ {
+		slot := make([]byte, storagefmt.EventSlotSize)
+		if _, err := f.ReadAt(slot, nvmeStorageHotEventRegionOffset+int64(i*storagefmt.EventSlotSize)); err != nil {
+			t.Fatalf("read reserved empty slot %d: %v", i, err)
+		}
+		assertReservedEmptyEventSlot(t, slot, i)
+	}
 }
 
 func assertInvalidStorageMode(t *testing.T, out string, err error) {
@@ -99,6 +137,7 @@ func assertFirstAppendEventSlots(t *testing.T, disk string) {
 			t.Fatalf("read hot event slot %d: %v", i, err)
 		}
 		assertFirstAppendEventSlot(t, slot, i, streamSequences[i], eventTypes[i], 2, uint32(i))
+		assertFirstAppendOrphanPayload(t, slot, i)
 	}
 }
 
@@ -125,8 +164,8 @@ func assertFirstAppendEventSlot(t *testing.T, slot []byte, eventID, streamSequen
 	if got := binary.LittleEndian.Uint32(slot[36:40]); got != atomicGroupIndex {
 		t.Fatalf("hot event slot %d atomic_group_index = %d, want %d", eventID, got, atomicGroupIndex)
 	}
-	if got := binary.LittleEndian.Uint32(slot[40:44]); got != 0 {
-		t.Fatalf("hot event slot %d payload_length = %d, want 0", eventID, got)
+	if got := binary.LittleEndian.Uint32(slot[40:44]); got != 48 {
+		t.Fatalf("hot event slot %d payload_length = %d, want 48", eventID, got)
 	}
 	if got := binary.LittleEndian.Uint16(slot[52:54]); got != 1 {
 		t.Fatalf("hot event slot %d header_version = %d, want 1", eventID, got)
@@ -141,5 +180,52 @@ func assertFirstAppendEventSlot(t *testing.T, slot []byte, eventID, streamSequen
 	}
 	if want := storagefmt.CRC32C(checksummed); gotChecksum != want {
 		t.Fatalf("hot event slot %d checksum32 = %#x, want CRC32C %#x", eventID, gotChecksum, want)
+	}
+}
+
+func assertFirstAppendOrphanPayload(t *testing.T, slot []byte, eventID uint64) {
+	t.Helper()
+	payload := slot[storagefmt.EventHeaderSize:]
+	var want []uint64
+	if eventID == 0 {
+		want = []uint64{10, 20, 2}
+	} else {
+		want = []uint64{20, 40, 2, 20, 44, 3}
+	}
+	for i, expected := range want {
+		got := binary.LittleEndian.Uint64(payload[i*8 : i*8+8])
+		if got != expected {
+			t.Fatalf("hot event slot %d orphan payload word %d = %d, want %d", eventID, i, got, expected)
+		}
+	}
+}
+
+func assertReservedEmptyEventSlot(t *testing.T, slot []byte, eventID uint64) {
+	t.Helper()
+	if got := binary.LittleEndian.Uint64(slot[0:8]); got != eventID {
+		t.Fatalf("reserved empty slot event_id = %d, want %d", got, eventID)
+	}
+	if got := binary.LittleEndian.Uint64(slot[8:16]); got != 0 {
+		t.Fatalf("reserved empty slot %d stream_id = %d, want 0", eventID, got)
+	}
+	if got := binary.LittleEndian.Uint32(slot[24:28]); got != 0 {
+		t.Fatalf("reserved empty slot %d event_type_id = %d, want 0", eventID, got)
+	}
+	if got := binary.LittleEndian.Uint32(slot[44:48]); got != storagefmt.StorageSlotReservedEmpty {
+		t.Fatalf("reserved empty slot %d flags = %#x, want reserved empty", eventID, got)
+	}
+	if got := binary.LittleEndian.Uint16(slot[52:54]); got != 1 {
+		t.Fatalf("reserved empty slot %d header_version = %d, want 1", eventID, got)
+	}
+	gotChecksum := binary.LittleEndian.Uint32(slot[storagefmt.Checksum32Offset : storagefmt.Checksum32Offset+4])
+	if gotChecksum == 0 {
+		t.Fatalf("reserved empty slot %d checksum32 is zero", eventID)
+	}
+	checksummed := append([]byte(nil), slot...)
+	for i := uint64(0); i < 4; i++ {
+		checksummed[storagefmt.Checksum32Offset+i] = 0
+	}
+	if want := storagefmt.CRC32C(checksummed); gotChecksum != want {
+		t.Fatalf("reserved empty slot %d checksum32 = %#x, want CRC32C %#x", eventID, gotChecksum, want)
 	}
 }

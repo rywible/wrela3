@@ -60,7 +60,7 @@ func (c *checker) recordStoragePathConstructor(moduleName string, expr *ast.Cons
 	role := storagePathRole(constructorArg(expr, "role"))
 	owner := c.storagePathOwnerLabel(moduleName, constructorArg(expr, "owner"), scope)
 	queueID, _ := unsignedIntegerLiteral(constructorArg(expr, "queue_id"))
-	vector, _ := unsignedIntegerLiteral(constructorArg(expr, "vector"))
+	vector, _ := storagePathVectorValue(constructorArg(expr, "vector"))
 	c.graph.StoragePaths = append(c.graph.StoragePaths, StoragePathNode{
 		Label:   label,
 		Role:    role,
@@ -69,6 +69,75 @@ func (c *checker) recordStoragePathConstructor(moduleName string, expr *ast.Cons
 		Vector:  uint8(vector),
 		Span:    expr.SpanV,
 	})
+	topicKind, eventType, eventFunctionSymbol := pathRouteMetadata(typ)
+	if eventType != "" {
+		if publisher := c.pathPublisherOrigin(moduleName, expr, scope); publisher.Type != nil && publisher.TopicLabel != "" {
+			c.recordInterruptTopicRoute(InterruptTopicRouteNode{
+				Vector:              int(vector),
+				PathLabel:           label,
+				ContextSymbol:       interruptContextSymbol(label),
+				TopicLabel:          publisher.TopicLabel,
+				TopicKind:           topicKind,
+				EventType:           eventType,
+				EventFunctionSymbol: eventFunctionSymbol,
+				Span:                expr.SpanV,
+			})
+		}
+	}
+}
+
+func (c *checker) recordNestedInterruptPathRoutes(binding string, origin localOrigin, span source.Span) {
+	if binding == "" || origin.Type == nil || len(origin.FieldOrigins) == 0 {
+		return
+	}
+	if !isNvmeStoragePathWrapper(origin.Type) {
+		return
+	}
+	for fieldName, fieldOrigin := range origin.FieldOrigins {
+		if fieldOrigin.Type == nil || fieldOrigin.Type.Kind != KindDriverPath {
+			continue
+		}
+		if fieldOrigin.EventType == "" || fieldOrigin.TopicLabel == "" {
+			continue
+		}
+		vector := fieldOrigin.PathVector
+		if vector == 0 {
+			for _, path := range c.graph.StoragePaths {
+				if path.Label == fieldOrigin.PathLabel {
+					vector = int(path.Vector)
+					break
+				}
+			}
+		}
+		publishes := fieldOrigin.PublishesInterrupts || fieldOrigin.TopicLabel != ""
+		c.graph.Paths = append(c.graph.Paths, PathNode{
+			Label:               fieldOrigin.PathLabel,
+			Kind:                fieldOrigin.TopicKind,
+			Binding:             binding,
+			PublishesInterrupts: publishes,
+			Span:                span,
+		})
+		c.recordInterruptTopicRoute(InterruptTopicRouteNode{
+			Vector:              vector,
+			PathLabel:           fieldOrigin.PathLabel,
+			PathBinding:         binding,
+			PathBindingType:     origin.Type,
+			PathField:           fieldName,
+			ContextSymbol:       interruptContextSymbol(fieldOrigin.PathLabel),
+			TopicLabel:          fieldOrigin.TopicLabel,
+			TopicKind:           fieldOrigin.TopicKind,
+			EventType:           fieldOrigin.EventType,
+			EventFunctionSymbol: fieldOrigin.EventFunctionSymbol,
+			Span:                span,
+		})
+	}
+}
+
+func isNvmeStoragePathWrapper(typ *Type) bool {
+	if typ == nil || typ.Module != "machine.x86_64.nvme" {
+		return false
+	}
+	return typ.Name == "ForegroundStoragePath" || typ.Name == "BackgroundStoragePath"
 }
 
 func (c *checker) recordCoreLinkEndpointConstructor(moduleName string, expr *ast.ConstructorExpr, typ *Type, scope *Scope) {
@@ -89,7 +158,7 @@ func (c *checker) recordCoreLinkEndpointConstructor(moduleName string, expr *ast
 	}
 	owner := c.storagePathOwnerLabel(moduleName, constructorArg(expr, "owner"), scope)
 	peer := c.storagePathOwnerLabel(moduleName, constructorArg(expr, "peer"), scope)
-	depth, _ := unsignedIntegerLiteral(constructorArg(expr, "capacity"))
+	depth := c.storageGraphUintArg(moduleName, constructorArg(expr, "capacity"))
 	c.graph.CoreLinkEndpoints = append(c.graph.CoreLinkEndpoints, CoreLinkEndpointNode{
 		Label:     fmt.Sprintf("core_link.%s.%d", role, len(c.graph.CoreLinkEndpoints)),
 		Direction: direction,
@@ -99,6 +168,18 @@ func (c *checker) recordCoreLinkEndpointConstructor(moduleName string, expr *ast
 		Depth:     depth,
 		Span:      expr.SpanV,
 	})
+}
+
+func (c *checker) storageGraphUintArg(moduleName string, expr ast.Expr) uint64 {
+	if value, ok := unsignedIntegerLiteral(expr); ok {
+		return value
+	}
+	if named, ok := expr.(*ast.NameExpr); ok {
+		if value, ok := c.index.LookupConst(moduleName, named.Name); ok && value.Type != nil {
+			return value.Value
+		}
+	}
+	return 0
 }
 
 func (c *checker) storagePathOwnerLabel(moduleName string, expr ast.Expr, scope *Scope) string {
@@ -147,6 +228,24 @@ func storagePathRole(expr ast.Expr) string {
 		return "background"
 	default:
 		return ""
+	}
+}
+
+func storagePathVectorValue(expr ast.Expr) (uint64, bool) {
+	if value, ok := unsignedIntegerLiteral(expr); ok {
+		return value, true
+	}
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok {
+		return 0, false
+	}
+	switch field.Field {
+	case "foreground_vector":
+		return 0x50, true
+	case "background_vector":
+		return 0x51, true
+	default:
+		return 0, false
 	}
 }
 

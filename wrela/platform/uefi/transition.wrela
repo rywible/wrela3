@@ -78,11 +78,16 @@ unique class DelegatedHardware {
             vector42_handler = self.capture_vector42_ivshmem_msix_handler(),
             vectorf0_handler = self.capture_vectorf0_wake_handler()
         )
+        let idt_with_nvme = self.delegated_memory.install_nvme_interrupt_idt_gates(
+            idt = idt,
+            vector50_handler = self.capture_vector50_nvme_foreground_handler(),
+            vector51_handler = self.capture_vector51_nvme_background_handler()
+        )
         self.activate_owned_hardware(
             owned_stack_top = cpu_plan.owned_stack_top,
             cr3_value = pml4,
             gdt_base = gdt.address,
-            idt_base = idt.address
+            idt_base = idt_with_nvme.address
         )
 
         return OwnedHardware(
@@ -165,6 +170,26 @@ unique class DelegatedHardware {
     vector42_ivshmem_msix_handler:
         jmp _wrela_interrupt_vector42_ivshmem_msix
     vector42_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vector50_nvme_foreground_handler(self) -> VirtualAddress {
+        // Capture the address of vector50_nvme_foreground_handler without executing it.
+        call vector50_capture_return
+    vector50_nvme_foreground_handler:
+        jmp _wrela_interrupt_vector50_nvme_foreground
+    vector50_capture_return:
+        pop rax
+        ret
+    }
+
+    asm fn capture_vector51_nvme_background_handler(self) -> VirtualAddress {
+        // Capture the address of vector51_nvme_background_handler without executing it.
+        call vector51_capture_return
+    vector51_nvme_background_handler:
+        jmp _wrela_interrupt_vector51_nvme_background
+    vector51_capture_return:
         pop rax
         ret
     }

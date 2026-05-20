@@ -271,6 +271,7 @@ func compileInterruptBindings(bindings []ir.InterruptBinding) []InterruptBinding
 			HandlerFunctionSymbol: binding.HandlerFunctionSymbol,
 			PathFieldOffset:       binding.PathFieldOffset,
 			ContextSymbol:         binding.ContextSymbol,
+			ContextSize:           binding.ContextSize,
 			EventStorageSymbol:    binding.EventStorageSymbol,
 			EventStorageSize:      binding.EventStorageSize,
 			Vector:                binding.Vector,
@@ -299,7 +300,7 @@ func compileInterruptDispatchUnits(program *ir.Program, ctx compileContext) ([]c
 		bindings[binding.Vector] = binding
 	}
 
-	known := []uint8{0x40, 0x41, 0x42, 0x43, 0xF0}
+	known := []uint8{0x40, 0x41, 0x42, 0x43, 0x50, 0x51, 0xF0}
 	units := make([]compiledUnit, 0, len(known))
 	for _, vector := range known {
 		symbol := interruptVectorSymbol(vector)
@@ -344,6 +345,10 @@ func interruptVectorSymbol(vector uint8) string {
 		return "_wrela_interrupt_vector42_ivshmem_msix"
 	case 0x43:
 		return "_wrela_interrupt_vector43_timer"
+	case 0x50:
+		return "_wrela_interrupt_vector50_nvme_foreground"
+	case 0x51:
+		return "_wrela_interrupt_vector51_nvme_background"
 	case 0xF0:
 		return "_wrela_interrupt_vectorf0_wake"
 	default:
@@ -691,7 +696,10 @@ func interruptRuntimeData(program *ir.Program) []ir.DataObject {
 		if binding.ContextSymbol == "" || seenContexts[binding.ContextSymbol] {
 			continue
 		}
-		size := binding.PathFieldOffset + 8
+		size := binding.ContextSize
+		if size < binding.PathFieldOffset+8 {
+			size = binding.PathFieldOffset + 8
+		}
 		if size < 8 {
 			size = 8
 		}
@@ -2760,6 +2768,24 @@ func emitFieldStore(e *Emitter, op *ir.FieldStore, frame Frame) {
 }
 
 func emitInterruptContextStore(e *Emitter, frame Frame, store *ir.InterruptContextStore) {
+	if store.StorageOffset > 0 {
+		srcBase, srcDisp, ok := emitValueAddress(e, frame, store.Source)
+		if !ok {
+			e.Diags = append(e.Diags, diag.Diagnostic{Phase: diagnosticPhase, Code: diag.CG0001, Message: "cannot address interrupt context source"})
+			return
+		}
+		emitMovDataAddressToReg(e, asm.MustLookup("rax"), store.ContextSymbol)
+		emitStoreNestedDestinationHandle(e, asm.MustLookup("rax"), int64(store.ContextOffset), int64(store.StorageOffset))
+		emitRegRegMove(e, asm.MustLookup("rdi"), asm.MustLookup("rax"))
+		if store.StorageOffset != 0 {
+			e.emitInstruction(asm.Instruction{Mnemonic: "add", Operands: []asm.Operand{
+				asm.RegOperand{Reg: asm.MustLookup("rdi")},
+				asm.ImmOperand{Value: int64(store.StorageOffset)},
+			}})
+		}
+		emitDeepCopyObjectToAddressAsType(e, store.SourceType, srcBase, srcDisp, asm.MustLookup("rdi"), 0)
+		return
+	}
 	if store.Size == 8 && e.ctx.isHandleType(valueType(store.Source).Name) {
 		emitLoadValue(e, frame, store.Source, asm.MustLookup("rcx"))
 		emitMovDataAddressToReg(e, asm.MustLookup("rax"), store.ContextSymbol)

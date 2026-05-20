@@ -1,0 +1,23 @@
+// expect: SEM0117: event payload cannot reference unpublished blob bytes
+module storage.blob
+
+data BlobRef {
+    blob_id: U64
+    start_lba: U64
+    block_count: U64
+}
+
+data UnpublishedBlobRef {
+    ref: BlobRef
+    manifest_lba: U64
+}
+
+module storage.bad_encode_nested_unpublished_blob
+use { UnpublishedBlobRef } from storage.blob
+
+event A id 1 {
+    unpublished: UnpublishedBlobRef
+    layout 1 current {
+        blob_id: U64 = self.unpublished.ref.blob_id
+    }
+}

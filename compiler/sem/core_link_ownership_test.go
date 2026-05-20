@@ -19,9 +19,9 @@ data ExecutorSlot { id: U64 }
 ---
 
 module machine.x86_64.executor_memory
-data Slots<T> {
+data MutableSlice<T> {
     address: U64
-    capacity: U64
+    length: U64
 }
 
 ---
@@ -48,14 +48,15 @@ class ExecutorRegistry {
 
 module machine.x86_64.core_link
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { Slots } from machine.x86_64.executor_memory
+use { MutableSlice } from machine.x86_64.executor_memory
 use { WakeStrategy } from machine.x86_64.executor_loop
 use { Unit } from wrela.lang.core
 data CoreLinkFull {}
 class CoreSpscProducer<T> {
     owner: ExecutorSlot
     peer: ExecutorSlot
-    slots: Slots<T>
+    slots: MutableSlice<T>
+    control: MutableSlice<U64>
     capacity: U64
     head: U64
     tail: U64
@@ -69,7 +70,8 @@ class CoreSpscProducer<T> {
 class CoreSpscConsumer<T> {
     owner: ExecutorSlot
     peer: ExecutorSlot
-    slots: Slots<T>
+    slots: MutableSlice<T>
+    control: MutableSlice<U64>
     capacity: U64
     head: U64
     tail: U64
@@ -87,7 +89,7 @@ module sem.core_link_wrong_owner
 
 use { CoreSpscConsumer, CoreSpscProducer } from machine.x86_64.core_link
 use { ExecutorSlot } from machine.x86_64.executor_slot
-use { Slots } from machine.x86_64.executor_memory
+use { MutableSlice } from machine.x86_64.executor_memory
 use { HotPollPolicy, WakeStrategy } from machine.x86_64.executor_loop
 use { ExecutorRegistry, SlotIdentity } from machine.x86_64.cpu_state
 
@@ -110,10 +112,11 @@ image CoreLinkWrongOwnerImage {
     phase owned_hardware(hardware: OwnedHardware) -> never {
         let producer_owner = ExecutorSlot(id = 0)
         let consumer_owner = hardware.executors.claim(identity = SlotIdentity(label = "executor_slot.1"))
-        let slots = Slots<U64>(address = 0, capacity = 8)
+        let slots = MutableSlice<U64>(address = 0, length = 8)
+        let control = MutableSlice<U64>(address = 64, length = 3)
         let wake = WakeStrategy(monitor_mwait = false, fallback_hlt = true)
-        let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)
-        let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)
+        let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)
+        let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)
         let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)
         while true {}
     }

@@ -123,6 +123,7 @@ func parseFileModelModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{
 		repoPath(t, "wrela/lang/core.wrela"),
+		repoPath(t, "wrela/machine/x86_64/executor_memory.wrela"),
 		repoPath(t, "wrela/storage/blob.wrela"),
 		repoPath(t, "wrela/storage/projections.wrela"),
 		repoPath(t, "wrela/storage/file_model.wrela"),

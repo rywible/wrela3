@@ -94,7 +94,10 @@ image ProductionSubstrate {
                 ivshmem_rx_msix = ivshmem_rx.claim_msix(table_bar_index = 1),
                 ivshmem_tx_bar0 = ivshmem_tx.claim_mmio_bar(index = 0),
                 nvme_bar0 = empty_pci.nvme_bar0,
-                nvme_device = empty_pci.nvme_device
+                nvme_device = empty_pci.nvme_device,
+                nvme_interrupt_routes = empty_pci.nvme_interrupt_routes,
+                nvme_foreground_interrupt_entry = empty_pci.nvme_foreground_interrupt_entry,
+                nvme_background_interrupt_entry = empty_pci.nvme_background_interrupt_entry
             ),
             timer = timer,
             serial_irq_queue = serial_irq_queue,

@@ -227,7 +227,10 @@ Identify Namespace byte offsets used by v1 tests:
 LBAF[i] byte 2 contains LBADS, so logical_block_size = 1 << LBADS
 ```
 
-FLBAS byte 26 follows the NVMe Identify Namespace layout and is the implementation contract now.
+Governance note: this plan originally listed FLBAS at byte 24. The separate
+2026-05-19 design update in `docs/design/2026-05-18-nvme-event-storage-design.md`
+corrects the frozen contract to byte 26, matching the NVMe Identify Namespace
+layout and the implementation.
 
 Identify Controller byte offsets used by v1 tests:
 
@@ -2568,7 +2571,8 @@ git commit -m "feat: add dense stream directory -Codex Automated"
 - `EnqueueAtomicGroup` rejects groups larger than 32.
 - A two-event group at 63 open slots produces 65-slot overflow and requests flush.
 - First two-event atomic group gets append-log `event_id` values 0 and 1.
-- Mirror contract: Wrela `StorageWriter.enqueue_atomic_group` field updates match host `WriterPolicy.EnqueueAtomicGroup` for accept/reject, open-slot count, flush request, and assigned `event_id` range.
+- 4 KiB reserved empty padding consumes append-log `event_id` positions before the next semantic event is assigned.
+- Mirror contract: Wrela `StorageWriter.enqueue_atomic_group` field updates match host `WriterPolicy.EnqueueAtomicGroup` and `WriterPolicy.EnqueueAtomicGroupWithReserved` for accept/reject, open-slot count, flush request, reserved empty slot consumption, and assigned `event_id` range.
 
 **Code Examples:**
 
@@ -2589,13 +2593,20 @@ type EnqueueResult struct {
 	RejectCode string
 }
 
-func (w WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+func (w *WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+	return w.EnqueueAtomicGroupWithReserved(semanticSlots, 0)
+}
+
+func (w *WriterPolicy) EnqueueAtomicGroupWithReserved(semanticSlots uint64, reservedEmptySlots uint64) EnqueueResult {
 	if semanticSlots > StorageMaxAtomicGroupSlots {
 		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
 	}
+	consumedSlots := semanticSlots + reservedEmptySlots
 	first := w.NextEventID
 	last := first + semanticSlots - 1
-	open := w.OpenBatchSlots + semanticSlots
+	open := w.OpenBatchSlots + consumedSlots
+	w.NextEventID = first + consumedSlots
+	w.OpenBatchSlots = open
 	return EnqueueResult{
 		Accepted: true,
 		FirstEventID: first,
@@ -2622,7 +2633,7 @@ Expected: FAIL because `WriterPolicy` is undefined.
 
 - [ ] **Step 2: Implement host writer policy**
 
-Add exactly `WriterPolicy`, `EnqueueResult`, and `(WriterPolicy).EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult` as shown above. Add `AssignEventIDs(first uint64, count uint64) (firstEventID uint64, lastEventID uint64)` and make it return `(first, first+count-1)`; callers must reject `count == 0` before calling it.
+Add exactly `WriterPolicy`, `EnqueueResult`, `(WriterPolicy).EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult`, and `(WriterPolicy).EnqueueAtomicGroupWithReserved(semanticSlots uint64, reservedEmptySlots uint64) EnqueueResult` as shown above. Add `AssignEventIDs(first uint64, count uint64) (firstEventID uint64, lastEventID uint64)` and make it return `(first, first+count-1)`; callers must reject `count == 0` before calling it.
 
 Run: same command.
 
@@ -2630,7 +2641,7 @@ Expected: PASS.
 
 - [ ] **Step 3: Add Wrela writer source and mirror test**
 
-Create `wrela/storage/writer.wrela` with `StorageWriter`, `PendingAtomicGroup`, `CommittedAtomicGroup`, `CommitToken`, and `StorageAppendResult`.
+Create `wrela/storage/writer.wrela` with `StorageWriter`, `PendingAtomicGroup`, `CommittedAtomicGroup`, `CommitToken`, and `StorageAppendResult`. `PendingAtomicGroup` carries both `semantic_event_count` and `reserved_empty_slot_count` so 4 KiB LBA padding consumes durable slot IDs.
 
 Add `TestStorageWriterSourceMirrorContract` to assert `StorageWriter.enqueue_atomic_group`, `StorageWriter.on_durability_completed`, `StorageWriter.publish_committed_group`, and `StorageWriter.publish_blob_ref` exist with those exact names.
 

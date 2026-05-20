@@ -1,6 +1,7 @@
 module tests.e2e.fixtures.nvme_event_storage.program
 
-use { BlobOrphanCollector, BlobRef, BlobTruth, Extent, PublishedBlobRef, RelocateBlobProposal } from storage.blob
+use { BLOB_ALLOCATOR_FREE_EXTENT_LIMIT, BlobOrphanCollector, BlobRef, BlobTruth, Extent, PublishedBlobRef, RelocateBlobProposal } from storage.blob
+use { MutableSlice } from machine.x86_64.executor_memory
 use { EventRecoveryScanner } from storage.event_log
 use { EventSlotHeader } from storage.format
 
@@ -53,6 +54,28 @@ data ReplayOutcome {
     orphan_collected: Bool
 }
 
+data ReplayRecovery {
+    last_event_id: U64
+    projection_watermark: U64
+    orphan_collected: Bool
+}
+
+data ReplayScratch {
+    allocated_extents: MutableSlice<Extent>
+    acknowledged_refs: MutableSlice<BlobRef>
+}
+
+data ReplayBlobFacts {
+    acknowledged_blob_id: U64
+    acknowledged_start_lba: U64
+    acknowledged_block_count: U64
+    relocated_blob_id: U64
+    relocated_start_lba: U64
+    relocated_block_count: U64
+    orphan_start_lba: U64
+    orphan_block_count: U64
+}
+
 data FirstAppendBuilder {
     marker: U64
 
@@ -78,9 +101,8 @@ data FirstAppendBuilder {
     fn replay_outcome(
         self,
         events: FirstAppendEvents,
-        recovered_last_event_id: U64,
-        recovered_projection_watermark: U64,
-        recovered_orphan_collected: Bool
+        recovery: ReplayRecovery,
+        scratch: ReplayScratch
     ) -> ReplayOutcome {
         let first_header = EventSlotHeader(
             event_id = 0,
@@ -115,39 +137,66 @@ data FirstAppendBuilder {
         let scanner = EventRecoveryScanner()
         let first_recovery = scanner.validate_group_member(header = first_header)
         let projected = events.directory_worker.apply_group(last_event_id = second_header.event_id, event_type_id = 1003)
-        let old_ref = BlobRef(blob_id = 10, start_lba = 20, block_count = 2)
-        let new_ref = BlobRef(blob_id = 20, start_lba = 40, block_count = 2)
+        let facts = self.blob_facts(scratch = scratch)
+        let old_ref = BlobRef(blob_id = facts.acknowledged_blob_id, start_lba = facts.acknowledged_start_lba, block_count = facts.acknowledged_block_count)
+        let new_ref = BlobRef(blob_id = facts.relocated_blob_id, start_lba = facts.relocated_start_lba, block_count = facts.relocated_block_count)
         let truth = BlobTruth(blob_id = 1, ref = old_ref, version = 1)
         let relocation = RelocateBlobProposal(blob_id = 1, old_ref = old_ref, new_ref = new_ref, observed_version = 0)
         let relocation_accepted = truth.can_accept_relocate(proposal = relocation)
         let collector = BlobOrphanCollector(
-            allocated = Extent(start_lba = 40, block_count = 2),
-            acknowledged_refs = old_ref
+            allocated_extent_count = 3,
+            allocated_extents = scratch.allocated_extents,
+            acknowledged_ref_count = 1,
+            acknowledged_refs = scratch.acknowledged_refs
         )
-        let reclaimed = collector.reclaimable()
+        let reclaimed = collector.reclaimable(scratch = scratch.allocated_extents)
         let orphan_collected = false
         if relocation_accepted == false {
             if first_recovery.visible_events == 1 {
                 if second_header.event_id == 1 {
-                    if reclaimed.start_lba == 40 {
-                        if reclaimed.block_count == 2 {
-                            orphan_collected = true
+                    if reclaimed.extent_count == 2 {
+                        let first_reclaimed = reclaimed.extents.get(index = 0)
+                        let second_reclaimed = reclaimed.extents.get(index = 1)
+                        if first_reclaimed.start_lba == facts.relocated_start_lba {
+                            if first_reclaimed.block_count == facts.relocated_block_count {
+                                if second_reclaimed.start_lba == facts.orphan_start_lba {
+                                    if second_reclaimed.block_count == facts.orphan_block_count {
+                                        orphan_collected = true
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         let last_event_id = 0
-        if second_header.event_id == recovered_last_event_id {
-            last_event_id = recovered_last_event_id
+        if second_header.event_id == recovery.last_event_id {
+            last_event_id = recovery.last_event_id
         }
         let projection_watermark = 0
-        if projected.watermark == recovered_projection_watermark {
-            projection_watermark = recovered_projection_watermark
+        if projected.watermark == recovery.projection_watermark {
+            projection_watermark = recovery.projection_watermark
         }
-        if recovered_orphan_collected == false {
+        if recovery.orphan_collected == false {
             orphan_collected = false
         }
         return ReplayOutcome(last_event_id = last_event_id, projection_watermark = projection_watermark, orphan_collected = orphan_collected)
+    }
+
+    fn blob_facts(self, scratch: ReplayScratch) -> ReplayBlobFacts {
+        let acknowledged = scratch.acknowledged_refs.get(index = 0)
+        let relocated = scratch.allocated_extents.get(index = 1)
+        let orphan = scratch.allocated_extents.get(index = 2)
+        return ReplayBlobFacts(
+            acknowledged_blob_id = acknowledged.blob_id,
+            acknowledged_start_lba = acknowledged.start_lba,
+            acknowledged_block_count = acknowledged.block_count,
+            relocated_blob_id = 20,
+            relocated_start_lba = relocated.start_lba,
+            relocated_block_count = relocated.block_count,
+            orphan_start_lba = orphan.start_lba,
+            orphan_block_count = orphan.block_count
+        )
     }
 }

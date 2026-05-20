@@ -62,6 +62,7 @@ type localOrigin struct {
 	TimerPeriodUS             uint64
 	IsTimerRoute              bool
 	PathLabel                 string
+	PathVector                int
 	PublishesInterrupts       bool
 	EventType                 string
 	EventFunctionSymbol       string
@@ -2361,7 +2362,11 @@ func pciOriginKey(receiver ast.Expr, scope *Scope) (string, bool) {
 }
 
 func interruptVectorArgKey(expr *ast.CallExpr) string {
-	arg := namedArgExpr(expr.Args, "vector")
+	return interruptVectorNamedArgKey(expr, "vector")
+}
+
+func interruptVectorNamedArgKey(expr *ast.CallExpr, name string) string {
+	arg := namedArgExpr(expr.Args, name)
 	cons, ok := arg.(*ast.ConstructorExpr)
 	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return "<nonliteral>"
@@ -2564,6 +2569,9 @@ func (c *checker) originForConstructor(moduleName string, expr *ast.ConstructorE
 			if identityConstructor, ok := identity.(*ast.ConstructorExpr); ok {
 				origin.PathLabel, _ = stringLiteralArg(identityConstructor, "label")
 			}
+		}
+		if vector, ok := storagePathVectorValue(constructorArg(expr, "vector")); ok {
+			origin.PathVector = int(vector)
 		}
 		origin.TopicKind, origin.EventType, origin.EventFunctionSymbol = pathRouteMetadata(typ)
 		if publisher := c.pathPublisherOrigin(moduleName, expr, scope); publisher.Type != nil {
@@ -2978,9 +2986,11 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 		publishes := origin.PublishesInterrupts || origin.FieldBindings["rx"] != "" || origin.FieldBindings["irq"] != "" || origin.FieldBindings["interrupt"] != "" || origin.TopicLabel != ""
 		c.graph.Paths = append(c.graph.Paths, PathNode{Label: origin.PathLabel, Kind: origin.TopicKind, Binding: name, PublishesInterrupts: publishes, Span: span})
 		if origin.EventType != "" && origin.TopicLabel != "" {
-			c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, InterruptTopicRouteNode{
+			c.recordInterruptTopicRoute(InterruptTopicRouteNode{
+				Vector:              origin.PathVector,
 				PathLabel:           origin.PathLabel,
 				PathBinding:         name,
+				PathBindingType:     origin.Type,
 				ContextSymbol:       interruptContextSymbol(origin.PathLabel),
 				TopicLabel:          origin.TopicLabel,
 				TopicKind:           origin.TopicKind,
@@ -2992,6 +3002,34 @@ func (c *checker) recordGraphFromLet(name string, origin localOrigin, span sourc
 	case origin.Type.Kind == KindExecutor:
 		c.updateExecutorGraphNode(origin, span)
 	}
+	c.recordNestedInterruptPathRoutes(name, origin, span)
+}
+
+func (c *checker) recordInterruptTopicRoute(route InterruptTopicRouteNode) {
+	for i := range c.graph.InterruptTopicRoutes {
+		existing := &c.graph.InterruptTopicRoutes[i]
+		if existing.PathLabel == route.PathLabel &&
+			existing.TopicLabel == route.TopicLabel &&
+			existing.EventType == route.EventType {
+			if existing.Vector != 0 && route.Vector != 0 && existing.Vector != route.Vector {
+				continue
+			}
+			if route.Vector == 0 {
+				route.Vector = existing.Vector
+			}
+			if existing.PathBinding == "" && route.PathBinding != "" {
+				*existing = route
+			}
+			if existing.PathField == "" && route.PathField != "" && existing.PathBinding == route.PathBinding {
+				*existing = route
+			}
+			if existing.Vector == 0 && route.Vector != 0 {
+				existing.Vector = route.Vector
+			}
+			return
+		}
+	}
+	c.graph.InterruptTopicRoutes = append(c.graph.InterruptTopicRoutes, route)
 }
 
 func (c *checker) recordTimerRoute(route TimerRouteNode) {
@@ -3063,7 +3101,7 @@ func (c *checker) finalizeInterruptTopicRoutes() {
 		route := &c.graph.InterruptTopicRoutes[i]
 		route.SubscriberSlots = subscriberSlotsForTopic(c.graph.TopicSubscriptions, route.TopicLabel)
 		for _, configurator := range c.graph.InterruptConfigurators {
-			if configurator.TopicKind == route.TopicKind {
+			if route.Vector == 0 && configurator.TopicKind == route.TopicKind {
 				route.Vector = configurator.Vector
 			}
 		}
@@ -3094,6 +3132,20 @@ func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.C
 		return
 	}
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
+	if qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "route_nvme_io_completion_interrupts" {
+		for _, name := range []string{"foreground_vector", "background_vector"} {
+			vector, ok := interruptVectorValueNamedArg(call, name)
+			if !ok {
+				continue
+			}
+			c.graph.InterruptConfigurators = append(c.graph.InterruptConfigurators, InterruptConfiguratorNode{
+				TopicKind: "nvme_completion",
+				Vector:    vector,
+				Span:      call.SpanV,
+			})
+		}
+		return
+	}
 	topicKind, vector, ok := interruptConfiguratorVector(receiverType, call)
 	if !ok {
 		return
@@ -3106,7 +3158,7 @@ func (c *checker) recordInterruptConfiguratorCall(moduleName string, call *ast.C
 }
 
 func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr, scope *Scope, ctx ContextKind) {
-	if call == nil || (ctx != ContextImagePhaseDirect && isTrustedHardwareAuthorityModule(moduleName)) {
+	if call == nil || isTrustedHardwareAuthorityModule(moduleName) {
 		return
 	}
 	receiverType := c.exprStaticType(moduleName, call.Receiver, scope)
@@ -3149,6 +3201,30 @@ func (c *checker) recordHardwareClaimCall(moduleName string, call *ast.CallExpr,
 		}
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_bar", Key: key + "." + literalArgKey(call, "table_bar_index"), Span: call.SpanV})
 		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "claim_msix_in_bar":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_msix", Key: key, Span: call.SpanV})
+	case qualifiedTypeName(receiverType) == "machine.x86_64.pci.PciDevice" && call.Method == "route_nvme_io_completion_interrupts":
+		key, ok := pciOriginKey(call.Receiver, scope)
+		if !ok {
+			c.error(call.SpanV, diag.SEM0054, "PCI claims must be made from discovered PciDevice values")
+			return
+		}
+		foregroundVectorKey := interruptVectorNamedArgKey(call, "foreground_vector")
+		backgroundVectorKey := interruptVectorNamedArgKey(call, "background_vector")
+		if strings.HasPrefix(foregroundVectorKey, "<") || strings.HasPrefix(backgroundVectorKey, "<") {
+			c.error(call.SpanV, diag.SEM0055, "interrupt vectors in hardware claims must be source literals")
+			return
+		}
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "pci_nvme_interrupts", Key: key, Span: call.SpanV})
+		c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: foregroundVectorKey, Span: call.SpanV})
+		if backgroundVectorKey != foregroundVectorKey {
+			c.graph.HardwareClaims = append(c.graph.HardwareClaims, HardwareClaimNode{Kind: "interrupt_vector", Key: backgroundVectorKey, Span: call.SpanV})
+		}
 	case (qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsiCapability" && call.Method == "route") ||
 		(qualifiedTypeName(receiverType) == "machine.x86_64.pci.MsixCapability" && call.Method == "route_entry"):
 		vectorKey := interruptVectorArgKey(call)
@@ -3230,6 +3306,11 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 	switch qualifiedTypeName(receiverType) + "::" + call.Method {
 	case "machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive":
 		return "serial_rx", 0x40, true
+	case "machine.x86_64.pci.PciDevice::route_nvme_io_completion_interrupts":
+		if vector, ok := interruptVectorValueNamedArg(call, "foreground_vector"); ok {
+			return "nvme_completion", vector, true
+		}
+		return "nvme_completion", 0, true
 	case "machine.x86_64.pci.MsiCapability::route":
 		if vector, ok := interruptVectorValueArg(call); ok {
 			return "edu_interrupt", vector, true
@@ -3237,6 +3318,9 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 		return "edu_interrupt", 0, true
 	case "machine.x86_64.pci.MsixCapability::route_entry":
 		if vector, ok := interruptVectorValueArg(call); ok {
+			if vector == 0x50 || vector == 0x51 {
+				return "nvme_completion", vector, true
+			}
 			return "ivshmem_doorbell", vector, true
 		}
 		return "ivshmem_doorbell", 0, true
@@ -3246,7 +3330,11 @@ func interruptConfiguratorVector(receiverType *Type, call *ast.CallExpr) (string
 }
 
 func interruptVectorValueArg(call *ast.CallExpr) (int, bool) {
-	arg := namedArgExpr(call.Args, "vector")
+	return interruptVectorValueNamedArg(call, "vector")
+}
+
+func interruptVectorValueNamedArg(call *ast.CallExpr, name string) (int, bool) {
+	arg := namedArgExpr(call.Args, name)
 	cons, ok := arg.(*ast.ConstructorExpr)
 	if !ok || legacyTypeName(cons.Type) != "InterruptVector" {
 		return 0, false
@@ -3461,6 +3549,8 @@ func pathRouteMetadata(typ *Type) (kind, eventType, eventFunctionSymbol string) 
 		return "edu_interrupt", "machine.x86_64.edu.EduInterrupt", "_wrela_event_fn_machine_x86_64_edu_EduMsiPath_interrupt"
 	case "machine.x86_64.ivshmem.IvshmemDoorbellPath":
 		return "ivshmem_doorbell", "machine.x86_64.ivshmem.IvshmemDoorbellInterrupt", "_wrela_event_fn_machine_x86_64_ivshmem_IvshmemDoorbellPath_interrupt"
+	case "machine.x86_64.nvme.NvmeIoPath":
+		return "nvme_completion", "machine.x86_64.nvme.NvmeCompletionInterrupt", "_wrela_event_fn_machine_x86_64_nvme_NvmeIoPath_interrupt"
 	default:
 		return "", "", ""
 	}
@@ -4210,6 +4300,7 @@ func (c *checker) isForbiddenOnHandlerCall(recvType *Type, method string) bool {
 		"machine.x86_64.interrupts.ApicInterruptController::initialize_for_com1_receive",
 		"machine.x86_64.interrupts.LocalApic::enable",
 		"machine.x86_64.interrupts.IoApic::route_gsi4_to_vector40",
+		"machine.x86_64.pci.PciDevice::route_nvme_io_completion_interrupts",
 		"machine.x86_64.pci.PciDevice::write_config32",
 		"machine.x86_64.pci.MsiCapability::route",
 		"machine.x86_64.pci.MsixCapability::route_entry",

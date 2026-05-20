@@ -227,7 +227,9 @@ func (q *CompletionQueue) Advance(count uint16) {
 }
 
 type CompletionEntry struct {
-	Phase bool
+	CommandID uint16
+	Phase     bool
+	OK        bool
 }
 
 type CompletionInterrupt struct {
@@ -252,4 +254,19 @@ func DrainCompletions(q *CompletionQueue, entries []CompletionEntry, ringDoorbel
 		ringDoorbell(q.QueueID, q.Head)
 	}
 	return CompletionInterrupt{QueueID: q.QueueID, CompletedCount: uint32(completed)}
+}
+
+func ConsumeCompletion(q *CompletionQueue, entries []CompletionEntry, commandID uint16, ringDoorbell func(queueID uint16, head uint16)) bool {
+	if q.Depth == 0 || q.Head >= q.Depth || len(entries) < int(q.Depth) {
+		return false
+	}
+	entry := entries[q.Head]
+	if entry.CommandID != commandID || !entry.OK || entry.Phase != q.Phase {
+		return false
+	}
+	q.Advance(1)
+	if ringDoorbell != nil {
+		ringDoorbell(q.QueueID, q.Head)
+	}
+	return true
 }

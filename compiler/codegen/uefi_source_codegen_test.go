@@ -316,6 +316,12 @@ func TestInterruptIDTSourceShape(t *testing.T) {
 			t.Fatalf("build_interrupt_idt missing %s:\n%s", want, build.Body)
 		}
 	}
+	installNVMe := asmMethodFromSem(t, checked, "platform.uefi.types", "DelegatedMemory", "install_nvme_interrupt_idt_gates")
+	for _, want := range []string{"1296", "1312", "vector50_handler", "vector51_handler"} {
+		if !strings.Contains(installNVMe.Body, want) {
+			t.Fatalf("install_nvme_interrupt_idt_gates missing %s:\n%s", want, installNVMe.Body)
+		}
+	}
 
 	transition := methodFromSem(t, checked, "platform.uefi.transition", "DelegatedHardware", "exit_to_owned_hardware")
 	if transition == nil {
@@ -365,9 +371,9 @@ func TestPciCapabilitiesWalkedFromDiscoveredDevices(t *testing.T) {
 	enableCommand := findIRFunction(program, "_wrela_method_machine_x86_64_pci_PciDevice_enable_mmio_and_bus_master")
 	if enableCommand == nil ||
 		!functionHasConstInt(enableCommand, 0x04) ||
-		!functionHasConstInt(enableCommand, 0x0000FFFF) ||
+		!functionHasConstInt(enableCommand, 0x0000FBFF) ||
 		!functionHasConstInt(enableCommand, 0x00000006) {
-		t.Fatalf("enable_mmio_and_bus_master must mask PCI status bits and set command memory/bus-master bits")
+		t.Fatalf("enable_mmio_and_bus_master must mask PCI status bits, clear interrupt-disable, and set command memory/bus-master bits")
 	}
 	for _, fn := range []*ir.Function{msi, msix} {
 		if !functionCalls(fn, "_wrela_method_machine_x86_64_pci_PciDevice_enable_mmio_and_bus_master") {

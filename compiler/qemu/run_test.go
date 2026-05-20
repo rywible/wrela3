@@ -368,6 +368,35 @@ func TestRunReturnsSuccessWhenExpectedOutputAppearsBeforeProcessExit(t *testing.
 	}
 }
 
+func TestRunStopsWhenExpectedOutputAppearsBeforeTimeout(t *testing.T) {
+	tmp := t.TempDir()
+	fakeQEMU := filepath.Join(tmp, "fake-qemu.sh")
+	if err := os.WriteFile(fakeQEMU, []byte("#!/usr/bin/env sh\necho 'hello from wrela'\nwhile :; do :; done\n"), 0o755); err != nil {
+		t.Fatalf("write fake qemu: %v", err)
+	}
+	image := filepath.Join(tmp, "hello.efi")
+	if err := os.WriteFile(image, []byte("efi"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	start := time.Now()
+	out, err := Run(Options{
+		QEMUBinary:  fakeQEMU,
+		OVMFCode:    filepath.Join(tmp, "code.fd"),
+		OVMFVars:    filepath.Join(tmp, "vars.fd"),
+		ESPDir:      filepath.Join(tmp, "esp"),
+		ImagePath:   image,
+		SuccessText: "hello from wrela",
+		Timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v, output:\n%s", err, out)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run() waited %s after success text", elapsed)
+	}
+}
+
 func TestRunUsesPortableDefaultCPUModelWithoutFallback(t *testing.T) {
 	tmp := t.TempDir()
 	invocations := filepath.Join(tmp, "invocations.txt")

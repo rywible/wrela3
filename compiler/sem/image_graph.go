@@ -105,6 +105,8 @@ type InterruptTopicRouteNode struct {
 	Vector              int
 	PathLabel           string
 	PathBinding         string
+	PathBindingType     *Type
+	PathField           string
 	ContextSymbol       string
 	PathFieldOffset     int
 	TopicLabel          string

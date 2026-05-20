@@ -35,7 +35,7 @@ func TestPciBarClaimSourceContract(t *testing.T) {
 		"0xAC060001",
 		"0xAC060002",
 		"0xAC060003",
-		"(command_status & 0x0000FFFF) | 0x00000006",
+		"(command_status & 0x0000FBFF) | 0x00000006",
 		"let table = self.claim_mmio_bar(index = table_bar_index)",
 		"self.enable_mmio_and_bus_master()",
 	}

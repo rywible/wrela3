@@ -57,6 +57,37 @@ func TestPciClassSelectedDeviceCanClaimRelocatedBar(t *testing.T) {
 	}
 }
 
+func TestNvmeInterruptRoutingClaimRecordsWrapperVectors(t *testing.T) {
+	checked, ds := checkUEFIModulesWithExtraSource(t, "nvme-interrupt-routing-claim-test.wrela", duplicatePciClaimSource(`
+        let nvme = discovery.pci.require_class(class_code = 0x01, subclass = 0x08, prog_if = 0x02, occurrence = 0)
+        let nvme_bar0 = nvme.claim_mmio_bar_at32(index = 0, base = 0xF0000000)
+        let routes = nvme.route_nvme_io_completion_interrupts(
+            table_bar_index = 0,
+            table = nvme_bar0,
+            foreground_vector = InterruptVector(value = 0x50),
+            background_vector = InterruptVector(value = 0x51),
+            target = discovery.interrupts.local_apic
+        )
+`))
+	if len(ds) != 0 {
+		t.Fatalf("NVMe interrupt routing diagnostics: %#v", ds)
+	}
+	claimCounts := map[string]int{}
+	for _, claim := range checked.ImageGraph.HardwareClaims {
+		claimCounts[claim.Kind+":"+claim.Key]++
+	}
+	for _, want := range []string{
+		"pci_bar:class=0x01/subclass=0x08/prog_if=0x02/occurrence=0.0",
+		"pci_nvme_interrupts:class=0x01/subclass=0x08/prog_if=0x02/occurrence=0",
+		"interrupt_vector:0x50",
+		"interrupt_vector:0x51",
+	} {
+		if claimCounts[want] != 1 {
+			t.Fatalf("hardware claim %s count = %d, claims = %#v", want, claimCounts[want], checked.ImageGraph.HardwareClaims)
+		}
+	}
+}
+
 func TestDuplicateRelocatedPciBarClaimRejected(t *testing.T) {
 	_, ds := checkUEFIModulesWithExtraSource(t, "duplicate-relocated-bar-test.wrela", duplicatePciClaimSource(`
         let first = edu.claim_mmio_bar(index = 0)

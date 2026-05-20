@@ -251,6 +251,21 @@ func TestUEFIPlatformBuildersAreNonPlaceholder(t *testing.T) {
 	if fatalHandler.AsmBody == nil {
 		t.Fatalf("missing fatal_idt_handler asm method")
 	}
+	nvmeIDT := methodByName(t, memory, "install_nvme_interrupt_idt_gates")
+	if !nvmeIDT.IsAsm || nvmeIDT.AsmBody == nil {
+		t.Fatalf("install_nvme_interrupt_idt_gates must be asm and non-empty")
+	}
+	for _, want := range []string{
+		"vector50_handler",
+		"vector51_handler",
+		"1296",
+		"1312",
+		"write_idt_gate",
+	} {
+		if !strings.Contains(nvmeIDT.AsmBody.Source, want) {
+			t.Fatalf("install_nvme_interrupt_idt_gates asm body missing %q in:\n%s", want, nvmeIDT.AsmBody.Source)
+		}
+	}
 	if !strings.Contains(fatalHandler.AsmBody.Source, "hlt") {
 		t.Fatalf("fatal_idt_handler must include hlt: %s", fatalHandler.AsmBody.Source)
 	}

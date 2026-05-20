@@ -613,6 +613,7 @@ type InterruptContext struct {
 type InterruptContextStore struct {
 	ContextSymbol string
 	ContextOffset int
+	StorageOffset int
 	Source        Value
 	SourceType    Type
 	Size          int
@@ -653,6 +654,7 @@ type InterruptBinding struct {
 	EventType             Type
 	PathFieldOffset       int
 	ContextSymbol         string
+	ContextSize           int
 	EventStorageSymbol    string
 	EventStorageSize      int
 	Vector                uint8

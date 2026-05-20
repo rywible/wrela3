@@ -15,13 +15,17 @@ const (
 	PayloadLayoutIDOffset uint64 = 28
 	Checksum32Offset      uint64 = 48
 
-	StorageDiskBytes           uint64 = 4 * 1024 * 1024 * 1024
-	StorageHotSegmentBytes     uint64 = 536870912
-	StorageTargetBatchSlots    uint64 = 64
-	StorageMaxOverflowSlots    uint64 = 8
-	StorageMaxBatchSlots       uint64 = 72
-	StorageMaxAtomicGroupSlots uint64 = 32
-	StorageSlotReservedEmpty   uint32 = 1
+	StorageDiskBytes              uint64 = 4 * 1024 * 1024 * 1024
+	StorageHotSegmentBytes        uint64 = 536870912
+	StorageTargetBatchSlots       uint64 = 64
+	StorageMaxOverflowSlots       uint64 = 8
+	StorageMaxBatchSlots          uint64 = 72
+	StorageMaxAtomicGroupSlots    uint64 = 32
+	StorageGroupCommitTimerUS     uint64 = 2000
+	StorageAdminQueueDepth        uint64 = 32
+	StorageForegroundIOQueueDepth uint64 = 256
+	StorageBackgroundIOQueueDepth uint64 = 128
+	StorageSlotReservedEmpty      uint32 = 1
 
 	SegmentStateOpenHot      uint8 = 1
 	SegmentStateSealedHot    uint8 = 2
@@ -539,11 +543,19 @@ func (c StreamDirectoryCache) HitRateX1000() uint64 {
 }
 
 func (w *WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
+	return w.EnqueueAtomicGroupWithReserved(semanticSlots, 0)
+}
+
+func (w *WriterPolicy) EnqueueAtomicGroupWithReserved(semanticSlots uint64, reservedEmptySlots uint64) EnqueueResult {
 	if semanticSlots == 0 || semanticSlots > StorageMaxAtomicGroupSlots {
 		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
 	}
+	consumedSlots := semanticSlots + reservedEmptySlots
+	if consumedSlots < semanticSlots || consumedSlots > StorageMaxBatchSlots {
+		return EnqueueResult{Accepted: false, RejectCode: "SEM0114"}
+	}
 	first, last := AssignEventIDs(w.NextEventID, semanticSlots)
-	combined := w.OpenBatchSlots + semanticSlots
+	combined := w.OpenBatchSlots + consumedSlots
 	open := combined
 	flush := false
 	switch {
@@ -551,10 +563,10 @@ func (w *WriterPolicy) EnqueueAtomicGroup(semanticSlots uint64) EnqueueResult {
 	case combined <= StorageMaxBatchSlots:
 		flush = true
 	default:
-		open = semanticSlots
+		open = consumedSlots
 		flush = true
 	}
-	w.NextEventID = last + 1
+	w.NextEventID = first + consumedSlots
 	w.OpenBatchSlots = open
 	return EnqueueResult{
 		Accepted:       true,

@@ -38,6 +38,7 @@ module sem.blob_mirror
 use {
     BLOB_ALLOCATOR_FREE_EXTENT_LIMIT,
     BlobRef,
+    BlobReclaimableExtents,
     Extent,
     BlobManifest,
     BlobExtentAllocator
@@ -47,6 +48,7 @@ const MIRRORED_FREE_EXTENT_LIMIT: U64 = BLOB_ALLOCATOR_FREE_EXTENT_LIMIT
 
 data BlobMirror {
     ref: BlobRef
+    reclaimable: BlobReclaimableExtents
     extent: Extent
     manifest: BlobManifest
     allocator: BlobExtentAllocator
@@ -68,6 +70,10 @@ data BlobMirror {
 		"start_lba":   "U64",
 		"block_count": "U64",
 	})
+	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "BlobReclaimableExtents"), map[string]string{
+		"extent_count": "U64",
+		"extents":      "MutableSlice<Extent>",
+	})
 	assertTypeFields(t, moduleType(t, checked.Index, "storage.blob", "BlobManifest"), map[string]string{
 		"blob_id":          "U64",
 		"key_metadata_ref": "U64",
@@ -75,23 +81,34 @@ data BlobMirror {
 		"logical_bytes":    "U64",
 	})
 	allocator := moduleType(t, checked.Index, "storage.blob", "BlobExtentAllocator")
+	assertTypeFields(t, allocator, map[string]string{
+		"free_extent_count": "U64",
+		"free_extents":      "MutableSlice<Extent>",
+	})
 	assertMethodExists(t, allocator, "allocate")
 	assertMethodExists(t, allocator, "free")
 	assertMethodExists(t, allocator, "extents")
 
 	source := readRepoFile(t, "wrela/storage/blob.wrela")
 	for _, want := range []string{
-		"self.first.start_lba + block_count",
-		"self.first.block_count - block_count",
+		"while index < self.free_extent_count",
+		"self.free_extents.get(index = index)",
+		"current.start_lba + block_count",
+		"current.block_count - block_count",
 		"extent.start_lba + extent.block_count",
-		"self.first.start_lba + self.first.block_count",
+		"current.start_lba + current.block_count",
 		"if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT",
+		"self.free_extents.set(index = insert_index, value = extent)",
+		"fn coalesce_sorted(self)",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("BlobExtentAllocator source missing split/coalesce shape %q", want)
 		}
 	}
-	coalesce := strings.Index(source, "if extent_end == self.first.start_lba")
+	if strings.Contains(source, "first: Extent") {
+		t.Fatalf("BlobExtentAllocator must not be a single-entry first extent store")
+	}
+	coalesce := strings.Index(source, "if self.merge_with_existing(extent = extent)")
 	capacity := strings.Index(source, "if self.free_extent_count >= BLOB_ALLOCATOR_FREE_EXTENT_LIMIT")
 	if coalesce < 0 || capacity < 0 || capacity < coalesce {
 		t.Fatalf("BlobExtentAllocator.free must attempt coalescing before enforcing capacity")
@@ -99,9 +116,25 @@ data BlobMirror {
 	if strings.Contains(source, "acknowledged_refs.blob_id == self.allocated.start_lba") {
 		t.Fatalf("BlobOrphanCollector must not compare blob_id to start_lba")
 	}
+	if strings.Contains(source, "fn reclaimable(self) -> Extent") {
+		t.Fatalf("BlobOrphanCollector must not expose single-output reclaimable API")
+	}
 	for _, want := range []string{
-		"self.acknowledged_refs.start_lba == self.allocated.start_lba",
-		"self.acknowledged_refs.block_count == self.allocated.block_count",
+		"data BlobReclaimableExtents {",
+		"extent_count: U64",
+		"extents: MutableSlice<Extent>",
+		"allocated_extents: MutableSlice<Extent>",
+		"acknowledged_refs: MutableSlice<BlobRef>",
+		"fn reclaimable(self, scratch: MutableSlice<Extent>) -> BlobReclaimableExtents",
+		"let written = 0",
+		"while index < self.allocated_extent_count",
+		"if written < scratch.length",
+		"scratch.set(index = written, value = allocated)",
+		"written = written + 1",
+		"return BlobReclaimableExtents(extent_count = written, extents = scratch)",
+		"while index < self.acknowledged_ref_count",
+		"ref.start_lba == extent.start_lba",
+		"ref.block_count == extent.block_count",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("BlobOrphanCollector source missing extent liveness check %q", want)
@@ -158,11 +191,11 @@ func TestBlobWriterRelocationMirrorContract(t *testing.T) {
 	modules := parseStorageWriterModules(t, `
 module sem.blob_writer_relocation_mirror
 
-use { StorageWriter, StorageAppendResult } from storage.writer
+use { StorageWriter, BlobRelocateResult } from storage.writer
 use { BlobTruth, RelocateBlobProposal } from storage.blob
 
 class BlobWriterRelocationMirror {
-    fn run(self, writer: StorageWriter, truth: BlobTruth, proposal: RelocateBlobProposal) -> StorageAppendResult {
+    fn run(self, writer: StorageWriter, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {
         return writer.accept_relocate_blob(truth = truth, proposal = proposal)
     }
 }
@@ -171,6 +204,26 @@ class BlobWriterRelocationMirror {
 	_, ds := checkAllowingMissingImage(t, index, modules)
 	if len(ds) != 0 {
 		t.Fatalf("semantic diagnostics: %#v", ds)
+	}
+
+	relocate := moduleType(t, index, "storage.writer", "BlobRelocateResult")
+	assertTypeFields(t, relocate, map[string]string{
+		"append": "StorageAppendResult",
+		"truth":  "BlobTruth",
+	})
+	writer := moduleType(t, index, "storage.writer", "StorageWriter")
+	assertMethodSignature(t, methodByName(t, writer, "accept_relocate_blob"), []string{"truth:BlobTruth", "proposal:RelocateBlobProposal"}, "BlobRelocateResult")
+	source := readRepoFile(t, "wrela/storage/writer.wrela")
+	accept := sourceBetween(t, source, "fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {", "\n    }\n}")
+	for _, want := range []string{
+		"if truth.accept_relocate(proposal = proposal) == false",
+		"append = StorageAppendResult(accepted = false",
+		"truth = truth",
+		"append = StorageAppendResult(accepted = true",
+	} {
+		if !strings.Contains(accept, want) {
+			t.Fatalf("StorageWriter.accept_relocate_blob missing %q", want)
+		}
 	}
 }
 
@@ -216,6 +269,7 @@ func parseBlobModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{
 		repoPath(t, "wrela/lang/core.wrela"),
+		repoPath(t, "wrela/machine/x86_64/executor_memory.wrela"),
 		repoPath(t, "wrela/storage/blob.wrela"),
 	}
 	files := make([]*source.File, 0, len(paths)+1)

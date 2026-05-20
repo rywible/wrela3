@@ -1,15 +1,18 @@
 module storage.writer
 
 use { STORAGE_MAX_ATOMIC_GROUP_SLOTS, STORAGE_TARGET_BATCH_SLOTS, STORAGE_MAX_BATCH_SLOTS, StorageMetrics } from storage.format
+use { CoreSpscProducer } from machine.x86_64.core_link
 use { ForegroundStoragePath, BackgroundStoragePath } from machine.x86_64.nvme
 use { StreamDirectory } from storage.stream
-use { BlobTruth, RelocateBlobProposal } from storage.blob
+use { BlobTruth, RelocateBlobProposal, UnpublishedBlobRef, PublishedBlobRef } from storage.blob
+use { Result } from wrela.lang.core
 
 data PendingAtomicGroup {
     semantic_event_count: U64
+    reserved_empty_slot_count: U64
 
     fn empty() -> PendingAtomicGroup {
-        return PendingAtomicGroup(semantic_event_count = 0)
+        return PendingAtomicGroup(semantic_event_count = 0, reserved_empty_slot_count = 0)
     }
 }
 
@@ -52,12 +55,13 @@ data StorageAppendResult {
     reject_code: U64
 }
 
-data BlobRef {
-    blob_id: U64
+data BlobRelocateResult {
+    append: StorageAppendResult
+    truth: BlobTruth
 }
 
-data PublishedBlobRef {
-    ref: BlobRef
+data DurableBlobRef {
+    unpublished: UnpublishedBlobRef
 }
 
 data StorageWriter {
@@ -65,6 +69,7 @@ data StorageWriter {
     background: BackgroundStoragePath
     stream_directory: StreamDirectory
     metrics: StorageMetrics
+    committed_groups: CoreSpscProducer<CommittedAtomicGroup>
     next_event_id: U64
     next_stream_id: U64
     durable_frontier: U64
@@ -77,9 +82,16 @@ data StorageWriter {
         if group.semantic_event_count > STORAGE_MAX_ATOMIC_GROUP_SLOTS {
             return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
         }
+        let consumed_slots = group.semantic_event_count + group.reserved_empty_slot_count
+        if consumed_slots < group.semantic_event_count {
+            return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
+        }
+        if consumed_slots > STORAGE_MAX_BATCH_SLOTS {
+            return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1114)
+        }
         let first = self.next_event_id
         let last = self.next_event_id + group.semantic_event_count - 1
-        let combined = self.open_batch_slots + group.semantic_event_count
+        let combined = self.open_batch_slots + consumed_slots
         let open = combined
         let flush = false
         if combined < STORAGE_TARGET_BATCH_SLOTS {
@@ -88,11 +100,11 @@ data StorageWriter {
             if combined <= STORAGE_MAX_BATCH_SLOTS {
                 flush = true
             } else {
-                open = group.semantic_event_count
+                open = consumed_slots
                 flush = true
             }
         }
-        self.next_event_id = last + 1
+        self.next_event_id = first + consumed_slots
         self.open_batch_slots = open
         return StorageAppendResult(accepted = true, first_event_id = first, last_event_id = last, open_batch_slots = open, flush_requested = flush, reject_code = 0)
     }
@@ -101,6 +113,9 @@ data StorageWriter {
         if token.acknowledged() == false {
             return StorageAppendResult(accepted = false, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1116)
         }
+        if self.durable_frontier < token.last_event_id {
+            self.durable_frontier = token.last_event_id
+        }
         return StorageAppendResult(accepted = true, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = token.flush_required, reject_code = 0)
     }
 
@@ -108,17 +123,37 @@ data StorageWriter {
         if token.acknowledged() == false {
             return CommittedAtomicGroup(first_event_id = 0, last_event_id = 0)
         }
-        return CommittedAtomicGroup(first_event_id = token.first_event_id, last_event_id = token.last_event_id)
-    }
-
-    fn publish_blob_ref(self, ref: BlobRef) -> PublishedBlobRef {
-        return PublishedBlobRef(ref = ref)
-    }
-
-    fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> StorageAppendResult {
-        if truth.accept_relocate(proposal = proposal) == false {
-            return StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1118)
+        let committed = CommittedAtomicGroup(first_event_id = token.first_event_id, last_event_id = token.last_event_id)
+        let sent = self.committed_groups.try_send(value = committed)
+        match sent {
+            Result.Ok(value = sent_unit) => {
+                if self.durable_frontier < token.last_event_id {
+                    self.durable_frontier = token.last_event_id
+                }
+                self.metrics.core_link_committed_groups = self.metrics.core_link_committed_groups + 1
+            }
+            Result.Err(error = full) => {
+                self.metrics.core_link_backpressure_count = self.metrics.core_link_backpressure_count + 1
+                return CommittedAtomicGroup(first_event_id = 0, last_event_id = 0)
+            }
         }
-        return StorageAppendResult(accepted = true, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 0)
+        return committed
+    }
+
+    fn publish_blob_ref(self, durable: DurableBlobRef) -> PublishedBlobRef {
+        return PublishedBlobRef(ref = durable.unpublished.ref)
+    }
+
+    fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {
+        if truth.accept_relocate(proposal = proposal) == false {
+            return BlobRelocateResult(
+                append = StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1118),
+                truth = truth
+            )
+        }
+        return BlobRelocateResult(
+            append = StorageAppendResult(accepted = true, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 0),
+            truth = truth
+        )
     }
 }

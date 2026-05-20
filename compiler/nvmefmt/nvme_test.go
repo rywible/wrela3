@@ -362,3 +362,42 @@ func TestCompletionDrainRejectsInvalidHead(t *testing.T) {
 		t.Fatalf("queue mutated for invalid head: %+v", q)
 	}
 }
+
+func TestConsumeCompletionRejectsWrongPhaseSameCommandID(t *testing.T) {
+	q := CompletionQueue{QueueID: 4, Depth: 4, Phase: true}
+	entries := []CompletionEntry{
+		{CommandID: 7, Phase: false, OK: true},
+		{CommandID: 7, Phase: true, OK: true},
+	}
+	if ConsumeCompletion(&q, entries, 7, func(queueID uint16, head uint16) {
+		t.Fatalf("doorbell rung for wrong-phase CQE: queue=%d head=%d", queueID, head)
+	}) {
+		t.Fatal("ConsumeCompletion accepted wrong-phase stale command ID")
+	}
+	if q.Head != 0 || !q.Phase {
+		t.Fatalf("queue mutated for wrong phase: %+v", q)
+	}
+}
+
+func TestConsumeCompletionWrapsHeadAndTogglesPhase(t *testing.T) {
+	q := CompletionQueue{QueueID: 4, Depth: 2, Head: 1, Phase: true}
+	entries := []CompletionEntry{
+		{CommandID: 1, Phase: false, OK: true},
+		{CommandID: 9, Phase: true, OK: true},
+	}
+	var doorbellHead uint16
+	if !ConsumeCompletion(&q, entries, 9, func(queueID uint16, head uint16) {
+		if queueID != 4 {
+			t.Fatalf("doorbell queue = %d, want 4", queueID)
+		}
+		doorbellHead = head
+	}) {
+		t.Fatal("ConsumeCompletion rejected valid CQE")
+	}
+	if q.Head != 0 || q.Phase {
+		t.Fatalf("queue = %+v, want head 0 phase false", q)
+	}
+	if doorbellHead != 0 {
+		t.Fatalf("doorbell head = %d, want 0", doorbellHead)
+	}
+}

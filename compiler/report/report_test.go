@@ -136,12 +136,21 @@ func TestStorageMetricsReportShape(t *testing.T) {
 		ActiveLBASize:                    512,
 		NamespaceMode:                    "conventional",
 		DurabilityMode:                   "fua",
+		InterruptMode:                    "msix_or_multimessage_msi",
+		MsiFallbackSharesVector:          false,
 		EventSlotSize:                    512,
+		EventHeaderSize:                  64,
+		EventPayloadBytes:                448,
+		EventSlotsWritten:                2,
 		ReservedEmptySlots:               3,
+		EventSlotsReservedEmpty:          3,
+		EventSlotsRecovered:              2,
 		TargetBatchSlots:                 64,
 		MaxOverflowSlots:                 8,
 		MaxBatchSlots:                    72,
 		MaxAtomicGroupSlots:              32,
+		BatchesSubmitted:                 1,
+		BatchOverflowCount:               0,
 		AppendLatencyP50US:               10,
 		AppendLatencyP99US:               2000,
 		DeviceReportedMediaWrites:        123,
@@ -151,9 +160,14 @@ func TestStorageMetricsReportShape(t *testing.T) {
 		BackgroundIOQueueDepth:           128,
 		BlobOrphanBytes:                  4096,
 		ProjectionLagEvents:              5,
+		EventUpcastCount:                 1,
 		ProjectionUpcastCount:            2,
 		ProjectionRebuildCount:           1,
+		StreamDirectoryCacheHits:         7,
+		StreamDirectoryCacheMisses:       1,
 		StreamDirectoryCacheHitRateX1000: 875,
+		CoreLinkCommittedGroups:          1,
+		CoreLinkBackpressureCount:        0,
 		NvmePaths: []NvmePathReport{{
 			Label:      "nvme.foreground",
 			Role:       "foreground",
@@ -184,15 +198,27 @@ func TestStorageMetricsReportShape(t *testing.T) {
 	if shaped.Storage.ActiveLBASize != 512 ||
 		shaped.Storage.NamespaceMode != "conventional" ||
 		shaped.Storage.DurabilityMode != "fua" ||
+		shaped.Storage.InterruptMode != "msix_or_multimessage_msi" ||
+		shaped.Storage.MsiFallbackSharesVector ||
 		shaped.Storage.EventSlotSize != 512 ||
+		shaped.Storage.EventHeaderSize != 64 ||
+		shaped.Storage.EventPayloadBytes != 448 ||
+		shaped.Storage.EventSlotsWritten != 2 ||
+		shaped.Storage.EventSlotsReservedEmpty != 3 ||
+		shaped.Storage.EventSlotsRecovered != 2 ||
 		shaped.Storage.TargetBatchSlots != 64 ||
+		shaped.Storage.BatchesSubmitted != 1 ||
 		shaped.Storage.AppendLatencyP99US != 2000 ||
 		shaped.Storage.DeviceReportedMediaWrites != 123 ||
 		shaped.Storage.ForegroundIOQueueDepth != 256 ||
 		shaped.Storage.BlobOrphanBytes != 4096 ||
 		shaped.Storage.ProjectionLagEvents != 5 ||
+		shaped.Storage.EventUpcastCount != 1 ||
 		shaped.Storage.ProjectionUpcastCount != 2 ||
 		shaped.Storage.ProjectionRebuildCount != 1 ||
+		shaped.Storage.StreamDirectoryCacheHits != 7 ||
+		shaped.Storage.StreamDirectoryCacheMisses != 1 ||
+		shaped.Storage.CoreLinkCommittedGroups != 1 ||
 		shaped.Storage.StreamDirectoryCacheHitRateX1000 != 875 {
 		t.Fatalf("storage report = %#v in %s", shaped.Storage, data)
 	}

@@ -763,6 +763,53 @@ class DelegatedMemory {
         ret
     }
 
+    asm fn install_nvme_interrupt_idt_gates(
+        self,
+        idt: DelegatedBytes,
+        vector50_handler: VirtualAddress,
+        vector51_handler: VirtualAddress
+    ) -> DelegatedBytes {
+        push r12
+        push r13
+
+        mov r11, idt
+        mov r11, [r11 + DelegatedBytes.address]
+
+        mov r12, r11
+        add r12, 1296
+        mov r13, vector50_handler
+        call write_idt_gate
+
+        mov r12, r11
+        add r12, 1312
+        mov r13, vector51_handler
+        call write_idt_gate
+
+        mov rax, idt
+        pop r13
+        pop r12
+        ret
+
+    write_idt_gate:
+        mov rax, r13
+        mov [r12], ax
+        mov ax, 8
+        mov [r12 + 2], ax
+        mov ax, 0
+        mov [r12 + 4], ax
+        mov al, 0x8E
+        mov [r12 + 5], al
+        mov rax, r13
+        shr rax, 16
+        mov [r12 + 6], ax
+        mov rax, r13
+        shr rax, 32
+        mov [r12 + 8], eax
+        mov rax, 0
+        mov [r12 + 12], eax
+        ret
+    }
+
     asm fn fatal_idt_handler(self) -> never {
         hlt
     }

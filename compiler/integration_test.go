@@ -354,6 +354,119 @@ func TestHelloInterruptTopicContextStoreUsesPathFieldOffset(t *testing.T) {
 	}
 }
 
+func TestNvmeInterruptTopicContextStoresUseStoragePathFieldOffsets(t *testing.T) {
+	program := compileProgramAt(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
+	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
+	if fn == nil {
+		t.Fatalf("missing IR function %s", program.Entry.OwnedPhaseSymbol)
+	}
+	stores := functionOps[*ir.InterruptContextStore](*fn)
+	if len(stores) == 0 {
+		t.Fatalf("%s missing interrupt context stores: %#v", fn.Symbol, fn.Blocks)
+	}
+
+	nvmeBindings := 0
+	nvmeVectors := map[uint8]string{}
+	for _, binding := range program.InterruptBindings {
+		if binding.TopicKind != "nvme_completion" {
+			continue
+		}
+		nvmeBindings++
+		nvmeVectors[binding.Vector] = binding.PublisherOwnerLabel
+		if binding.PathField != "nvme_path" {
+			t.Fatalf("NVMe binding %s path field = %q, want nvme_path", binding.TopicLabel, binding.PathField)
+		}
+		wrapperType := "machine.x86_64.nvme.ForegroundStoragePath"
+		if binding.PublisherOwnerLabel == "nvme.background" {
+			wrapperType = "machine.x86_64.nvme.BackgroundStoragePath"
+		}
+		wrapperInfo, ok := program.Types[wrapperType]
+		if !ok {
+			t.Fatalf("missing wrapper type %s", wrapperType)
+		}
+		field := wrapperInfo.Fields["nvme_path"]
+		if binding.PathFieldOffset != field.Offset {
+			t.Fatalf("NVMe binding %s offset = %d, want %d", binding.TopicLabel, binding.PathFieldOffset, field.Offset)
+		}
+		var matched *ir.InterruptContextStore
+		for _, store := range stores {
+			if store.ContextSymbol == binding.ContextSymbol && store.ContextOffset == binding.PathFieldOffset {
+				matched = store
+				break
+			}
+		}
+		if matched == nil {
+			t.Fatalf("missing context store for binding %#v; stores = %#v", binding, stores)
+		}
+		load, ok := matched.Source.(*ir.FieldLoad)
+		if !ok || load.Field != "nvme_path" || load.Offset != field.Offset {
+			t.Fatalf("NVMe context store source = %#v, want nvme_path field load at %d", matched.Source, field.Offset)
+		}
+		if matched.SourceType.Kind != ir.TypeKindDriverPath || matched.SourceType.Name != "NvmeIoPath" {
+			t.Fatalf("NVMe context store source type = %#v, want NvmeIoPath driver path", matched.SourceType)
+		}
+	}
+	if nvmeBindings != 2 {
+		t.Fatalf("NVMe interrupt bindings = %d, want 2; bindings = %#v", nvmeBindings, program.InterruptBindings)
+	}
+	if nvmeVectors[0x50] != "nvme.foreground" || nvmeVectors[0x51] != "nvme.background" {
+		t.Fatalf("NVMe interrupt vectors = %#v, want 0x50 foreground and 0x51 background; bindings = %#v", nvmeVectors, program.InterruptBindings)
+	}
+}
+
+func TestNvmeCompletionSubscriptionHelpersLowerToConcreteTopic(t *testing.T) {
+	program := compileProgramAt(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
+	var fns []*ir.Function
+	for i := range program.Functions {
+		if strings.HasPrefix(program.Functions[i].Symbol, "_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_wait_io_completion_interrupt_topic") {
+			fns = append(fns, &program.Functions[i])
+		}
+	}
+	if len(fns) == 0 {
+		t.Fatalf("missing topic-specialized NvmeDirectStorage.wait_io_completion_interrupt")
+	}
+	for _, fn := range fns {
+		nexts := functionOps[ir.TopicTryNext](*fn)
+		if len(nexts) != 2 {
+			t.Fatalf("%s TopicTryNext count = %d, want 2; blocks = %#v", fn.Symbol, len(nexts), fn.Blocks)
+		}
+		for _, next := range nexts {
+			if next.TopicLabel != "nvme.foreground.completion" || next.SubscriberSlot != "foreground" {
+				t.Fatalf("%s TopicTryNext = %#v, want nvme.foreground.completion/foreground", fn.Symbol, next)
+			}
+		}
+		arms := functionOps[ir.TopicArmWait](*fn)
+		if len(arms) != 1 {
+			t.Fatalf("%s TopicArmWait count = %d, want 1; blocks = %#v", fn.Symbol, len(arms), fn.Blocks)
+		}
+		if arms[0].TopicLabel != "nvme.foreground.completion" || arms[0].SubscriberSlot != "foreground" {
+			t.Fatalf("%s TopicArmWait = %#v, want nvme.foreground.completion/foreground", fn.Symbol, arms[0])
+		}
+	}
+	for _, prefix := range []string{
+		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_write_first_append_topic",
+		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_read_replay_state_topic",
+	} {
+		fn := firstIRFunctionWithPrefix(program, prefix)
+		if fn == nil {
+			t.Fatalf("missing topic-specialized helper with prefix %s", prefix)
+		}
+		calls := functionOps[*ir.Call](*fn)
+		hasSpecializedWait := false
+		for _, call := range calls {
+			if strings.HasPrefix(call.Symbol, "_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_wait_io_completion_interrupt_topic") {
+				hasSpecializedWait = true
+			}
+			if call.Symbol == "_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_wait_io_completion_interrupt" {
+				t.Fatalf("%s calls unspecialized wait_io_completion_interrupt", fn.Symbol)
+			}
+		}
+		if !hasSpecializedWait {
+			t.Fatalf("%s does not call topic-specialized wait_io_completion_interrupt; calls = %#v", fn.Symbol, calls)
+		}
+	}
+}
+
 func TestHelloOwnedPhaseEntersExecutor(t *testing.T) {
 	program := compileHelloProgram(t)
 	fn := findIRFunction(program, program.Entry.OwnedPhaseSymbol)
@@ -679,6 +792,15 @@ func findIRFunction(program *ir.Program, symbol string) *ir.Function {
 	return nil
 }
 
+func firstIRFunctionWithPrefix(program *ir.Program, prefix string) *ir.Function {
+	for i := range program.Functions {
+		if strings.HasPrefix(program.Functions[i].Symbol, prefix) {
+			return &program.Functions[i]
+		}
+	}
+	return nil
+}
+
 func assertFunctionCalls(t *testing.T, program *ir.Program, symbol string, want ...string) {
 	t.Helper()
 	fn := findIRFunction(program, symbol)
@@ -780,6 +902,34 @@ func functionOp[T ir.Operation](fn ir.Function) (T, bool) {
 		}
 	}
 	return zero, false
+}
+
+func functionOps[T ir.Operation](fn ir.Function) []T {
+	var out []T
+	for _, block := range fn.Blocks {
+		collectOperationsInList(block.Ops, &out)
+	}
+	return out
+}
+
+func collectOperationsInList[T ir.Operation](ops []ir.Operation, out *[]T) {
+	for _, op := range ops {
+		if typed, ok := op.(T); ok {
+			*out = append(*out, typed)
+		}
+		switch v := op.(type) {
+		case *ir.If:
+			collectOperationsInList(v.ConditionOps, out)
+			collectOperationsInList(v.Then, out)
+			collectOperationsInList(v.Else, out)
+		case *ir.While:
+			collectOperationsInList(v.ConditionOps, out)
+			collectOperationsInList(v.Body, out)
+		case *ir.ForBytes:
+			collectOperationsInList(v.IterableOps, out)
+			collectOperationsInList(v.Body, out)
+		}
+	}
 }
 
 func operationInList[T ir.Operation](ops []ir.Operation) (T, bool) {

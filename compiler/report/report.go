@@ -183,12 +183,21 @@ type StorageReport struct {
 	ActiveLBASize                    uint64           `json:"active_lba_size"`
 	NamespaceMode                    string           `json:"namespace_mode"`
 	DurabilityMode                   string           `json:"durability_mode"`
+	InterruptMode                    string           `json:"interrupt_mode"`
+	MsiFallbackSharesVector          bool             `json:"msi_fallback_shares_vector"`
 	EventSlotSize                    uint64           `json:"event_slot_size"`
+	EventHeaderSize                  uint64           `json:"event_header_size"`
+	EventPayloadBytes                uint64           `json:"event_payload_bytes"`
+	EventSlotsWritten                uint64           `json:"event_slots_written"`
 	ReservedEmptySlots               uint64           `json:"reserved_empty_slots"`
+	EventSlotsReservedEmpty          uint64           `json:"event_slots_reserved_empty"`
+	EventSlotsRecovered              uint64           `json:"event_slots_recovered"`
 	TargetBatchSlots                 uint64           `json:"target_batch_slots"`
 	MaxOverflowSlots                 uint64           `json:"max_overflow_slots"`
 	MaxBatchSlots                    uint64           `json:"max_batch_slots"`
 	MaxAtomicGroupSlots              uint64           `json:"max_atomic_group_slots"`
+	BatchesSubmitted                 uint64           `json:"batches_submitted"`
+	BatchOverflowCount               uint64           `json:"batch_overflow_count"`
 	AppendLatencyP50US               uint64           `json:"append_latency_p50_us"`
 	AppendLatencyP99US               uint64           `json:"append_latency_p99_us"`
 	DeviceReportedMediaWrites        uint64           `json:"device_reported_media_writes"`
@@ -198,9 +207,14 @@ type StorageReport struct {
 	BackgroundIOQueueDepth           uint64           `json:"background_io_queue_depth"`
 	BlobOrphanBytes                  uint64           `json:"blob_orphan_bytes"`
 	ProjectionLagEvents              uint64           `json:"projection_lag_events"`
+	EventUpcastCount                 uint64           `json:"event_upcast_count"`
 	ProjectionUpcastCount            uint64           `json:"projection_upcast_count"`
 	ProjectionRebuildCount           uint64           `json:"projection_rebuild_count"`
+	StreamDirectoryCacheHits         uint64           `json:"stream_directory_cache_hits"`
+	StreamDirectoryCacheMisses       uint64           `json:"stream_directory_cache_misses"`
 	StreamDirectoryCacheHitRateX1000 uint64           `json:"stream_directory_cache_hit_rate_x1000"`
+	CoreLinkCommittedGroups          uint64           `json:"core_link_committed_groups"`
+	CoreLinkBackpressureCount        uint64           `json:"core_link_backpressure_count"`
 	NvmePaths                        []NvmePathReport `json:"nvme_paths"`
 	CoreLinks                        []CoreLinkReport `json:"core_links"`
 }
