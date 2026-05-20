@@ -430,7 +430,14 @@ func storageMetricsFacts(checked *CheckedProgram) map[string]uint64 {
 		case *ast.ConstructorExpr:
 			if e.Type.Name == "StorageMetrics" {
 				for _, arg := range e.Args {
-					if value, ok := storageMetricUint(checked, moduleName, arg.Value); ok {
+					if arg.Name == "active_lba_size" {
+						if value, ok := storageMetricUint(checked, moduleName, arg.Value, facts); ok {
+							facts[arg.Name] = value
+						}
+					}
+				}
+				for _, arg := range e.Args {
+					if value, ok := storageMetricUint(checked, moduleName, arg.Value, facts); ok {
 						facts[arg.Name] = value
 					}
 				}
@@ -521,7 +528,7 @@ func storageMetricsFacts(checked *CheckedProgram) map[string]uint64 {
 	return facts
 }
 
-func storageMetricUint(checked *CheckedProgram, moduleName string, expr ast.Expr) (uint64, bool) {
+func storageMetricUint(checked *CheckedProgram, moduleName string, expr ast.Expr, knownFacts map[string]uint64) (uint64, bool) {
 	switch e := expr.(type) {
 	case *ast.IntLiteral:
 		value, err := strconv.ParseUint(e.Value, 0, 64)
@@ -536,23 +543,45 @@ func storageMetricUint(checked *CheckedProgram, moduleName string, expr ast.Expr
 		}
 		return value.Value, true
 	case *ast.FieldExpr:
-		return storagePathVectorValue(e)
+		return storageMetricFieldUint(e)
 	case *ast.CallExpr:
-		return storageMetricCallUint(checked, e)
+		return storageMetricCallUint(checked, e, knownFacts)
 	}
 	return 0, false
 }
 
-func storageMetricCallUint(checked *CheckedProgram, call *ast.CallExpr) (uint64, bool) {
+func storageMetricFieldUint(field *ast.FieldExpr) (uint64, bool) {
+	if strings.Join(storageMetricFieldPath(field), ".") == "storage.namespace.logical_block_size" {
+		return storagefmt.EventSlotSize, true
+	}
+	return storagePathVectorValue(field)
+}
+
+func storageMetricFieldPath(expr ast.Expr) []string {
+	switch e := expr.(type) {
+	case *ast.NameExpr:
+		return []string{e.Name}
+	case *ast.FieldExpr:
+		return append(storageMetricFieldPath(e.Base), e.Field)
+	default:
+		return nil
+	}
+}
+
+func storageMetricCallUint(checked *CheckedProgram, call *ast.CallExpr, knownFacts map[string]uint64) (uint64, bool) {
 	if call == nil || len(call.Args) != 0 {
 		return 0, false
 	}
+	activeLBASize := storagefmt.EventSlotSize
+	if knownFacts != nil && knownFacts["active_lba_size"] != 0 {
+		activeLBASize = knownFacts["active_lba_size"]
+	}
 	switch call.Method {
 	case "first_append_reserved_empty_slots":
-		return storagefmt.FinishBatch(512, storagefmt.StorageTargetBatchSlots).ReservedEmptySlots, true
+		return storagefmt.FinishBatch(activeLBASize, 2).ReservedEmptySlots, true
 	case "first_append_durability_mode_value":
 		mode, err := nvmefmt.SelectDurability(nvmefmt.NamespaceFacts{
-			LogicalBlockSize: 512,
+			LogicalBlockSize: activeLBASize,
 			SupportsFUA:      nvmeIdentifyControllerSupportsFUA(checked),
 		})
 		if err != nil {
@@ -614,7 +643,7 @@ func storageMetricsSelectedDurabilityMode(checked *CheckedProgram, activeLBASize
 				selected, found = mode, true
 			}
 		case *ast.NameExpr:
-			if value, ok := storageMetricUint(checked, moduleName, e); ok {
+			if value, ok := storageMetricUint(checked, moduleName, e, nil); ok {
 				if mode, ok := storageDurabilityModeNameForValue(strconv.FormatUint(value, 10)); ok {
 					selected, found = mode, true
 				}

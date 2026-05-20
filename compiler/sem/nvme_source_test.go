@@ -492,6 +492,24 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 	})
 }
 
+func TestNvmeEventStorageFixtureUsesIdentifiedLBASizeForPaths(t *testing.T) {
+	source := readRepoFile(t, "tests/e2e/fixtures/nvme_event_storage/main.wrela")
+	assertOrderedSubstrings(t, source, []string{
+		"let foreground = ForegroundStoragePath(",
+		"let background = BackgroundStoragePath(",
+		"interrupt_controller.local_apic.enable()",
+		"let storage = storage_seed.initialize()",
+		"foreground.nvme_path.logical_block_size = storage.namespace.logical_block_size",
+		"background.nvme_path.logical_block_size = storage.namespace.logical_block_size",
+	})
+	if got := strings.Count(source, ".nvme_path.logical_block_size = storage.namespace.logical_block_size"); got != 2 {
+		t.Fatalf("fixture path logical block size assignments = %d, want foreground and background from identified namespace", got)
+	}
+	if !strings.Contains(source, "active_lba_size = storage.namespace.logical_block_size") {
+		t.Fatalf("fixture metrics must report the identified namespace LBA size")
+	}
+}
+
 func TestNvmeCompletionMirrorContract(t *testing.T) {
 	modules := parseUEFIModuleSet(t)
 	index, ds := BuildIndex(modules)

@@ -272,6 +272,31 @@ func TestStorageReportUsesStorageMetricsConstantFacts(t *testing.T) {
 	}
 }
 
+func TestStorageReportReservedEmptySlotsUseActiveLBASize(t *testing.T) {
+	checked := storageReportCheckedProgramWithMetricsExpr(&ast.IntLiteral{Value: "1"})
+	checked.Modules[0].Decls = []ast.Decl{&ast.ImageDecl{
+		Name: "StorageReportImage",
+		Phases: []ast.PhaseDecl{{
+			Body: []ast.Stmt{&ast.LetStmt{
+				Name: "metrics",
+				Expr: &ast.ConstructorExpr{
+					Type: ast.TypeRef{Name: "StorageMetrics"},
+					Args: []ast.NamedArg{
+						{Name: "selected_durability_mode", Value: &ast.IntLiteral{Value: "1"}},
+						{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "4096"}},
+						{Name: "event_slots_reserved_empty", Value: &ast.CallExpr{Method: "first_append_reserved_empty_slots"}},
+					},
+				},
+			}},
+		}},
+	}}
+
+	r := BuildImageReport(checked)
+	if r.Storage.EventSlotsReservedEmpty != 6 || r.Storage.ReservedEmptySlots != 6 {
+		t.Fatalf("reserved empty slots = %d/%d, want 6 for 4096-byte LBA", r.Storage.EventSlotsReservedEmpty, r.Storage.ReservedEmptySlots)
+	}
+}
+
 func TestStorageReportDoesNotSynthesizeRequiredRuntimeMetrics(t *testing.T) {
 	checked := storageReportCheckedProgramWithMetricsExpr(&ast.IntLiteral{Value: "1"})
 	checked.ImageGraph.CoreLinkEndpoints = []CoreLinkEndpointNode{{Label: "core_link.producer.0", Depth: 16}}

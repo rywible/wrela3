@@ -296,6 +296,8 @@ image NvmeEventStorageImage {
         )
         interrupt_controller.local_apic.enable()
         let storage = storage_seed.initialize()
+        foreground.nvme_path.logical_block_size = storage.namespace.logical_block_size
+        background.nvme_path.logical_block_size = storage.namespace.logical_block_size
         interrupt_controller.enable_cpu_interrupts()
         let committed_group_slot_storage = foreground_memory.reserve_array(CommittedAtomicGroup, count = STORAGE_TARGET_BATCH_SLOTS)
         let committed_group_slots = committed_group_slot_storage.fill(value = CommittedAtomicGroup(first_event_id = 0, last_event_id = 0))
@@ -331,7 +333,7 @@ image NvmeEventStorageImage {
             background_path_owner = maintenance_slot.id,
             background_path_queue_id = 2,
             background_path_vector = owned_nvme_interrupt_routes.background_vector,
-            active_lba_size = 512,
+            active_lba_size = storage.namespace.logical_block_size,
             selected_durability_mode = storage.first_append_durability_mode_value(),
             event_slot_size = STORAGE_EVENT_SLOT_SIZE,
             event_header_size = STORAGE_EVENT_HEADER_SIZE,
