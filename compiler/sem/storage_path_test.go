@@ -114,6 +114,36 @@ image StorageImage {
 	}
 }
 
+func TestStoragePathWrongOwnerInlineWrapperFails(t *testing.T) {
+	modules := parseModulesForTest(t, storagePathPrelude+`
+image StorageImage {
+    transitions {
+        delegated_hardware -> owned_hardware
+    }
+
+    phase delegated_hardware(hardware: DelegatedHardware) -> OwnedHardware {
+        return hardware.exit_to_owned_hardware()
+    }
+
+    phase owned_hardware(hardware: OwnedHardware) -> never {
+        let maintenance_slot = ExecutorSlot(id = 1)
+        let background = BackgroundStoragePath(nvme_path = NvmeIoPath(identity = PathIdentity(label = "nvme.background"), role = NvmePathRole(role = NVME_PATH_BACKGROUND), owner = maintenance_slot, queue_id = 2, vector = 81))
+        let foreground = ForegroundStoragePath(nvme_path = NvmeIoPath(identity = PathIdentity(label = "nvme.inline-background"), role = NvmePathRole(role = NVME_PATH_BACKGROUND), owner = maintenance_slot, queue_id = 2, vector = 81))
+        let stream_directory = StreamDirectory(next_stream_id = 0)
+        let metrics = StorageMetrics()
+        let writer = StorageWriter(foreground = foreground, background = background, stream_directory = stream_directory, metrics = metrics)
+        let result = writer.enqueue_atomic_group(group = PendingAtomicGroup())
+        while true {}
+    }
+}
+`)
+	index := mustBuildIndexAllowingMissingImage(t, modules)
+	_, ds := checkAllowingMissingImage(t, index, modules)
+	if !hasCode(ds, diag.SEM0111) {
+		t.Fatalf("diagnostics = %#v, want SEM0111", ds)
+	}
+}
+
 func countCode(ds []diag.Diagnostic, code string) int {
 	count := 0
 	for _, d := range ds {

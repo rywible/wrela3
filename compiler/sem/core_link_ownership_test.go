@@ -179,6 +179,20 @@ func TestCoreLinkWrongOwnerWithMultipleProducersFails(t *testing.T) {
 	}
 }
 
+func TestCoreLinkWrongOwnerThroughAliasFails(t *testing.T) {
+	source := strings.Replace(coreLinkWrongOwnerSource,
+		"let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)\n        let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)",
+		"let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)\n        let aliased_producer = producer\n        let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = aliased_producer, consumer = consumer)",
+		1,
+	)
+	modules := parseModulesForTest(t, strings.Split(source, "\n---\n")...)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
+	}
+}
+
 func TestCoreLinkWrongOwnerNegativeFixtureFails(t *testing.T) {
 	modules := parseAuthorityFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", "core_link_wrong_owner.wrela"))
 	index := mustBuildIndex(t, modules)

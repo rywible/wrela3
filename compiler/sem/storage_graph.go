@@ -258,7 +258,7 @@ func constNameArg(expr *ast.ConstructorExpr, name string) (string, bool) {
 	return named.Name, true
 }
 
-func (c *checker) storageWrapperPathRole(expr *ast.ConstructorExpr, scope *Scope) string {
+func (c *checker) storageWrapperPathRole(moduleName string, expr *ast.ConstructorExpr, scope *Scope) string {
 	if expr == nil || scope == nil {
 		return ""
 	}
@@ -266,21 +266,23 @@ func (c *checker) storageWrapperPathRole(expr *ast.ConstructorExpr, scope *Scope
 	if pathExpr == nil {
 		pathExpr = constructorArg(expr, "path")
 	}
-	named, ok := pathExpr.(*ast.NameExpr)
-	if !ok {
-		return ""
-	}
-	origin, ok := scope.LookupOrigin(named.Name)
-	if !ok {
-		return ""
-	}
-	label := origin.PathLabel
-	for _, path := range c.graph.StoragePaths {
-		if path.Label == label {
-			return path.Role
+	pathType := c.exprStaticType(moduleName, pathExpr, scope)
+	pathOrigin := c.originForExprValue(moduleName, pathExpr, pathType, scope)
+	return c.storagePathRoleForOrigin(pathOrigin)
+}
+
+func (c *checker) storagePathRoleForOrigin(origin localOrigin) string {
+	if origin.PathLabel != "" {
+		for _, path := range c.graph.StoragePaths {
+			if path.Label == origin.PathLabel {
+				return path.Role
+			}
 		}
 	}
-	return ""
+	if origin.Constructor == nil {
+		return ""
+	}
+	return storagePathRole(constructorArg(origin.Constructor, "role"))
 }
 
 func (c *checker) checkStoragePathOwnership() {
@@ -512,14 +514,17 @@ func (c *checker) coreLinkEndpointForBinding(role string, binding string) (CoreL
 
 func (c *checker) coreLinkEndpointForBindingInPhases(role string, binding string, phases []ast.PhaseDecl) (CoreLinkEndpointNode, bool) {
 	for _, phase := range phases {
-		if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, phase.Body); ok {
+		if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, phase.Body, map[string]bool{}); ok {
 			return endpoint, true
 		}
 	}
 	return CoreLinkEndpointNode{}, false
 }
 
-func (c *checker) coreLinkEndpointForBindingInStmts(role string, binding string, stmts []ast.Stmt) (CoreLinkEndpointNode, bool) {
+func (c *checker) coreLinkEndpointForBindingInStmts(role string, binding string, stmts []ast.Stmt, seen map[string]bool) (CoreLinkEndpointNode, bool) {
+	if binding == "" {
+		return CoreLinkEndpointNode{}, false
+	}
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.LetStmt:
@@ -527,39 +532,55 @@ func (c *checker) coreLinkEndpointForBindingInStmts(role string, binding string,
 				if constructor, ok := s.Expr.(*ast.ConstructorExpr); ok {
 					return c.coreLinkEndpointForConstructor(role, constructor)
 				}
+				if alias, ok := s.Expr.(*ast.NameExpr); ok {
+					if seen[binding] {
+						return CoreLinkEndpointNode{}, false
+					}
+					nextSeen := cloneBindingSeen(seen)
+					nextSeen[binding] = true
+					return c.coreLinkEndpointForBindingInStmts(role, alias.Name, stmts, nextSeen)
+				}
 			}
 		case *ast.IfStmt:
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Then); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Then, seen); ok {
 				return endpoint, true
 			}
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Else); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Else, seen); ok {
 				return endpoint, true
 			}
 		case *ast.WithStmt:
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body, seen); ok {
 				return endpoint, true
 			}
 		case *ast.WhileStmt:
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body, seen); ok {
 				return endpoint, true
 			}
 		case *ast.ForStmt:
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body, seen); ok {
 				return endpoint, true
 			}
 		case *ast.MatchStmt:
 			for _, arm := range s.Arms {
-				if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, arm.Body); ok {
+				if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, arm.Body, seen); ok {
 					return endpoint, true
 				}
 			}
 		case *ast.IfLetStmt:
-			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body, seen); ok {
 				return endpoint, true
 			}
 		}
 	}
 	return CoreLinkEndpointNode{}, false
+}
+
+func cloneBindingSeen(seen map[string]bool) map[string]bool {
+	next := map[string]bool{}
+	for key, value := range seen {
+		next[key] = value
+	}
+	return next
 }
 
 func storageCallHasForegroundPathArg(moduleName string, c *checker, expr *ast.CallExpr, scope *Scope) bool {

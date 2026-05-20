@@ -107,7 +107,7 @@ func (c *checker) recordStorageWriterConstructor(moduleName string, expr *ast.Co
 		}
 		fields[name] = named.Name
 		if name == "foreground" || name == "background" {
-			pathRoles[name] = c.storageWrapperPathRole(origin.Constructor, scope)
+			pathRoles[name] = c.storageWrapperPathRole(moduleName, origin.Constructor, scope)
 		}
 	}
 	_ = moduleName
