@@ -368,6 +368,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 	repoRoot := filepath.Clean(filepath.Join(workdir, "..", ".."))
 	paths := []string{
 		filepath.Join(repoRoot, "wrela/lang/core.wrela"),
+		filepath.Join(repoRoot, "wrela/arch/x86_64/io.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/boot_services.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/transition.wrela"),
 		filepath.Join(repoRoot, "wrela/platform/uefi/types.wrela"),
@@ -394,6 +395,7 @@ func parseUEFIModuleSet(t *testing.T) []*ast.Module {
 		filepath.Join(repoRoot, "wrela/machine/x86_64/interrupt_queue.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/timer.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/pci.wrela"),
+		filepath.Join(repoRoot, "wrela/machine/x86_64/qemu_fw_cfg.wrela"),
 		filepath.Join(repoRoot, "wrela/storage/format.wrela"),
 		filepath.Join(repoRoot, "wrela/storage/event_log.wrela"),
 		filepath.Join(repoRoot, "wrela/machine/x86_64/nvme.wrela"),

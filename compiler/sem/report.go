@@ -403,15 +403,6 @@ func storageCacheHitRateX1000(metrics map[string]uint64) uint64 {
 	if ppm, ok := metrics["stream_directory_cache_hit_rate_ppm"]; ok {
 		return ppm / 1000
 	}
-	hits, hasHits := metrics["stream_directory_cache_hits"]
-	misses, hasMisses := metrics["stream_directory_cache_misses"]
-	if hasHits || hasMisses {
-		total := hits + misses
-		if total == 0 {
-			return 0
-		}
-		return hits * 1000 / total
-	}
 	return 0
 }
 
@@ -935,7 +926,7 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		{hasFact("projection_rebuild_count"), "projection_rebuild_count"},
 		{hasFact("stream_directory_cache_hits"), "stream_directory_cache_hits"},
 		{hasFact("stream_directory_cache_misses"), "stream_directory_cache_misses"},
-		{hasFact("stream_directory_cache_hit_rate_ppm") || (hasFact("stream_directory_cache_hits") && hasFact("stream_directory_cache_misses")), "stream_directory_cache_hit_rate_x1000"},
+		{hasFact("stream_directory_cache_hit_rate_ppm"), "stream_directory_cache_hit_rate_x1000"},
 		{hasFact("core_link_committed_groups"), "core_link_committed_groups"},
 		{hasFact("core_link_backpressure_count"), "core_link_backpressure_count"},
 		{r.Storage.NvmePaths != nil, "nvme_paths"},

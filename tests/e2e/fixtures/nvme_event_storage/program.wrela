@@ -36,7 +36,7 @@ data DirectoryProjectionWorker {
         if event_type_id == 1003 {
             return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
         }
-        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = self.watermark)
+        return DirectoryProjectionWorker(projection_id = self.projection_id, watermark = last_event_id)
     }
 }
 

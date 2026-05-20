@@ -111,11 +111,18 @@ class NvmeAppendReporter {
             last_event_id = append.last_event_id,
             pending_write_count = durable.pending_write_count,
             completed_write_count = durable.completed_write_count,
-            batch_submitted = append.flush_requested,
+            batch_submitted = true,
             flush_required = durable.flush_required,
             flush_completed = durable.flush_completed,
             durability_failed = durable.durability_failed
         )
+        let acknowledged = writer.on_durability_completed(token = token)
+        if acknowledged.accepted == false {
+            BootPanic().fail(code = acknowledged.reject_code)
+        }
+        if acknowledged.open_batch_slots != 0 {
+            BootPanic().fail(code = 0xAC0801AE)
+        }
         let committed = writer.publish_committed_group(token = token)
         if committed.last_event_id != 1 {
             BootPanic().fail(code = 0xAC08014A)
