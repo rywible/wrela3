@@ -275,6 +275,25 @@ func TestRecoverySkipsReservedEmptySlots(t *testing.T) {
 	}
 }
 
+func TestRecoveryValidatesAtomicGroupMembers(t *testing.T) {
+	first := ValidSlotForTest(0)
+	first.Header.AtomicGroupLen = 2
+	first.Header.AtomicGroupIndex = 0
+	RefreshSlotChecksum(&first)
+	second := ValidSlotForTest(1)
+	second.Header.AtomicGroupLen = 2
+	second.Header.AtomicGroupIndex = 0
+	RefreshSlotChecksum(&second)
+
+	got := RecoverSlots([]Slot{first, second})
+	if got.StopReason != StopIncompleteAtomicGroup {
+		t.Fatalf("stop reason = %v, want incomplete atomic group", got.StopReason)
+	}
+	if got.VisibleEvents != 0 || got.NextEventID != 0 {
+		t.Fatalf("recovery = %#v, want no visible events before malformed group", got)
+	}
+}
+
 func TestPackedSegmentCodecStripsPadding(t *testing.T) {
 	slot := ValidSlotForTest(0)
 	slot.Header.PayloadLength = 12
@@ -342,6 +361,20 @@ func TestOrphanCollectorUsesAcknowledgedBlobRefs(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("reclaimable[%d] = %#v, want %#v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestOrphanCollectorMatchesAcknowledgedRefsByExtent(t *testing.T) {
+	collector := NewOrphanCollector([]Extent{{StartLBA: 10, BlockCount: 2}})
+	collector.MarkAcknowledged(BlobRef{BlobID: 1, StartLBA: 10, BlockCount: 2})
+
+	if got := collector.Reclaimable(); len(got) != 0 {
+		t.Fatalf("reclaimable = %#v, want nonzero blob ID ref to acknowledge extent", got)
+	}
+
+	collector.MarkUnacknowledged(BlobRef{BlobID: 2, StartLBA: 10, BlockCount: 2})
+	if got := collector.Reclaimable(); len(got) != 1 || got[0].StartLBA != 10 || got[0].BlockCount != 2 {
+		t.Fatalf("reclaimable after unacknowledge = %#v, want original extent", got)
 	}
 }
 
@@ -524,6 +557,23 @@ func TestStorageWriterConsumesReservedEmptyEventIDs(t *testing.T) {
 	}
 	if writer.NextEventID != 9 || writer.OpenBatchSlots != 9 {
 		t.Fatalf("writer state = %#v, want next_event_id=9 open_batch_slots=9", writer)
+	}
+}
+
+func TestStorageWriterClearsFlushedBatchAfterDurability(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: StorageTargetBatchSlots}
+
+	got := writer.OnDurabilityCompleted(CommitToken{
+		FirstEventID:        0,
+		LastEventID:         63,
+		PendingWriteCount:   1,
+		CompletedWriteCount: 1,
+		FlushRequired:       true,
+		FlushCompleted:      true,
+		DurabilityFailed:    false,
+	})
+	if !got.Accepted || got.OpenBatchSlots != 0 || writer.OpenBatchSlots != 0 {
+		t.Fatalf("durability completion = %#v, writer = %#v; want flushed slots cleared", got, writer)
 	}
 }
 

@@ -444,8 +444,8 @@ func TestNvmeCompletionSubscriptionHelpersLowerToConcreteTopic(t *testing.T) {
 		}
 	}
 	for _, prefix := range []string{
-		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_write_first_append_topic",
-		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_read_replay_state_topic",
+		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_write_first_append_for_lba_topic",
+		"_wrela_method_machine_x86_64_nvme_NvmeDirectStorage_read_replay_state_for_lba_topic",
 	} {
 		fn := firstIRFunctionWithPrefix(program, prefix)
 		if fn == nil {

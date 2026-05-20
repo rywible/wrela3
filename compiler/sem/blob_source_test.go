@@ -191,13 +191,13 @@ func TestBlobWriterRelocationMirrorContract(t *testing.T) {
 	modules := parseStorageWriterModules(t, `
 module sem.blob_writer_relocation_mirror
 
-use { StorageWriter, BlobRelocateResult } from storage.writer
+use { StorageWriter, BlobRelocateRequest, BlobRelocateResult } from storage.writer
 use { BlobTruth, RelocateBlobProposal } from storage.blob
 
-class BlobWriterRelocationMirror {
-    fn run(self, writer: StorageWriter, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {
-        return writer.accept_relocate_blob(truth = truth, proposal = proposal)
-    }
+data BlobWriterRelocationMirror {
+    writer: StorageWriter
+    request: BlobRelocateRequest
+    result: BlobRelocateResult
 }
 `)
 	index := mustBuildIndexAllowingMissingImage(t, modules)
@@ -212,13 +212,17 @@ class BlobWriterRelocationMirror {
 		"truth":  "BlobTruth",
 	})
 	writer := moduleType(t, index, "storage.writer", "StorageWriter")
-	assertMethodSignature(t, methodByName(t, writer, "accept_relocate_blob"), []string{"truth:BlobTruth", "proposal:RelocateBlobProposal"}, "BlobRelocateResult")
+	assertTypeFields(t, moduleType(t, index, "storage.writer", "BlobRelocateRequest"), map[string]string{
+		"truth":    "BlobTruth",
+		"proposal": "RelocateBlobProposal",
+	})
+	assertMethodSignature(t, methodByName(t, writer, "accept_relocate_blob"), []string{"request:BlobRelocateRequest"}, "BlobRelocateResult")
 	source := readRepoFile(t, "wrela/storage/writer.wrela")
-	accept := sourceBetween(t, source, "fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {", "\n    }\n}")
+	accept := sourceBetween(t, source, "fn accept_relocate_blob(self, request: BlobRelocateRequest) -> BlobRelocateResult {", "\n    }\n}")
 	for _, want := range []string{
-		"if truth.accept_relocate(proposal = proposal) == false",
+		"if request.truth.accept_relocate(proposal = request.proposal) == false",
 		"append = StorageAppendResult(accepted = false",
-		"truth = truth",
+		"truth = request.truth",
 		"append = StorageAppendResult(accepted = true",
 	} {
 		if !strings.Contains(accept, want) {

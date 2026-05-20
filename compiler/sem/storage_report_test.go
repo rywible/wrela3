@@ -15,6 +15,20 @@ import (
 
 func TestStorageMetricsReportPopulation(t *testing.T) {
 	checked := &CheckedProgram{
+		Modules: []*ast.Module{storageReportMetricsModule(
+			ast.NamedArg{Name: "selected_durability_mode", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "512"}},
+			ast.NamedArg{Name: "append_latency_us", Value: &ast.IntLiteral{Value: "10"}},
+			ast.NamedArg{Name: "durability_latency_us", Value: &ast.IntLiteral{Value: "2000"}},
+			ast.NamedArg{Name: "device_media_write_commands", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "device_media_write_bytes", Value: &ast.IntLiteral{Value: "512"}},
+			ast.NamedArg{Name: "blob_orphan_bytes", Value: &ast.IntLiteral{Value: "448"}},
+			ast.NamedArg{Name: "projection_lag_events", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "core_link_committed_groups", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "core_link_backpressure_count", Value: &ast.IntLiteral{Value: "0"}},
+			ast.NamedArg{Name: "projection_upcast_count", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "projection_rebuild_count", Value: &ast.IntLiteral{Value: "1"}},
+		)},
 		ImageGraph: ImageGraph{
 			StoragePaths: []StoragePathNode{
 				{Label: "nvme.foreground", Role: "foreground", Owner: "foreground", QueueID: 1, Vector: 80},
@@ -109,6 +123,10 @@ func TestStorageReportDurabilityModeUsesSelectedMetricsLiteral(t *testing.T) {
 
 func TestStorageReportDurabilityModeUsesRuntimeNvmeFacts(t *testing.T) {
 	checked := storageReportCheckedProgramWithMetricsExpr(&ast.CallExpr{Method: "first_append_durability_mode_value"})
+	checked.Modules[0] = storageReportMetricsModule(
+		ast.NamedArg{Name: "selected_durability_mode", Value: &ast.CallExpr{Method: "first_append_durability_mode_value"}},
+		ast.NamedArg{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "512"}},
+	)
 	checked.Modules = append(checked.Modules, &ast.Module{
 		Name: "machine.x86_64.nvme",
 		Decls: []ast.Decl{&ast.ClassDecl{
@@ -140,6 +158,7 @@ func TestStorageReportUsesStorageMetricsConstructorFacts(t *testing.T) {
 					Type: ast.TypeRef{Name: "StorageMetrics"},
 					Args: []ast.NamedArg{
 						{Name: "selected_durability_mode", Value: &ast.IntLiteral{Value: "1"}},
+						{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "512"}},
 						{Name: "foreground_path_queue_id", Value: &ast.IntLiteral{Value: "3"}},
 						{Name: "foreground_path_vector", Value: &ast.IntLiteral{Value: "90"}},
 						{Name: "background_path_queue_id", Value: &ast.IntLiteral{Value: "4"}},
@@ -239,6 +258,7 @@ func TestStorageReportUsesStorageMetricsConstantFacts(t *testing.T) {
 					Type: ast.TypeRef{Name: "StorageMetrics"},
 					Args: []ast.NamedArg{
 						{Name: "selected_durability_mode", Value: &ast.IntLiteral{Value: "1"}},
+						{Name: "active_lba_size", Value: &ast.IntLiteral{Value: "512"}},
 						{Name: "foreground_io_queue_depth", Value: &ast.NameExpr{Name: "FOREGROUND_DEPTH"}},
 					},
 				},
@@ -249,6 +269,52 @@ func TestStorageReportUsesStorageMetricsConstantFacts(t *testing.T) {
 	r := BuildImageReport(checked)
 	if r.Storage.ForegroundIOQueueDepth != 99 || len(r.Storage.NvmePaths) != 2 || r.Storage.NvmePaths[0].QueueDepth != 99 {
 		t.Fatalf("constant-backed foreground depth not reported: storage=%#v paths=%#v", r.Storage, r.Storage.NvmePaths)
+	}
+}
+
+func TestStorageReportDoesNotSynthesizeRequiredRuntimeMetrics(t *testing.T) {
+	checked := storageReportCheckedProgramWithMetricsExpr(&ast.IntLiteral{Value: "1"})
+	checked.ImageGraph.CoreLinkEndpoints = []CoreLinkEndpointNode{{Label: "core_link.producer.0", Depth: 16}}
+	checked.ImageGraph.ProjectionFeeds = []ProjectionFeedNode{{Projection: "DirectoryChildren"}}
+	checked.Storage.ProjectionsByID = map[uint64]ProjectionInfo{
+		12: {Name: "DirectoryChildren", ProjectionID: 12, Layouts: []ProjectionLayoutInfo{{ID: 1}, {ID: 2}}},
+	}
+
+	r := BuildImageReport(checked)
+	for name, got := range map[string]uint64{
+		"active_lba_size":              r.Storage.ActiveLBASize,
+		"append_latency_p50_us":        r.Storage.AppendLatencyP50US,
+		"append_latency_p99_us":        r.Storage.AppendLatencyP99US,
+		"device_reported_media_writes": r.Storage.DeviceReportedMediaWrites,
+		"media_write_bytes":            r.Storage.MediaWriteBytes,
+		"blob_orphan_bytes":            r.Storage.BlobOrphanBytes,
+		"projection_lag_events":        r.Storage.ProjectionLagEvents,
+		"projection_upcast_count":      r.Storage.ProjectionUpcastCount,
+		"projection_rebuild_count":     r.Storage.ProjectionRebuildCount,
+		"core_link_committed_groups":   r.Storage.CoreLinkCommittedGroups,
+	} {
+		if got != 0 {
+			t.Fatalf("%s was synthesized as %d; required runtime metrics must come from facts", name, got)
+		}
+	}
+}
+
+func TestStorageReportMissingPlanRequiredMetricsEmitsSEM0124(t *testing.T) {
+	r := BuildImageReport(storageReportCheckedProgramWithMetricsExpr(&ast.IntLiteral{Value: "1"}))
+
+	ds := ValidateStorageReportContent(r)
+	for _, metric := range []string{
+		"active_lba_size",
+		"blob_orphan_bytes",
+		"projection_lag_events",
+		"projection_upcast_count",
+		"projection_rebuild_count",
+		"core_link_committed_groups",
+		"core_link_backpressure_count",
+	} {
+		if !hasDiagnosticMessage(ds, metric) {
+			t.Fatalf("diagnostics = %#v, want missing %s", ds, metric)
+		}
 	}
 }
 
@@ -267,6 +333,7 @@ func TestStorageReportUsesNvmeFixtureStorageMetricsFacts(t *testing.T) {
 		t.Fatalf("fixture interrupt mode = %q shared=%v", r.Storage.InterruptMode, r.Storage.MsiFallbackSharesVector)
 	}
 	for name, got := range map[string]uint64{
+		"active_lba_size":                     r.Storage.ActiveLBASize,
 		"event_header_size":                   r.Storage.EventHeaderSize,
 		"event_payload_bytes":                 r.Storage.EventPayloadBytes,
 		"event_slots_written":                 r.Storage.EventSlotsWritten,
@@ -332,21 +399,7 @@ func checkedStorageReportProgramAt(t *testing.T, rootPath string) *CheckedProgra
 
 func storageReportCheckedProgramWithMetricsExpr(expr ast.Expr) *CheckedProgram {
 	return &CheckedProgram{
-		Modules: []*ast.Module{{
-			Name: "storage.report.test",
-			Decls: []ast.Decl{&ast.ImageDecl{
-				Name: "StorageReportImage",
-				Phases: []ast.PhaseDecl{{
-					Body: []ast.Stmt{&ast.LetStmt{
-						Name: "metrics",
-						Expr: &ast.ConstructorExpr{
-							Type: ast.TypeRef{Name: "StorageMetrics"},
-							Args: []ast.NamedArg{{Name: "selected_durability_mode", Value: expr}},
-						},
-					}},
-				}},
-			}},
-		}},
+		Modules: []*ast.Module{storageReportMetricsModule(ast.NamedArg{Name: "selected_durability_mode", Value: expr})},
 		ImageGraph: ImageGraph{
 			StoragePaths: []StoragePathNode{
 				{Label: "nvme.foreground", Role: "foreground", Owner: "foreground", QueueID: 1, Vector: 80},
@@ -354,6 +407,24 @@ func storageReportCheckedProgramWithMetricsExpr(expr ast.Expr) *CheckedProgram {
 			},
 			StorageAppendCalls: []StorageAppendCallNode{{ResultObserved: true}},
 		},
+	}
+}
+
+func storageReportMetricsModule(args ...ast.NamedArg) *ast.Module {
+	return &ast.Module{
+		Name: "storage.report.test",
+		Decls: []ast.Decl{&ast.ImageDecl{
+			Name: "StorageReportImage",
+			Phases: []ast.PhaseDecl{{
+				Body: []ast.Stmt{&ast.LetStmt{
+					Name: "metrics",
+					Expr: &ast.ConstructorExpr{
+						Type: ast.TypeRef{Name: "StorageMetrics"},
+						Args: args,
+					},
+				}},
+			}},
+		}},
 	}
 }
 

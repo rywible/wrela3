@@ -60,6 +60,11 @@ data BlobRelocateResult {
     truth: BlobTruth
 }
 
+class BlobRelocateRequest {
+    truth: BlobTruth
+    proposal: RelocateBlobProposal
+}
+
 data DurableBlobRef {
     unpublished: UnpublishedBlobRef
 }
@@ -116,6 +121,11 @@ data StorageWriter {
         if self.durable_frontier < token.last_event_id {
             self.durable_frontier = token.last_event_id
         }
+        if token.flush_required {
+            if token.flush_completed {
+                self.open_batch_slots = 0
+            }
+        }
         return StorageAppendResult(accepted = true, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = token.flush_required, reject_code = 0)
     }
 
@@ -144,16 +154,16 @@ data StorageWriter {
         return PublishedBlobRef(ref = durable.unpublished.ref)
     }
 
-    fn accept_relocate_blob(self, truth: BlobTruth, proposal: RelocateBlobProposal) -> BlobRelocateResult {
-        if truth.accept_relocate(proposal = proposal) == false {
+    fn accept_relocate_blob(self, request: BlobRelocateRequest) -> BlobRelocateResult {
+        if request.truth.accept_relocate(proposal = request.proposal) == false {
             return BlobRelocateResult(
                 append = StorageAppendResult(accepted = false, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 1118),
-                truth = truth
+                truth = request.truth
             )
         }
         return BlobRelocateResult(
             append = StorageAppendResult(accepted = true, first_event_id = 0, last_event_id = 0, open_batch_slots = self.open_batch_slots, flush_requested = false, reject_code = 0),
-            truth = truth
+            truth = request.truth
         )
     }
 }

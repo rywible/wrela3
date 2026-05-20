@@ -306,7 +306,8 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 	}
 	g := checked.ImageGraph
 	metrics := storageMetricsFacts(checked)
-	activeLBASize := uint64(512)
+	r.Storage.MetricFacts = storageMetricFactSet(metrics)
+	activeLBASize := storageMetric(metrics, "active_lba_size")
 	r.Storage.ActiveLBASize = activeLBASize
 	r.Storage.NamespaceMode = "conventional"
 	r.Storage.DurabilityMode = storageDurabilityModeForReport(checked, activeLBASize)
@@ -324,32 +325,29 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 	r.Storage.MaxAtomicGroupSlots = storagefmt.StorageMaxAtomicGroupSlots
 	r.Storage.BatchesSubmitted = storageMetricOrDefault(metrics, "batches_submitted", uint64(len(g.StorageAppendCalls)))
 	r.Storage.BatchOverflowCount = storageMetricOrDefault(metrics, "batch_overflow_count", 0)
-	r.Storage.AppendLatencyP50US = storageMetricOrDefault(metrics, "append_latency_us", 10)
-	r.Storage.AppendLatencyP99US = storageMetricOrDefault(metrics, "durability_latency_us", storagefmt.StorageGroupCommitTimerUS)
-	r.Storage.DeviceReportedMediaWrites = storageMetricOrDefault(metrics, "device_media_write_commands", uint64(len(g.StorageAppendCalls)))
-	if r.Storage.DeviceReportedMediaWrites == 0 {
-		r.Storage.DeviceReportedMediaWrites = uint64(len(g.StorageWriters))
-	}
+	r.Storage.AppendLatencyP50US = storageMetric(metrics, "append_latency_us")
+	r.Storage.AppendLatencyP99US = storageMetric(metrics, "durability_latency_us")
+	r.Storage.DeviceReportedMediaWrites = storageMetric(metrics, "device_media_write_commands")
 	if r.Storage.EventSlotsWritten == 0 {
 		r.Storage.EventSlotsWritten = r.Storage.DeviceReportedMediaWrites
 	}
 	if r.Storage.BatchesSubmitted == 0 {
 		r.Storage.BatchesSubmitted = r.Storage.DeviceReportedMediaWrites
 	}
-	r.Storage.MediaWriteBytes = storageMetricOrDefault(metrics, "device_media_write_bytes", r.Storage.DeviceReportedMediaWrites*r.Storage.EventSlotSize)
-	r.Storage.BlobOrphanBytes = storageMetricOrDefault(metrics, "blob_orphan_bytes", uint64(len(g.StorageAppendCalls))*storagefmt.EventPayloadBytes)
+	r.Storage.MediaWriteBytes = storageMetric(metrics, "device_media_write_bytes")
+	r.Storage.BlobOrphanBytes = storageMetric(metrics, "blob_orphan_bytes")
 	r.Storage.AdminQueueDepth = storageMetricOrDefault(metrics, "admin_queue_depth", storagefmt.StorageAdminQueueDepth)
 	r.Storage.ForegroundIOQueueDepth = storageMetricOrDefault(metrics, "foreground_io_queue_depth", storagefmt.StorageForegroundIOQueueDepth)
 	r.Storage.BackgroundIOQueueDepth = storageMetricOrDefault(metrics, "background_io_queue_depth", storagefmt.StorageBackgroundIOQueueDepth)
-	r.Storage.ProjectionLagEvents = storageMetricOrDefault(metrics, "projection_lag_events", uint64(len(g.ProjectionFeeds)))
+	r.Storage.ProjectionLagEvents = storageMetric(metrics, "projection_lag_events")
 	r.Storage.EventUpcastCount = storageMetricOrDefault(metrics, "event_upcast_count", storageEventUpcastCount(checked.Storage))
-	r.Storage.ProjectionUpcastCount = storageMetricOrDefault(metrics, "projection_upcast_count", storageProjectionUpcastCount(checked.Storage))
-	r.Storage.ProjectionRebuildCount = storageMetricOrDefault(metrics, "projection_rebuild_count", uint64(len(g.ProjectionFeeds)))
+	r.Storage.ProjectionUpcastCount = storageMetric(metrics, "projection_upcast_count")
+	r.Storage.ProjectionRebuildCount = storageMetric(metrics, "projection_rebuild_count")
 	r.Storage.StreamDirectoryCacheHits = storageMetricOrDefault(metrics, "stream_directory_cache_hits", 1)
 	r.Storage.StreamDirectoryCacheMisses = storageMetricOrDefault(metrics, "stream_directory_cache_misses", 0)
 	r.Storage.StreamDirectoryCacheHitRateX1000 = storageCacheHitRateX1000(metrics)
-	r.Storage.CoreLinkCommittedGroups = storageMetricOrDefault(metrics, "core_link_committed_groups", 0)
-	r.Storage.CoreLinkBackpressureCount = storageMetricOrDefault(metrics, "core_link_backpressure_count", 0)
+	r.Storage.CoreLinkCommittedGroups = storageMetric(metrics, "core_link_committed_groups")
+	r.Storage.CoreLinkBackpressureCount = storageMetric(metrics, "core_link_backpressure_count")
 	for _, path := range g.StoragePaths {
 		queueID := path.QueueID
 		vector := path.Vector
@@ -387,6 +385,18 @@ func storageMetricOrDefault(metrics map[string]uint64, name string, fallback uin
 		return value
 	}
 	return fallback
+}
+
+func storageMetric(metrics map[string]uint64, name string) uint64 {
+	return storageMetricOrDefault(metrics, name, 0)
+}
+
+func storageMetricFactSet(metrics map[string]uint64) map[string]bool {
+	facts := map[string]bool{}
+	for name := range metrics {
+		facts[name] = true
+	}
+	return facts
 }
 
 func storageCacheHitRateX1000(metrics map[string]uint64) uint64 {
@@ -881,11 +891,14 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 	if !reportHasStorage(r.Storage) {
 		return nil
 	}
+	hasFact := func(name string) bool {
+		return r.Storage.MetricFacts[name]
+	}
 	required := []struct {
 		ok   bool
 		name string
 	}{
-		{r.Storage.ActiveLBASize != 0, "active_lba_size"},
+		{hasFact("active_lba_size") && r.Storage.ActiveLBASize != 0, "active_lba_size"},
 		{r.Storage.NamespaceMode != "", "namespace_mode"},
 		{r.Storage.DurabilityMode != "", "durability_mode"},
 		{r.Storage.InterruptMode != "", "interrupt_mode"},
@@ -898,15 +911,21 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		{r.Storage.MaxBatchSlots != 0, "max_batch_slots"},
 		{r.Storage.MaxAtomicGroupSlots != 0, "max_atomic_group_slots"},
 		{r.Storage.BatchesSubmitted != 0, "batches_submitted"},
-		{r.Storage.AppendLatencyP50US != 0, "append_latency_p50_us"},
-		{r.Storage.AppendLatencyP99US != 0, "append_latency_p99_us"},
-		{r.Storage.DeviceReportedMediaWrites != 0, "device_reported_media_writes"},
-		{r.Storage.MediaWriteBytes != 0, "media_write_bytes"},
+		{hasFact("append_latency_us"), "append_latency_p50_us"},
+		{hasFact("durability_latency_us"), "append_latency_p99_us"},
+		{hasFact("device_media_write_commands"), "device_reported_media_writes"},
+		{hasFact("device_media_write_bytes"), "media_write_bytes"},
 		{r.Storage.AdminQueueDepth != 0, "admin_queue_depth"},
 		{r.Storage.ForegroundIOQueueDepth != 0, "foreground_io_queue_depth"},
 		{r.Storage.BackgroundIOQueueDepth != 0, "background_io_queue_depth"},
+		{hasFact("blob_orphan_bytes"), "blob_orphan_bytes"},
+		{hasFact("projection_lag_events"), "projection_lag_events"},
+		{hasFact("projection_upcast_count"), "projection_upcast_count"},
+		{hasFact("projection_rebuild_count"), "projection_rebuild_count"},
 		{r.Storage.StreamDirectoryCacheHits+r.Storage.StreamDirectoryCacheMisses != 0, "stream_directory_cache_hits"},
 		{r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
+		{hasFact("core_link_committed_groups"), "core_link_committed_groups"},
+		{hasFact("core_link_backpressure_count"), "core_link_backpressure_count"},
 		{r.Storage.NvmePaths != nil, "nvme_paths"},
 		{hasStoragePathRole(r.Storage.NvmePaths, "foreground"), "nvme_paths.foreground"},
 		{hasStoragePathRole(r.Storage.NvmePaths, "background"), "nvme_paths.background"},

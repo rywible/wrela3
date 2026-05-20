@@ -1,6 +1,7 @@
 package sem
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,5 +162,28 @@ func TestCoreLinkWrongOwnerFails(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing core link endpoints %#v", want)
+	}
+}
+
+func TestCoreLinkWrongOwnerWithMultipleProducersFails(t *testing.T) {
+	source := strings.Replace(coreLinkWrongOwnerSource,
+		"let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)\n        let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)",
+		"let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)\n        let local_producer = CoreSpscProducer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)\n        let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)",
+		1,
+	)
+	modules := parseModulesForTest(t, strings.Split(source, "\n---\n")...)
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
+	}
+}
+
+func TestCoreLinkWrongOwnerNegativeFixtureFails(t *testing.T) {
+	modules := parseAuthorityFixtureModulesForTest(t, filepath.Join("tests", "fixtures", "negative", "core_link_wrong_owner.wrela"))
+	index := mustBuildIndex(t, modules)
+	_, ds := Check(index, modules)
+	if !hasCode(ds, diag.SEM0112) {
+		t.Fatalf("diagnostics = %#v, want SEM0112", ds)
 	}
 }

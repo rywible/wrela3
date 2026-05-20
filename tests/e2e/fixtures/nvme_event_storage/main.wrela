@@ -271,6 +271,7 @@ image NvmeEventStorageImage {
                 submission_queue = storage_seed.queues.foreground_io_sq,
                 submission_tail = 0,
                 submission_depth = 256,
+                logical_block_size = 512,
                 next_command_id = 1,
                 completion_queue = foreground_completion_queue,
                 irq = nvme_foreground_interrupts
@@ -287,6 +288,7 @@ image NvmeEventStorageImage {
                 submission_queue = storage_seed.queues.background_io_sq,
                 submission_tail = 0,
                 submission_depth = 128,
+                logical_block_size = 512,
                 next_command_id = 1,
                 completion_queue = background_completion_queue,
                 irq = nvme_background_interrupts
@@ -329,6 +331,7 @@ image NvmeEventStorageImage {
             background_path_owner = maintenance_slot.id,
             background_path_queue_id = 2,
             background_path_vector = owned_nvme_interrupt_routes.background_vector,
+            active_lba_size = 512,
             selected_durability_mode = storage.first_append_durability_mode_value(),
             event_slot_size = STORAGE_EVENT_SLOT_SIZE,
             event_header_size = STORAGE_EVENT_HEADER_SIZE,

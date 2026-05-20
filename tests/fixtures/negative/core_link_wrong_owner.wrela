@@ -95,6 +95,7 @@ image CoreLinkWrongOwnerImage {
         let control = MutableSlice<U64>(address = 64, length = 3)
         let wake = WakeStrategy(monitor_mwait = false, fallback_hlt = true)
         let producer = CoreSpscProducer<U64>(owner = producer_owner, peer = consumer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)
+        let local_producer = CoreSpscProducer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, credits = 8, wake_strategy = wake)
         let consumer = CoreSpscConsumer<U64>(owner = consumer_owner, peer = producer_owner, slots = slots, control = control, capacity = 8, head = 0, tail = 0, wait_armed = false, wake_strategy = wake)
         let worker = Worker(slot = consumer_owner, loop = HotPollPolicy(), producer = producer, consumer = consumer)
         while true {}

@@ -2,8 +2,6 @@ module tests.e2e.fixtures.nvme_event_storage.program
 
 use { BLOB_ALLOCATOR_FREE_EXTENT_LIMIT, BlobOrphanCollector, BlobRef, BlobTruth, Extent, PublishedBlobRef, RelocateBlobProposal } from storage.blob
 use { MutableSlice } from machine.x86_64.executor_memory
-use { EventRecoveryScanner } from storage.event_log
-use { EventSlotHeader } from storage.format
 
 data FileId {
     value: U64
@@ -104,39 +102,7 @@ data FirstAppendBuilder {
         recovery: ReplayRecovery,
         scratch: ReplayScratch
     ) -> ReplayOutcome {
-        let first_header = EventSlotHeader(
-            event_id = 0,
-            stream_id = events.created.file_id.value,
-            stream_sequence = events.created.stream_sequence,
-            event_type_id = 1001,
-            payload_layout_id = 1,
-            atomic_group_len = 2,
-            atomic_group_index = 0,
-            payload_length = 0,
-            flags = 0,
-            checksum32 = 0,
-            header_version = 1,
-            reserved16 = 0,
-            reserved64 = 0
-        )
-        let second_header = EventSlotHeader(
-            event_id = 1,
-            stream_id = events.committed.file_id.value,
-            stream_sequence = events.committed.stream_sequence,
-            event_type_id = 1003,
-            payload_layout_id = 1,
-            atomic_group_len = 2,
-            atomic_group_index = 1,
-            payload_length = 0,
-            flags = 0,
-            checksum32 = 0,
-            header_version = 1,
-            reserved16 = 0,
-            reserved64 = 0
-        )
-        let scanner = EventRecoveryScanner()
-        let first_recovery = scanner.validate_group_member(header = first_header)
-        let projected = events.directory_worker.apply_group(last_event_id = second_header.event_id, event_type_id = 1003)
+        let projected = events.directory_worker.apply_group(last_event_id = recovery.last_event_id, event_type_id = 1003)
         let facts = self.blob_facts(scratch = scratch)
         let old_ref = BlobRef(blob_id = facts.acknowledged_blob_id, start_lba = facts.acknowledged_start_lba, block_count = facts.acknowledged_block_count)
         let new_ref = BlobRef(blob_id = facts.relocated_blob_id, start_lba = facts.relocated_start_lba, block_count = facts.relocated_block_count)
@@ -152,8 +118,7 @@ data FirstAppendBuilder {
         let reclaimed = collector.reclaimable(scratch = scratch.allocated_extents)
         let orphan_collected = false
         if relocation_accepted == false {
-            if first_recovery.visible_events == 1 {
-                if second_header.event_id == 1 {
+            if recovery.last_event_id == 1 {
                     if reclaimed.extent_count == 2 {
                         let first_reclaimed = reclaimed.extents.get(index = 0)
                         let second_reclaimed = reclaimed.extents.get(index = 1)
@@ -167,11 +132,10 @@ data FirstAppendBuilder {
                             }
                         }
                     }
-                }
             }
         }
         let last_event_id = 0
-        if second_header.event_id == recovery.last_event_id {
+        if recovery.last_event_id == 1 {
             last_event_id = recovery.last_event_id
         }
         let projection_watermark = 0

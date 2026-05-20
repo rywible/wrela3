@@ -403,7 +403,7 @@ func coreLinkEndpointLabel(role string, owner string) string {
 }
 
 func (c *checker) checkStoragePathSubmitCall(moduleName string, expr *ast.CallExpr, receiverType *Type, scope *Scope) {
-	c.checkCoreLinkEndpointCall(expr, receiverType)
+	c.checkCoreLinkEndpointCall(moduleName, expr, receiverType, scope)
 	if receiverType != nil && receiverType.Name == "MaintenanceWorker" && expr.Method == "submit" {
 		if storageCallHasForegroundPathArg(moduleName, c, expr, scope) {
 			c.error(expr.SpanV, diag.SEM0111, "maintenance worker cannot submit through foreground NVMe path")
@@ -418,7 +418,7 @@ func (c *checker) checkStoragePathSubmitCall(moduleName string, expr *ast.CallEx
 	}
 }
 
-func (c *checker) checkCoreLinkEndpointCall(expr *ast.CallExpr, receiverType *Type) {
+func (c *checker) checkCoreLinkEndpointCall(moduleName string, expr *ast.CallExpr, receiverType *Type, scope *Scope) {
 	role := ""
 	switch {
 	case receiverType != nil && receiverType.Module == "machine.x86_64.core_link" && receiverType.Name == "CoreSpscProducer" && expr.Method == "try_send":
@@ -432,7 +432,7 @@ func (c *checker) checkCoreLinkEndpointCall(expr *ast.CallExpr, receiverType *Ty
 	if owner == "" {
 		return
 	}
-	endpoint, ok := c.singleCoreLinkEndpoint(role)
+	endpoint, ok := c.coreLinkEndpointForReceiver(moduleName, expr.Receiver, receiverType, role, scope)
 	if !ok || endpoint.Owner == "" || endpoint.Owner == owner {
 		return
 	}
@@ -451,18 +451,115 @@ func (c *checker) currentExecutorSlotLabel() string {
 	return ""
 }
 
-func (c *checker) singleCoreLinkEndpoint(role string) (CoreLinkEndpointNode, bool) {
-	var out CoreLinkEndpointNode
-	for _, endpoint := range c.graph.CoreLinkEndpoints {
-		if endpoint.Role != role {
-			continue
-		}
-		if out.Role != "" {
-			return CoreLinkEndpointNode{}, false
-		}
-		out = endpoint
+func (c *checker) coreLinkEndpointForReceiver(moduleName string, receiver ast.Expr, receiverType *Type, role string, scope *Scope) (CoreLinkEndpointNode, bool) {
+	origin := c.originForExprValue(moduleName, receiver, receiverType, scope)
+	if origin.Constructor != nil {
+		return c.coreLinkEndpointForConstructor(role, origin.Constructor)
 	}
-	return out, out.Role != ""
+	if field, ok := receiver.(*ast.FieldExpr); ok {
+		if binding := c.currentExecutorFieldBinding(field); binding != "" {
+			return c.coreLinkEndpointForBinding(role, binding)
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) coreLinkEndpointForConstructor(role string, constructor *ast.ConstructorExpr) (CoreLinkEndpointNode, bool) {
+	if constructor == nil {
+		return CoreLinkEndpointNode{}, false
+	}
+	for _, endpoint := range c.graph.CoreLinkEndpoints {
+		if endpoint.Role == role && endpoint.Span.Start == constructor.SpanV.Start && endpoint.Span.End == constructor.SpanV.End {
+			return endpoint, true
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) currentExecutorFieldBinding(field *ast.FieldExpr) string {
+	if c.currentType == nil || field == nil || field.Field == "" {
+		return ""
+	}
+	base, ok := field.Base.(*ast.NameExpr)
+	if !ok || base.Name != "self" {
+		return ""
+	}
+	for _, exec := range c.graph.Executors {
+		if exec.Type != nil && exec.Type.Key() == c.currentType.Key() {
+			return exec.FieldBindings[field.Field]
+		}
+	}
+	return ""
+}
+
+func (c *checker) coreLinkEndpointForBinding(role string, binding string) (CoreLinkEndpointNode, bool) {
+	if binding == "" {
+		return CoreLinkEndpointNode{}, false
+	}
+	for _, module := range c.modules {
+		for _, decl := range module.Decls {
+			image, ok := decl.(*ast.ImageDecl)
+			if !ok {
+				continue
+			}
+			if endpoint, ok := c.coreLinkEndpointForBindingInPhases(role, binding, image.Phases); ok {
+				return endpoint, true
+			}
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) coreLinkEndpointForBindingInPhases(role string, binding string, phases []ast.PhaseDecl) (CoreLinkEndpointNode, bool) {
+	for _, phase := range phases {
+		if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, phase.Body); ok {
+			return endpoint, true
+		}
+	}
+	return CoreLinkEndpointNode{}, false
+}
+
+func (c *checker) coreLinkEndpointForBindingInStmts(role string, binding string, stmts []ast.Stmt) (CoreLinkEndpointNode, bool) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.LetStmt:
+			if s.Name == binding {
+				if constructor, ok := s.Expr.(*ast.ConstructorExpr); ok {
+					return c.coreLinkEndpointForConstructor(role, constructor)
+				}
+			}
+		case *ast.IfStmt:
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Then); ok {
+				return endpoint, true
+			}
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Else); ok {
+				return endpoint, true
+			}
+		case *ast.WithStmt:
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+				return endpoint, true
+			}
+		case *ast.WhileStmt:
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+				return endpoint, true
+			}
+		case *ast.ForStmt:
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+				return endpoint, true
+			}
+		case *ast.MatchStmt:
+			for _, arm := range s.Arms {
+				if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, arm.Body); ok {
+					return endpoint, true
+				}
+			}
+		case *ast.IfLetStmt:
+			if endpoint, ok := c.coreLinkEndpointForBindingInStmts(role, binding, s.Body); ok {
+				return endpoint, true
+			}
+		}
+	}
+	return CoreLinkEndpointNode{}, false
 }
 
 func storageCallHasForegroundPathArg(moduleName string, c *checker, expr *ast.CallExpr, scope *Scope) bool {

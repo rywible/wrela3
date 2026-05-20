@@ -112,14 +112,14 @@ func TestNvmeDurabilityMirrorContract(t *testing.T) {
 	}
 	writeFirstAppend := sourceBetween(t, source, "fn write_first_append(self, foreground: ForegroundStoragePath, completions: TopicSubscription<NvmeCompletionInterrupt>) -> NvmeDurableWriteResult {", "\n    fn prepare_first_append_events")
 	assertOrderedSubstrings(t, writeFirstAppend, []string{
-		"let durability = self.first_append_durability_mode()",
-		"self.submit_io_write_blocks(",
+		"let durability = self.first_append_durability_mode_for_lba(logical_block_size = logical_block_size, supports_fua = supports_fua)",
+		"self.submit_first_append_write_data_buffer_blocks(",
 		"fua = durability.use_fua",
 		"self.wait_io_completion_interrupt(command_id = write.command_id, completions = completions)",
 		"if durability.requires_flush",
-		"self.submit_io_flush(namespace_id = self.namespace.namespace_id)",
+		"self.submit_io_flush(namespace_id = namespace_id)",
 		"self.wait_io_completion_interrupt(command_id = flush.command_id, completions = completions)",
-		"self.submit_io_read_blocks(",
+		"self.submit_first_append_read_data_buffer_blocks(",
 		"self.wait_io_completion_interrupt(command_id = verify.command_id, completions = completions)",
 		"return NvmeDurableWriteResult(",
 	})
@@ -203,8 +203,14 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	driver := moduleType(t, checked.Index, "machine.x86_64.nvme", "NvmeDriver")
 	for _, name := range []string{
 		"disable_controller",
+		"read_version",
 		"program_admin_queues",
 		"enable_controller",
+		"identify_controller",
+		"identify_namespace",
+		"create_io_completion_queue",
+		"create_io_submission_queue",
+		"route_msix_or_msi",
 	} {
 		methodByName(t, driver, name)
 	}
@@ -224,20 +230,42 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	}
 	initialize := sourceBetween(t, source, "fn initialize(self, device: PciDevice) -> NvmeDriver {", "\n    fn disable_controller(self)")
 	assertOrderedSubstrings(t, initialize, []string{
+		"let version = controller.read_version()",
+		"if version == 0",
+		"controller.mask_interrupts()",
 		"controller.disable_controller()",
 		"controller.program_admin_queues()",
 		"controller.enable_controller()",
+		"controller.interrupt_routes = controller.route_msix_or_msi()",
+		"let facts = controller.identify_controller()",
+		"controller.identify_namespace_with_controller(namespace_id = 1, controller = facts)",
+		"controller.namespace = controller.storage.namespace",
+		"controller.create_io_completion_queue(",
+		"controller.create_io_submission_queue(",
+		"controller.interrupt_routes = controller.route_msix_or_msi()",
+		"controller.synchronize_foreground_completion_head()",
 	})
 	driverBody := sourceBetween(t, source, "unique driver NvmeDriver {", "\n    fn foreground_storage_path")
-	if strings.Contains(driverBody, "fn identify_controller(self)") {
-		t.Fatalf("NvmeDriver must not retain stub identify_controller")
-	}
-	if strings.Contains(driverBody, "fn identify_namespace(self") {
-		t.Fatalf("NvmeDriver must not retain stub identify_namespace")
+	for _, want := range []string{
+		"storage: NvmeDirectStorage",
+		"bar0: MmioRegion",
+		"interrupt_routes: NvmeInterruptRoutes",
+		"interrupt_target: LocalApic",
+		"self.storage.read_version()",
+		"self.storage.program_admin_queues()",
+		"self.storage.identify_controller()",
+		"self.storage.identify_namespace_with_controller(namespace_id = namespace_id, controller = controller)",
+		"self.interrupt_routes.reapply_msix_table(device = self.device, table = self.bar0, target = self.interrupt_target)",
+		"self.storage.clear_interrupt_masks()",
+	} {
+		if !strings.Contains(driverBody, want) {
+			t.Fatalf("NvmeDriver mirror body missing %q", want)
+		}
 	}
 	directController := sourceBetween(t, source, "fn identify_controller(self) -> NvmeControllerFacts {", "\n    fn identify_namespace")
 	for _, want := range []string{
 		"cdw10 = 1",
+		"self.wait_admin_completion_interrupt(command_id = identify.command_id)",
 		"let vwc = (self.queues.data_buffer.read_u8(offset = 256) & 1) != 0",
 		"self.queues.data_buffer.read_u16(offset = 512)",
 		"self.queues.data_buffer.read_u16(offset = 514)",
@@ -250,11 +278,15 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	directIdentify := sourceBetween(t, source, "fn identify_namespace(self, namespace_id: U32) -> NvmeNamespace {", "\n    fn create_io_completion_queue")
 	assertOrderedSubstrings(t, directIdentify, []string{
 		"let controller = self.identify_controller()",
+		"return self.identify_namespace_with_controller(namespace_id = namespace_id, controller = controller)",
+		"fn identify_namespace_with_controller(self, namespace_id: U32, controller: NvmeControllerFacts) -> NvmeNamespace",
 		"self.queues.data_buffer.zero()",
 		"self.submit_admin_command(",
 		"opcode = NVME_ADMIN_OPCODE_IDENTIFY",
 		"self.wait_admin_completion_interrupt(command_id = identify.command_id)",
 		"let format = self.queues.data_buffer.read_u8(offset = 26) & 0x0F",
+		"if logical_block_size == 0",
+		"self.panic.fail(code = 0xAC080122)",
 		"self.queues.data_buffer.read_u64(offset = 0)",
 		"supports_fua = controller.supports_fua",
 		"atomic_write_unit_blocks = controller.atomic_write_unit_blocks",
@@ -268,8 +300,11 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	assertOrderedSubstrings(t, waitAdmin, []string{
 		"self.disable_cpu_interrupts()",
 		"if self.consume_admin_completion(command_id = command_id)",
-		"self.wait_for_poll_window()",
+		"self.enable_cpu_interrupts()",
+		"self.clear_interrupt_masks()",
+		"self.wait_for_completion_window()",
 		"self.consume_admin_completion(command_id = command_id)",
+		"self.enable_cpu_interrupts()",
 		"self.panic.fail(code = 0xAC080136)",
 	})
 	consumeAdmin := sourceBetween(t, source, "fn consume_admin_completion(self, command_id: U16) -> Bool {", "\n    fn wait_io_completion_interrupt")
@@ -285,6 +320,9 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 			t.Fatalf("admin command completions must be interrupt-waited without polling fallback; found %q", forbidden)
 		}
 	}
+	if strings.Contains(waitAdmin, "wait_for_poll_window()") {
+		t.Fatalf("admin command completions must wait on interrupt windows, not polling windows")
+	}
 	for _, forbidden := range []string{"while scan", "while grace"} {
 		if strings.Contains(waitAdmin, forbidden) || strings.Contains(consumeAdmin, forbidden) {
 			t.Fatalf("admin command completions must be interrupt-waited without polling fallback; found %q", forbidden)
@@ -292,6 +330,10 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	}
 	directInit := sourceBetween(t, source, "fn initialize(self) -> NvmeDirectStorage {", "\n    fn disable_controller(self)")
 	assertOrderedSubstrings(t, directInit, []string{
+		"let version = self.read_version()",
+		"if version == 0",
+		"self.clear_interrupt_masks()",
+		"self.identify_namespace(namespace_id = 1)",
 		"self.create_io_completion_queue(queue_id = 1",
 		"depth = NVME_FOREGROUND_IO_QUEUE_DEPTH",
 		"interrupt_entry = self.foreground_interrupt_entry",
@@ -307,6 +349,7 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	assertOrderedSubstrings(t, createCQ, []string{
 		"interrupt_entry: U32",
 		"let cdw11 = 3 | (interrupt_entry * 65536)",
+		"self.wait_admin_completion_interrupt(command_id = create.command_id)",
 	})
 	queueMemory := sourceBetween(t, source, "data NvmeQueueMemory {", "\n}\n\ndata NvmeQueueMemoryBuilder")
 	for _, want := range []string{"foreground_io_sq", "foreground_io_cq", "background_io_sq", "background_io_cq"} {
@@ -316,11 +359,9 @@ func TestNvmeInitMirrorContract(t *testing.T) {
 	}
 	for _, want := range []string{
 		"const NVME_RESET_TIMEOUT_POLLS: U32 = 100000",
-		"let reset_timeout = NVME_RESET_TIMEOUT_POLLS",
-		"while reset_wait < reset_timeout",
+		"while reset_wait < NVME_RESET_TIMEOUT_POLLS",
 		"const NVME_READY_TIMEOUT_POLLS: U32 = 100000",
-		"let ready_timeout = NVME_READY_TIMEOUT_POLLS",
-		"while ready_wait < ready_timeout",
+		"while ready_wait < NVME_READY_TIMEOUT_POLLS",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("nvme source missing bounded wait shape %q", want)
@@ -359,6 +400,9 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
 	for _, want := range []string{
+		"const NVME_MAX_PRP_TRANSFER_BYTES: U64 = 131072",
+		"const NVME_MAX_PRP_TRANSFER_BLOCKS_512: U32 = 256",
+		"const NVME_MAX_PRP_TRANSFER_BLOCKS_4096: U32 = 32",
 		"return self.submit_data_command(opcode = NVME_OPCODE_READ_U8",
 		"return self.submit_data_command(opcode = NVME_OPCODE_WRITE_U8",
 		"self.panic.fail(code = 0xAC080183)",
@@ -366,6 +410,9 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 		"self.completion_queue.panic.fail(code = 0xAC080185)",
 		"self.completion_queue.panic.fail(code = 0xAC080186)",
 		"self.completion_queue.panic.fail(code = 0xAC080187)",
+		"self.validate_transfer_block_count(block_count = block_count, error_code = 0xAC0801A4)",
+		"self.validate_transfer_block_count(block_count = block_count, error_code = 0xAC0801A5)",
+		"self.validate_transfer_block_count(block_count = block_count, error_code = 0xAC0801A6)",
 		"command_dword12 = command_dword12 | 0x40000000",
 		"return self.submit_data_command(opcode = NVME_OPCODE_FLUSH_U8",
 		"return self.submit_data_command(opcode = NVME_OPCODE_ZONE_APPEND_U8",
@@ -386,6 +433,63 @@ func TestNvmeCommandMirrorContract(t *testing.T) {
 	if strings.Contains(source, "return NvmeSubmission(command_id = 0)") {
 		t.Fatalf("nvme submissions must allocate real command ids")
 	}
+	directReadBlocks := sourceBetween(t, source, "fn submit_io_read_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {", "\n    fn submit_io_write")
+	assertOrderedSubstrings(t, directReadBlocks, []string{
+		"if block_count == 0",
+		"self.panic.fail(code = 0xAC080183)",
+		"if logical_block_size == NVME_LBA_SIZE_512",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_512",
+		"if logical_block_size == NVME_LBA_SIZE_4096",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_4096",
+		"self.panic.fail(code = 0xAC080122)",
+	})
+	directWriteBlocks := sourceBetween(t, source, "fn submit_io_write_blocks(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {", "\n    fn submit_io_flush")
+	assertOrderedSubstrings(t, directWriteBlocks, []string{
+		"if block_count == 0",
+		"self.panic.fail(code = 0xAC080184)",
+		"self.validate_transfer_block_count_for_lba(block_count = block_count, logical_block_size = self.namespace.logical_block_size)",
+	})
+	validateTransfer := sourceBetween(t, source, "fn validate_transfer_block_count(self, block_count: U32) {", "\n    fn wait_admin_completion_interrupt")
+	assertOrderedSubstrings(t, validateTransfer, []string{
+		"self.validate_transfer_block_count_for_lba(block_count = block_count, logical_block_size = self.namespace.logical_block_size)",
+		"if logical_block_size == NVME_LBA_SIZE_512",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_512",
+		"self.panic.fail(code = 0xAC0801A2)",
+		"if logical_block_size == NVME_LBA_SIZE_4096",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_4096",
+		"self.panic.fail(code = 0xAC0801A3)",
+		"self.panic.fail(code = 0xAC080122)",
+	})
+	pathType := sourceBetween(t, source, "driver path NvmeIoPath {", "\n    interrupt receiver")
+	if !strings.Contains(pathType, "logical_block_size: U64") {
+		t.Fatalf("NvmeIoPath must carry logical_block_size for transfer-byte validation")
+	}
+	for _, shape := range []struct {
+		name  string
+		start string
+		end   string
+		code  string
+	}{
+		{name: "path read", start: "fn submit_read(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress) -> NvmeSubmission {", end: "\n    fn submit_write", code: "0xAC0801A4"},
+		{name: "path write", start: "fn submit_write(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {", end: "\n    fn submit_flush", code: "0xAC0801A5"},
+		{name: "path zone append", start: "fn submit_zone_append(self, namespace_id: U32, start_lba: U64, block_count: U32, prp1: PhysicalAddress, fua: Bool) -> NvmeSubmission {", end: "\n    fn submit_data_command", code: "0xAC0801A6"},
+	} {
+		body := sourceBetween(t, source, shape.start, shape.end)
+		assertOrderedSubstrings(t, body, []string{
+			"if block_count == 0",
+			"self.validate_transfer_block_count(block_count = block_count, error_code = " + shape.code + ")",
+		})
+	}
+	pathValidate := sourceBetween(t, source, "fn validate_transfer_block_count(self, block_count: U32, error_code: U64) {", "\n    fn submit_data_command")
+	assertOrderedSubstrings(t, pathValidate, []string{
+		"if self.logical_block_size == NVME_LBA_SIZE_512",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_512",
+		"self.completion_queue.panic.fail(code = error_code)",
+		"if self.logical_block_size == NVME_LBA_SIZE_4096",
+		"if block_count > NVME_MAX_PRP_TRANSFER_BLOCKS_4096",
+		"self.completion_queue.panic.fail(code = error_code)",
+		"self.completion_queue.panic.fail(code = 0xAC080122)",
+	})
 }
 
 func TestNvmeCompletionMirrorContract(t *testing.T) {
@@ -509,12 +613,15 @@ func TestNvmeReplaySourceReadsRecoveredFrontier(t *testing.T) {
 	source := readRepoFile(t, "wrela/machine/x86_64/nvme.wrela")
 	replay := sourceBetween(t, source, "fn read_replay_state(self, foreground: ForegroundStoragePath, completions: TopicSubscription<NvmeCompletionInterrupt>) -> NvmeReplayState {", "\n    fn first_append_durability_mode")
 	assertOrderedSubstrings(t, replay, []string{
-		"self.submit_io_read_blocks(",
+		"self.submit_first_append_read_data_buffer_blocks(",
 		"self.wait_io_completion_interrupt(command_id = read.command_id, completions = completions)",
 		"self.validate_first_append_slot(slot_offset = 0",
 		"self.validate_first_append_slot(slot_offset = WRELA_STORAGE_EVENT_SLOT_SIZE",
 		"self.validate_first_append_orphan_payload()",
-		"let recovered_last_event_id = self.queues.data_buffer.read_u64(offset = WRELA_STORAGE_EVENT_SLOT_SIZE)",
+		"EventRecoveryScanner().recover_slots(",
+		"slot_count = self.first_append_total_slot_positions_for_lba(logical_block_size = logical_block_size)",
+		"if recovery.stop_reason != STORAGE_RECOVERY_STOP_CLEAN_EOF",
+		"let recovered_last_event_id = recovery.last_committed_group_end",
 		"last_event_id = recovered_last_event_id",
 		"projection_watermark = recovered_last_event_id",
 	})

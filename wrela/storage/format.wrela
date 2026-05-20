@@ -116,6 +116,7 @@ data StorageMetrics {
     background_path_owner: U64
     background_path_queue_id: U64
     background_path_vector: U64
+    active_lba_size: U64
     selected_durability_mode: U64
     event_slot_size: U64
     event_header_size: U64

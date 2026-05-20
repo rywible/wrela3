@@ -217,6 +217,7 @@ type StorageReport struct {
 	CoreLinkBackpressureCount        uint64           `json:"core_link_backpressure_count"`
 	NvmePaths                        []NvmePathReport `json:"nvme_paths"`
 	CoreLinks                        []CoreLinkReport `json:"core_links"`
+	MetricFacts                      map[string]bool  `json:"-"`
 }
 
 type NvmePathReport struct {

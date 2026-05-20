@@ -12,7 +12,7 @@ import (
 
 func TestStorageWriterSourceCompiles(t *testing.T) {
 	modules := parseStorageWriterModules(t, `
-module sem.storage_writer_consumer
+	module sem.storage_writer_consumer
 
 use { StorageWriter, PendingAtomicGroup, CommittedAtomicGroup, CommitToken, StorageAppendResult, DurableBlobRef } from storage.writer
 use { UnpublishedBlobRef, PublishedBlobRef } from storage.blob
@@ -23,10 +23,10 @@ data StorageWriterConsumer {
     committed: CommittedAtomicGroup
     token: CommitToken
     blob: UnpublishedBlobRef
-    durable_blob: DurableBlobRef
-    published_blob: PublishedBlobRef
-    result: StorageAppendResult
-}
+	    durable_blob: DurableBlobRef
+	    published_blob: PublishedBlobRef
+	    result: StorageAppendResult
+	}
 `)
 	index := mustBuildIndexAllowingMissingImage(t, modules)
 	_, ds := checkAllowingMissingImage(t, index, modules)
@@ -125,7 +125,9 @@ func TestStorageWriterBlobPublicationUsesStorageBlobRefs(t *testing.T) {
 		"data DurableBlobRef",
 		"unpublished: UnpublishedBlobRef",
 		"data BlobRelocateResult",
+		"class BlobRelocateRequest",
 		"truth: BlobTruth",
+		"proposal: RelocateBlobProposal",
 		"fn publish_blob_ref(self, durable: DurableBlobRef) -> PublishedBlobRef",
 		"return PublishedBlobRef(ref = durable.unpublished.ref)",
 	} {
@@ -163,6 +165,9 @@ func TestStorageWriterDurabilityMirrorContract(t *testing.T) {
 	for _, want := range []string{
 		"if self.durable_frontier < token.last_event_id",
 		"self.durable_frontier = token.last_event_id",
+		"if token.flush_required",
+		"if token.flush_completed",
+		"self.open_batch_slots = 0",
 	} {
 		if !strings.Contains(durable, want) {
 			t.Fatalf("StorageWriter.on_durability_completed missing %q", want)
@@ -183,10 +188,10 @@ data StorageWriterMirror {
     pending: PendingAtomicGroup
     committed: CommittedAtomicGroup
     token: CommitToken
-    durable_blob: DurableBlobRef
-    published_blob: PublishedBlobRef
-    result: StorageAppendResult
-}
+	    durable_blob: DurableBlobRef
+	    published_blob: PublishedBlobRef
+	    result: StorageAppendResult
+	}
 `)
 	index := mustBuildIndexAllowingMissingImage(t, modules)
 	checked, ds := checkAllowingMissingImage(t, index, modules)

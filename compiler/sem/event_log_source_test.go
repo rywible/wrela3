@@ -156,6 +156,55 @@ data RecoveryConsumer {
 		}
 	}
 	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "EventRecoveryScanner"), "validate_group_member")
+	assertMethodExists(t, moduleType(t, checked.Index, "storage.event_log", "EventRecoveryScanner"), "recover_slots")
+	source := readRepoFile(t, "wrela/storage/event_log.wrela")
+	recovery := sourceBetween(t, source, "fn validate_group_member(self, header: EventSlotHeader, expected_event_id: U64, expected_group_len: U32, expected_group_index: U32) -> RecoveryResult {", "\n}\n\nconst STORAGE_SEGMENT_STATE_OPEN_HOT")
+	for _, want := range []string{
+		"header.checksum32 == 0",
+		"header.event_id != expected_event_id",
+		"header.atomic_group_len != expected_group_len",
+		"header.atomic_group_index != expected_group_index",
+		"header.payload_layout_id != 0",
+		"header.stream_id != 0",
+		"header.stream_sequence != 0",
+		"header.payload_length != 0",
+		"expected_event_id + 1",
+	} {
+		if !strings.Contains(recovery, want) {
+			t.Fatalf("EventRecoveryScanner.validate_group_member missing %q", want)
+		}
+	}
+	groupRecovery := sourceBetween(t, source, "fn recover_slots(self, bytes: BoundedBytes, slot_count: U64) -> RecoveryResult {", "\n    fn validate_group_member")
+	for _, want := range []string{
+		"self.header_at(bytes = bytes, slot_index = slot_index)",
+		"self.slot_checksum_valid(bytes = bytes, slot_index = slot_index)",
+		"self.is_reserved_empty_slot(header = header)",
+		"expected_event_id = expected_event_id + 1",
+		"if group_len == 0",
+		"if group_len > STORAGE_MAX_ATOMIC_GROUP_SLOTS",
+		"if slot_index + group_len_u64 > slot_count",
+		"member.event_id != expected_event_id + member_index",
+		"member.atomic_group_len != group_len",
+		"member.atomic_group_index != self.u64_to_u32(value = member_index)",
+		"last_committed_group_end = expected_event_id - 1",
+	} {
+		if !strings.Contains(groupRecovery, want) {
+			t.Fatalf("EventRecoveryScanner.recover_slots missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"fn header_at(self, bytes: BoundedBytes, slot_index: U64) -> EventSlotHeader",
+		"fn slot_checksum_valid(self, bytes: BoundedBytes, slot_index: U64) -> Bool",
+		"fn slot_checksum(self, bytes: BoundedBytes, slot_index: U64) -> U32",
+		"fn slot_byte_for_checksum(self, bytes: BoundedBytes, slot_index: U64, byte_index: U64) -> U8",
+		"if byte_index >= 48",
+		"if byte_index < 52",
+		"return 0",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("EventRecoveryScanner source missing %q", want)
+		}
+	}
 }
 
 func TestEventLogSegmentMirrorContract(t *testing.T) {
@@ -193,6 +242,8 @@ func parseEventLogModules(t *testing.T, consumer string) []*ast.Module {
 	t.Helper()
 	paths := []string{
 		repoPath(t, "wrela/lang/core.wrela"),
+		repoPath(t, "wrela/platform/hardware/panic.wrela"),
+		repoPath(t, "wrela/platform/hardware/bytes.wrela"),
 		repoPath(t, "wrela/storage/format.wrela"),
 		repoPath(t, "wrela/storage/event_log.wrela"),
 	}

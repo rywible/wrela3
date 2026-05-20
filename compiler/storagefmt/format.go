@@ -160,6 +160,29 @@ type EnqueueResult struct {
 	RejectCode     string
 }
 
+type CommitToken struct {
+	FirstEventID        uint64
+	LastEventID         uint64
+	PendingWriteCount   uint64
+	CompletedWriteCount uint64
+	FlushRequired       bool
+	FlushCompleted      bool
+	DurabilityFailed    bool
+}
+
+func (t CommitToken) Acknowledged() bool {
+	if t.DurabilityFailed {
+		return false
+	}
+	if t.CompletedWriteCount < t.PendingWriteCount {
+		return false
+	}
+	if t.FlushRequired && !t.FlushCompleted {
+		return false
+	}
+	return true
+}
+
 type PackedSegment struct {
 	BaseEventID uint64
 	Bytes       []byte
@@ -268,7 +291,7 @@ func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
 
 type OrphanCollector struct {
 	allocated        []Extent
-	acknowledgedRefs map[BlobRef]struct{}
+	acknowledgedRefs map[Extent]struct{}
 }
 
 func NewOrphanCollector(allocated []Extent) *OrphanCollector {
@@ -276,22 +299,22 @@ func NewOrphanCollector(allocated []Extent) *OrphanCollector {
 	copy(extents, allocated)
 	return &OrphanCollector{
 		allocated:        extents,
-		acknowledgedRefs: make(map[BlobRef]struct{}),
+		acknowledgedRefs: make(map[Extent]struct{}),
 	}
 }
 
 func (c *OrphanCollector) MarkAcknowledged(ref BlobRef) {
-	c.acknowledgedRefs[ref] = struct{}{}
+	c.acknowledgedRefs[Extent{StartLBA: ref.StartLBA, BlockCount: ref.BlockCount}] = struct{}{}
 }
 
 func (c *OrphanCollector) MarkUnacknowledged(ref BlobRef) {
-	delete(c.acknowledgedRefs, ref)
+	delete(c.acknowledgedRefs, Extent{StartLBA: ref.StartLBA, BlockCount: ref.BlockCount})
 }
 
 func (c *OrphanCollector) Reclaimable() []Extent {
 	var reclaimable []Extent
 	for _, extent := range c.allocated {
-		if _, ok := c.acknowledgedRefs[BlobRefForExtent(extent.StartLBA, extent.BlockCount)]; ok {
+		if _, ok := c.acknowledgedRefs[extent]; ok {
 			continue
 		}
 		reclaimable = append(reclaimable, extent)
@@ -574,6 +597,31 @@ func (w *WriterPolicy) EnqueueAtomicGroupWithReserved(semanticSlots uint64, rese
 		LastEventID:    last,
 		OpenBatchSlots: open,
 		FlushRequested: flush,
+	}
+}
+
+func (w *WriterPolicy) OnDurabilityCompleted(token CommitToken) EnqueueResult {
+	if !token.Acknowledged() {
+		return EnqueueResult{
+			Accepted:       false,
+			FirstEventID:   token.FirstEventID,
+			LastEventID:    token.LastEventID,
+			OpenBatchSlots: w.OpenBatchSlots,
+			RejectCode:     "SEM0116",
+		}
+	}
+	if w.DurableFrontier < token.LastEventID {
+		w.DurableFrontier = token.LastEventID
+	}
+	if token.FlushRequired && token.FlushCompleted {
+		w.OpenBatchSlots = 0
+	}
+	return EnqueueResult{
+		Accepted:       true,
+		FirstEventID:   token.FirstEventID,
+		LastEventID:    token.LastEventID,
+		OpenBatchSlots: w.OpenBatchSlots,
+		FlushRequested: token.FlushRequired,
 	}
 }
 
