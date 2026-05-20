@@ -140,7 +140,8 @@ func TestNvmeDurabilityMirrorContract(t *testing.T) {
 		"Option.Some(value = completed)",
 		"completed.queue_id != 1",
 		"completed.completed_count > 0",
-		"self.consume_io_completion_after_interrupt(command_id = command_id)",
+		"completed.last_command_id == command_id",
+		"self.synchronize_io_completion_event(completed = completed)",
 		"self.enable_cpu_interrupts()",
 		"self.panic.fail(code = 0xAC080137)",
 	})
@@ -505,8 +506,8 @@ func TestNvmeEventStorageFixtureUsesIdentifiedLBASizeForPaths(t *testing.T) {
 	if got := strings.Count(source, ".nvme_path.logical_block_size = storage.namespace.logical_block_size"); got != 2 {
 		t.Fatalf("fixture path logical block size assignments = %d, want foreground and background from identified namespace", got)
 	}
-	if !strings.Contains(source, "active_lba_size = storage.namespace.logical_block_size") {
-		t.Fatalf("fixture metrics must report the identified namespace LBA size")
+	if !strings.Contains(source, "metrics.active_lba_size = storage.namespace.logical_block_size") {
+		t.Fatalf("fixture runtime metrics must use the identified namespace LBA size")
 	}
 }
 
@@ -569,7 +570,7 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 	})
 	signal := sourceBetween(t, source, "fn signal_completion_interrupt(self) -> NvmeCompletionInterrupt {", "\n    fn drain_completion_queue")
 	assertOrderedSubstrings(t, signal, []string{
-		"return NvmeCompletionInterrupt(queue_id = self.queue_id, completed_count = 1, last_command_id = 0, failed = false)",
+		"return self.drain_completion_queue()",
 	})
 	afterInterruptDrain := sourceBetween(t, source, "fn drain_completion_queue_after_interrupt(self, command_id: U16) -> NvmeCompletionInterrupt {", "\n    fn drain_completion_queue")
 	assertOrderedSubstrings(t, afterInterruptDrain, []string{
@@ -600,9 +601,12 @@ func TestNvmeCompletionMirrorContract(t *testing.T) {
 		"self.wait_for_interrupt_window()",
 		"match completions.try_next()",
 		"Option.Some(value = completed)",
-		"let drained = self.drain_completion_queue_after_interrupt(command_id = command_id)",
-		"return drained",
+		"completed.last_command_id == command_id",
+		"return completed",
 	})
+	if strings.Contains(waitTopic, "drain_completion_queue_after_interrupt(command_id = command_id)") {
+		t.Fatalf("path wait must use the typed interrupt payload instead of re-draining after interrupt")
+	}
 	if strings.Contains(waitTopic, "let fallback = self.drain_completion_queue()") {
 		t.Fatalf("path wait must drain only after a routed interrupt event")
 	}

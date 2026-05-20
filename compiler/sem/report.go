@@ -343,8 +343,8 @@ func appendStorageFacts(r *report.ImageReport, checked *CheckedProgram) {
 	r.Storage.EventUpcastCount = storageMetricOrDefault(metrics, "event_upcast_count", storageEventUpcastCount(checked.Storage))
 	r.Storage.ProjectionUpcastCount = storageMetric(metrics, "projection_upcast_count")
 	r.Storage.ProjectionRebuildCount = storageMetric(metrics, "projection_rebuild_count")
-	r.Storage.StreamDirectoryCacheHits = storageMetricOrDefault(metrics, "stream_directory_cache_hits", 1)
-	r.Storage.StreamDirectoryCacheMisses = storageMetricOrDefault(metrics, "stream_directory_cache_misses", 0)
+	r.Storage.StreamDirectoryCacheHits = storageMetric(metrics, "stream_directory_cache_hits")
+	r.Storage.StreamDirectoryCacheMisses = storageMetric(metrics, "stream_directory_cache_misses")
 	r.Storage.StreamDirectoryCacheHitRateX1000 = storageCacheHitRateX1000(metrics)
 	r.Storage.CoreLinkCommittedGroups = storageMetric(metrics, "core_link_committed_groups")
 	r.Storage.CoreLinkBackpressureCount = storageMetric(metrics, "core_link_backpressure_count")
@@ -412,7 +412,7 @@ func storageCacheHitRateX1000(metrics map[string]uint64) uint64 {
 		}
 		return hits * 1000 / total
 	}
-	return 1000
+	return 0
 }
 
 func storageMetricsFacts(checked *CheckedProgram) map[string]uint64 {
@@ -543,29 +543,11 @@ func storageMetricUint(checked *CheckedProgram, moduleName string, expr ast.Expr
 		}
 		return value.Value, true
 	case *ast.FieldExpr:
-		return storageMetricFieldUint(e)
+		return storagePathVectorValue(e)
 	case *ast.CallExpr:
 		return storageMetricCallUint(checked, e, knownFacts)
 	}
 	return 0, false
-}
-
-func storageMetricFieldUint(field *ast.FieldExpr) (uint64, bool) {
-	if strings.Join(storageMetricFieldPath(field), ".") == "storage.namespace.logical_block_size" {
-		return storagefmt.EventSlotSize, true
-	}
-	return storagePathVectorValue(field)
-}
-
-func storageMetricFieldPath(expr ast.Expr) []string {
-	switch e := expr.(type) {
-	case *ast.NameExpr:
-		return []string{e.Name}
-	case *ast.FieldExpr:
-		return append(storageMetricFieldPath(e.Base), e.Field)
-	default:
-		return nil
-	}
 }
 
 func storageMetricCallUint(checked *CheckedProgram, call *ast.CallExpr, knownFacts map[string]uint64) (uint64, bool) {
@@ -951,8 +933,9 @@ func ValidateStorageReportContent(r report.ImageReport) []diag.Diagnostic {
 		{hasFact("projection_lag_events"), "projection_lag_events"},
 		{hasFact("projection_upcast_count"), "projection_upcast_count"},
 		{hasFact("projection_rebuild_count"), "projection_rebuild_count"},
-		{r.Storage.StreamDirectoryCacheHits+r.Storage.StreamDirectoryCacheMisses != 0, "stream_directory_cache_hits"},
-		{hasFact("stream_directory_cache_hit_rate_ppm") || hasFact("stream_directory_cache_hits") || hasFact("stream_directory_cache_misses") || r.Storage.StreamDirectoryCacheHitRateX1000 != 0, "stream_directory_cache_hit_rate_x1000"},
+		{hasFact("stream_directory_cache_hits"), "stream_directory_cache_hits"},
+		{hasFact("stream_directory_cache_misses"), "stream_directory_cache_misses"},
+		{hasFact("stream_directory_cache_hit_rate_ppm") || (hasFact("stream_directory_cache_hits") && hasFact("stream_directory_cache_misses")), "stream_directory_cache_hit_rate_x1000"},
 		{hasFact("core_link_committed_groups"), "core_link_committed_groups"},
 		{hasFact("core_link_backpressure_count"), "core_link_backpressure_count"},
 		{r.Storage.NvmePaths != nil, "nvme_paths"},

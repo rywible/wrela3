@@ -156,6 +156,7 @@ func TestStorageWriterDurabilityMirrorContract(t *testing.T) {
 	assertTypeFields(t, token, map[string]string{
 		"pending_write_count":   "U64",
 		"completed_write_count": "U64",
+		"batch_submitted":       "Bool",
 		"flush_required":        "Bool",
 		"flush_completed":       "Bool",
 		"durability_failed":     "Bool",
@@ -165,8 +166,7 @@ func TestStorageWriterDurabilityMirrorContract(t *testing.T) {
 	for _, want := range []string{
 		"if self.durable_frontier < token.last_event_id",
 		"self.durable_frontier = token.last_event_id",
-		"if token.flush_required",
-		"if token.flush_completed",
+		"if token.batch_submitted",
 		"self.open_batch_slots = 0",
 	} {
 		if !strings.Contains(durable, want) {

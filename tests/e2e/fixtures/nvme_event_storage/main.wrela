@@ -82,6 +82,11 @@ class NvmeReplayReporter {
             }
         }
         self.serial_path.write(self.memory.bytes(value = "NVME_STORAGE_REPLAY_OK last_event_id=1\n"))
+        if storage.namespace.logical_block_size == 4096 {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=4096\n"))
+        } else {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=512\n"))
+        }
         self.serial_path.write(self.memory.bytes(value = "projection_watermark=1\n"))
         self.serial_path.write(self.memory.bytes(value = "NVME_ORPHAN_COLLECTION_OK\n"))
     }
@@ -106,6 +111,7 @@ class NvmeAppendReporter {
             last_event_id = append.last_event_id,
             pending_write_count = durable.pending_write_count,
             completed_write_count = durable.completed_write_count,
+            batch_submitted = append.flush_requested,
             flush_required = durable.flush_required,
             flush_completed = durable.flush_completed,
             durability_failed = durable.durability_failed
@@ -113,6 +119,11 @@ class NvmeAppendReporter {
         let committed = writer.publish_committed_group(token = token)
         if committed.last_event_id != 1 {
             BootPanic().fail(code = 0xAC08014A)
+        }
+        if storage.namespace.logical_block_size == 4096 {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=4096\n"))
+        } else {
+            self.serial_path.write(self.memory.bytes(value = "active_lba_size=512\n"))
         }
         self.serial_path.write(self.memory.bytes(value = "NVME_STORAGE_APPEND_OK last_event_id=1\n"))
     }
@@ -333,7 +344,7 @@ image NvmeEventStorageImage {
             background_path_owner = maintenance_slot.id,
             background_path_queue_id = 2,
             background_path_vector = owned_nvme_interrupt_routes.background_vector,
-            active_lba_size = storage.namespace.logical_block_size,
+            active_lba_size = 512,
             selected_durability_mode = storage.first_append_durability_mode_value(),
             event_slot_size = STORAGE_EVENT_SLOT_SIZE,
             event_header_size = STORAGE_EVENT_HEADER_SIZE,
@@ -363,6 +374,7 @@ image NvmeEventStorageImage {
             projection_upcast_count = 1,
             projection_rebuild_count = 1
         )
+        metrics.active_lba_size = storage.namespace.logical_block_size
         let writer = StorageWriter(
             foreground = foreground,
             background = background,

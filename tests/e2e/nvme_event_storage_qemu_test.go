@@ -17,6 +17,7 @@ func TestNvmeEventStorageQEMU(t *testing.T) {
 	createSparseRawDisk(t, disk, nvmeStorageDiskBytes)
 	out := runStorageQEMU(t, disk, "first")
 	for _, want := range []string{
+		"active_lba_size=512",
 		"NVME_STORAGE_APPEND_OK last_event_id=1",
 		"NVME_STORAGE_DONE",
 	} {
@@ -33,10 +34,14 @@ func TestNvmeEventStorageReplayQEMU(t *testing.T) {
 	if !strings.Contains(first, "NVME_STORAGE_APPEND_OK last_event_id=1") {
 		t.Fatalf("first boot missing append marker:\n%s", first)
 	}
+	if !strings.Contains(first, "active_lba_size=512") {
+		t.Fatalf("first boot missing 512-byte LBA marker:\n%s", first)
+	}
 	assertFirstAppendEventSlots(t, disk)
 	second := runStorageQEMU(t, disk, "replay")
 	for _, want := range []string{
 		"NVME_STORAGE_REPLAY_OK last_event_id=1",
+		"active_lba_size=512",
 		"projection_watermark=1",
 		"NVME_ORPHAN_COLLECTION_OK",
 	} {
@@ -62,11 +67,15 @@ func TestNvmeEventStorageReplayQEMU4KiBLBA(t *testing.T) {
 	if !strings.Contains(first, "NVME_STORAGE_APPEND_OK last_event_id=1") {
 		t.Fatalf("first boot missing append marker:\n%s", first)
 	}
+	if !strings.Contains(first, "active_lba_size=4096") {
+		t.Fatalf("first boot missing 4096-byte LBA marker:\n%s", first)
+	}
 	assertFirstAppendEventSlots(t, disk)
 	assertFirstAppendReservedEmptySlots(t, disk)
 	second := runStorageQEMUWithBlockSize(t, disk, "replay", 4096)
 	for _, want := range []string{
 		"NVME_STORAGE_REPLAY_OK last_event_id=1",
+		"active_lba_size=4096",
 		"projection_watermark=1",
 		"NVME_ORPHAN_COLLECTION_OK",
 	} {

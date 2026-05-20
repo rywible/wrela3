@@ -24,6 +24,9 @@ func TestStorageMetricsReportPopulation(t *testing.T) {
 			ast.NamedArg{Name: "device_media_write_bytes", Value: &ast.IntLiteral{Value: "512"}},
 			ast.NamedArg{Name: "blob_orphan_bytes", Value: &ast.IntLiteral{Value: "448"}},
 			ast.NamedArg{Name: "projection_lag_events", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "stream_directory_cache_hits", Value: &ast.IntLiteral{Value: "1"}},
+			ast.NamedArg{Name: "stream_directory_cache_misses", Value: &ast.IntLiteral{Value: "0"}},
+			ast.NamedArg{Name: "stream_directory_cache_hit_rate_ppm", Value: &ast.IntLiteral{Value: "1000000"}},
 			ast.NamedArg{Name: "core_link_committed_groups", Value: &ast.IntLiteral{Value: "1"}},
 			ast.NamedArg{Name: "core_link_backpressure_count", Value: &ast.IntLiteral{Value: "0"}},
 			ast.NamedArg{Name: "projection_upcast_count", Value: &ast.IntLiteral{Value: "1"}},
@@ -307,16 +310,19 @@ func TestStorageReportDoesNotSynthesizeRequiredRuntimeMetrics(t *testing.T) {
 
 	r := BuildImageReport(checked)
 	for name, got := range map[string]uint64{
-		"active_lba_size":              r.Storage.ActiveLBASize,
-		"append_latency_p50_us":        r.Storage.AppendLatencyP50US,
-		"append_latency_p99_us":        r.Storage.AppendLatencyP99US,
-		"device_reported_media_writes": r.Storage.DeviceReportedMediaWrites,
-		"media_write_bytes":            r.Storage.MediaWriteBytes,
-		"blob_orphan_bytes":            r.Storage.BlobOrphanBytes,
-		"projection_lag_events":        r.Storage.ProjectionLagEvents,
-		"projection_upcast_count":      r.Storage.ProjectionUpcastCount,
-		"projection_rebuild_count":     r.Storage.ProjectionRebuildCount,
-		"core_link_committed_groups":   r.Storage.CoreLinkCommittedGroups,
+		"active_lba_size":                       r.Storage.ActiveLBASize,
+		"append_latency_p50_us":                 r.Storage.AppendLatencyP50US,
+		"append_latency_p99_us":                 r.Storage.AppendLatencyP99US,
+		"device_reported_media_writes":          r.Storage.DeviceReportedMediaWrites,
+		"media_write_bytes":                     r.Storage.MediaWriteBytes,
+		"blob_orphan_bytes":                     r.Storage.BlobOrphanBytes,
+		"projection_lag_events":                 r.Storage.ProjectionLagEvents,
+		"projection_upcast_count":               r.Storage.ProjectionUpcastCount,
+		"projection_rebuild_count":              r.Storage.ProjectionRebuildCount,
+		"stream_directory_cache_hits":           r.Storage.StreamDirectoryCacheHits,
+		"stream_directory_cache_misses":         r.Storage.StreamDirectoryCacheMisses,
+		"stream_directory_cache_hit_rate_x1000": r.Storage.StreamDirectoryCacheHitRateX1000,
+		"core_link_committed_groups":            r.Storage.CoreLinkCommittedGroups,
 	} {
 		if got != 0 {
 			t.Fatalf("%s was synthesized as %d; required runtime metrics must come from facts", name, got)
@@ -334,6 +340,9 @@ func TestStorageReportMissingPlanRequiredMetricsEmitsSEM0124(t *testing.T) {
 		"projection_lag_events",
 		"projection_upcast_count",
 		"projection_rebuild_count",
+		"stream_directory_cache_hits",
+		"stream_directory_cache_misses",
+		"stream_directory_cache_hit_rate_x1000",
 		"core_link_committed_groups",
 		"core_link_backpressure_count",
 	} {

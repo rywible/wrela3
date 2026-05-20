@@ -466,8 +466,8 @@ func TestDirectoryProjectionAppliesKnownFileEvents(t *testing.T) {
 func TestDirectoryProjectionIgnoresUnknownOnlyGroupWatermark(t *testing.T) {
 	p := DirectoryProjection{Watermark: 6}
 	p.ApplyGroup(CommittedGroup{LastEventID: 9}, []Event{{TypeID: 9999, FileID: 8}})
-	if p.Watermark != 6 {
-		t.Fatalf("watermark = %d, want unchanged 6", p.Watermark)
+	if p.Watermark != 9 {
+		t.Fatalf("watermark = %d, want 9", p.Watermark)
 	}
 	if _, ok := p.Files[8]; ok {
 		t.Fatalf("unknown event created file 8: %#v", p.Files[8])
@@ -579,12 +579,49 @@ func TestStorageWriterClearsFlushedBatchAfterDurability(t *testing.T) {
 		LastEventID:         63,
 		PendingWriteCount:   1,
 		CompletedWriteCount: 1,
+		BatchSubmitted:      true,
 		FlushRequired:       true,
 		FlushCompleted:      true,
 		DurabilityFailed:    false,
 	})
 	if !got.Accepted || got.OpenBatchSlots != 0 || writer.OpenBatchSlots != 0 {
 		t.Fatalf("durability completion = %#v, writer = %#v; want flushed slots cleared", got, writer)
+	}
+}
+
+func TestStorageWriterClearsSubmittedFUABatchAfterDurability(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: StorageTargetBatchSlots}
+
+	got := writer.OnDurabilityCompleted(CommitToken{
+		FirstEventID:        0,
+		LastEventID:         63,
+		PendingWriteCount:   1,
+		CompletedWriteCount: 1,
+		BatchSubmitted:      true,
+		FlushRequired:       false,
+		FlushCompleted:      false,
+		DurabilityFailed:    false,
+	})
+	if !got.Accepted || got.OpenBatchSlots != 0 || writer.OpenBatchSlots != 0 {
+		t.Fatalf("durability completion = %#v, writer = %#v; want submitted FUA batch slots cleared", got, writer)
+	}
+}
+
+func TestStorageWriterKeepsOpenSlotsForUnsubmittedAppend(t *testing.T) {
+	writer := WriterPolicy{OpenBatchSlots: 2}
+
+	got := writer.OnDurabilityCompleted(CommitToken{
+		FirstEventID:        0,
+		LastEventID:         1,
+		PendingWriteCount:   1,
+		CompletedWriteCount: 1,
+		BatchSubmitted:      false,
+		FlushRequired:       false,
+		FlushCompleted:      false,
+		DurabilityFailed:    false,
+	})
+	if !got.Accepted || got.OpenBatchSlots != 2 || writer.OpenBatchSlots != 2 {
+		t.Fatalf("durability completion = %#v, writer = %#v; want unsubmitted slots preserved", got, writer)
 	}
 }
 

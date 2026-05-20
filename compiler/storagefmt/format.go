@@ -165,6 +165,7 @@ type CommitToken struct {
 	LastEventID         uint64
 	PendingWriteCount   uint64
 	CompletedWriteCount uint64
+	BatchSubmitted      bool
 	FlushRequired       bool
 	FlushCompleted      bool
 	DurabilityFailed    bool
@@ -261,7 +262,6 @@ func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
 	if p.Files == nil {
 		p.Files = map[uint64]FileState{}
 	}
-	applied := false
 	for _, event := range events {
 		state := p.Files[event.FileID]
 		switch event.TypeID {
@@ -272,28 +272,22 @@ func (p *DirectoryProjection) ApplyGroup(group CommittedGroup, events []Event) {
 			state.Deleted = false
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
-			applied = true
 		case 1002:
 			state.ParentID = event.ParentID
 			state.NameRef = event.NameRef
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
-			applied = true
 		case 1003:
 			state.CurrentBlobRef = event.BlobRef
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
-			applied = true
 		case 1004:
 			state.Deleted = true
 			state.StreamSequence = event.StreamSequence
 			p.Files[event.FileID] = state
-			applied = true
 		}
 	}
-	if applied {
-		p.Watermark = group.LastEventID
-	}
+	p.Watermark = group.LastEventID
 }
 
 type OrphanCollector struct {
@@ -620,7 +614,7 @@ func (w *WriterPolicy) OnDurabilityCompleted(token CommitToken) EnqueueResult {
 	if w.DurableFrontier < token.LastEventID {
 		w.DurableFrontier = token.LastEventID
 	}
-	if token.FlushRequired && token.FlushCompleted {
+	if token.BatchSubmitted {
 		w.OpenBatchSlots = 0
 	}
 	return EnqueueResult{

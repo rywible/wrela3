@@ -26,6 +26,7 @@ data CommitToken {
     last_event_id: U64
     pending_write_count: U64
     completed_write_count: U64
+    batch_submitted: Bool
     flush_required: Bool
     flush_completed: Bool
     durability_failed: Bool
@@ -121,10 +122,8 @@ data StorageWriter {
         if self.durable_frontier < token.last_event_id {
             self.durable_frontier = token.last_event_id
         }
-        if token.flush_required {
-            if token.flush_completed {
-                self.open_batch_slots = 0
-            }
+        if token.batch_submitted {
+            self.open_batch_slots = 0
         }
         return StorageAppendResult(accepted = true, first_event_id = token.first_event_id, last_event_id = token.last_event_id, open_batch_slots = self.open_batch_slots, flush_requested = token.flush_required, reject_code = 0)
     }
